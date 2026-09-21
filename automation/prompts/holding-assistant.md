@@ -16,7 +16,7 @@ WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY
 
 当本 Prompt 要求调用 QuantPro Collector、但当前运行上下文未直接显示所需工具时，必须先执行一次显式插件/工具发现与加载，目标为 `QuantPro_Collector`。只有发现/加载失败、加载后仍缺失必需工具，或实际调用返回不可用/鉴权/协议错误时，才允许按 BLOCKER 处理。工具懒加载或未预注入本身不算故障。
 
-Collector 的行情、LIVE 持仓、Research replica 绝不能由 QuantPro RESEARCH/LIVE 内部 MCP、网页行情、聊天记忆、历史报告或静态持仓替代。唯一例外是下文明确规定的 **market-ledger compatibility bridge**：当且仅当当前 ChatGPT Connector 快照尚未暴露 `get_market_checkpoints` / `append_market_checkpoint` 时，允许通过 QuantPro RESEARCH 的既有 `run_process` 调用固定 CLI；它只运输同一 Issue #2 账本操作，不改变 Collector 作为持仓事实源的地位。
+Collector 的行情、LIVE 持仓、Research replica 绝不能由 QuantPro RESEARCH/LIVE 内部 MCP、网页行情、聊天记忆、历史报告或静态持仓替代。market-ledger 是独立的状态运输层：生产唯一正式路径为 QuantPro RESEARCH 的既有 `run_process` 调用固定 `scripts/market-ledger-cli.mjs`。该 CLI 只运输固定 Issue #2 的账本操作，不改变 Collector 作为持仓事实源的地位。
 
 ## 生产数据强制链路
 
@@ -51,29 +51,24 @@ Collector 的行情、LIVE 持仓、Research replica 绝不能由 QuantPro RESEA
 ```
 
 Issue #2 是 append-only 市场状态审计账本。Scheduled Task 不得直接分页 GitHub，
-也不依赖 GitHub Plugin / Connector 读取或写入运行态。market-ledger 有两条等价运输路径：
+也不依赖 GitHub Plugin / Connector 读取或写入运行态。market-ledger **唯一生产运输路径**：
 
-1. **原生路径（优先）**
-   - `get_market_checkpoints(trading_date, scheduled_slot)`
-   - `append_market_checkpoint(checkpoint)`
-2. **兼容桥（仅当当前 Connector 快照没有上述原生工具时）**
-   - 显式发现/加载 `QuantPro_RESEARCH`；
-   - 调用其 `runtime_status(summary_only=true)`，只选择在线 RESEARCH Runner；若无法唯一确定 RESEARCH Runner 则 BLOCKER；
-   - 用 `work_on_project(client_id=<该 Runner>, path="D:\\QuantPro\\cn-hk-quotes-mcp", instruction="只建立 market-ledger compatibility bridge 执行上下文；禁止编辑、提交、部署或执行其他命令。", include_project_instructions=false, include_workflow_guidance=false)` 获取该固定仓库的 project；
-   - 读取时仅允许 `run_process` 执行：
-     `node.exe --experimental-strip-types scripts/market-ledger-cli.mjs get --trading-date <YYYY-MM-DD> --scheduled-slot <semantic_slot>`，`purpose=operation`；
-   - 写入时仅允许 `run_process` 执行：
-     `node.exe --experimental-strip-types scripts/market-ledger-cli.mjs append`，`purpose=operation`，并把完整 checkpoint JSON 通过 `stdin` 传入；
-   - 禁止 `run_shell`、禁止模型直接调用 `gh`、禁止传 repo/issue/token、禁止执行其他脚本或命令。
+1. 显式发现/加载 `QuantPro_RESEARCH`；
+2. 调用 `runtime_status(summary_only=true)`，只选择在线 RESEARCH Runner；若无法唯一确定 RESEARCH Runner 则 BLOCKER；
+3. 用 `work_on_project(client_id=<该 Runner>, path="D:\\QuantPro\\cn-hk-quotes-mcp", instruction="只建立 market-ledger 执行上下文；禁止编辑、提交、部署或执行其他命令。", include_project_instructions=false, include_workflow_guidance=false)` 获取固定仓库 project；
+4. 读取时仅允许 `run_process` 执行：
+   `node.exe --experimental-strip-types scripts/market-ledger-cli.mjs get --trading-date <YYYY-MM-DD> --scheduled-slot <semantic_slot>`，`purpose=operation`；
+5. 写入时仅允许 `run_process` 执行：
+   `node.exe --experimental-strip-types scripts/market-ledger-cli.mjs append`，`purpose=operation`，并把完整 checkpoint JSON 通过 `stdin` 传入；
+6. 禁止 `run_shell`、禁止模型直接调用 `gh`、禁止传 repo/issue/token、禁止执行其他脚本或命令。
 
-兼容 CLI 内部固定复用同一 `src/market-ledger.ts`：repo 固定
+固定 CLI 内部复用同一 `src/market-ledger.ts`：repo 固定
 `zhushihao/quantpro-collector`、Issue 固定 `#2`，完整执行分页、exact schema、
 幂等查重、previous checkpoint / preopen 链校验、append 与写后回读。CLI 内部从
 RESEARCH 机现有 `gh` keyring 读取凭据，token 不得出现在模型输入、输出或日志正文。
 
-原生路径和兼容桥返回的业务状态语义必须一致。兼容桥不可用、固定 project/CLI 不存在、
-CLI 退出非零、返回非法 JSON 或账本状态冲突时，按与原生接口相同的 BLOCKER 处理；
-不得降级为直接 GitHub 网页读写。
+固定 project/CLI 不存在、RESEARCH Runner 不可用、CLI 退出非零、返回非法 JSON
+或账本状态冲突时按 BLOCKER 处理；不得降级为直接 GitHub 网页读写，也不得寻找其他运输路径。
 
 有效 `holding-assistant` checkpoint 继续使用既有
 `premarket_plan_batch_v1`（PREOPEN）或
@@ -86,11 +81,10 @@ CLI 退出非零、返回非法 JSON 或账本状态冲突时，按与原生接�
 `IDEMPOTENT_REPLAY`；同 key 不同内容返回 `CHECKPOINT_CONFLICT`，不得覆盖历史。
 只有 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算本时点已持久化。
 
-`WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY` 只授权上述固定 Issue #2 的窄 append，
-包括原生 Collector 路径或固定 RESEARCH compatibility CLI 两种运输方式。
+`WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY` 只授权上述固定 RESEARCH CLI 对 Issue #2 的窄 append。
 不得传入或请求 repo、issue、GitHub token；不得使用任何通用 GitHub 写能力；
-不得借 compatibility bridge 执行任意 shell、任意脚本、Research Job 写入或其他目标。
-Research 仍为只读：不得调用 `claim_research_job`、`submit_research_result_proposal`
+不得借 market-ledger 运输执行任意 shell、任意脚本、Research Job 写入或其他目标。
+Research Job 仍为只读：不得调用 `claim_research_job`、`submit_research_result_proposal`
 或 `defer_research_job`。
 
 对每个 `ACTIVE` 实盘持仓实际调用 `get_market_signal_state`。只接受本轮返回的
@@ -140,8 +134,8 @@ A 股尚未连续交易。事实窗口统一为：**上一交易日正式 CLOSE 
 - 为每个重点 ACTIVE 持仓建立 1-2 个今日 Action Gate；
 - 高优先级非持仓候选只有在产业转强 R1 / 公司确认 R2 / 等待市场确认 R3 等状态确有依据时才列入观察。
 
-将 Gate 组装为 `premarket_plan_batch_v1` checkpoint，并调用
-`append_market_checkpoint` 持久化。每个 Gate 必须保存不可变的
+将 Gate 组装为 `premarket_plan_batch_v1` checkpoint，并通过固定 market-ledger CLI
+持久化。每个 Gate 必须保存不可变的
 `action_gate_id` 与 `original_condition`；09:10 不得写当日价格、成交、
 资金、筹码或 R 状态迁移。
 
@@ -188,8 +182,8 @@ Recovery 必须明确是“10:10 补建盘前框架”，不能声称重建了 0
 - 利好/利空后的正负反馈；
 - 超跌反弹与独立超额的区别。
 
-每个盘中时点都调用 `append_market_checkpoint` 持久化检查点，即使无用户通知。
-严格 Fresh-Delta 只能相对本轮 `get_market_checkpoints` 返回的
+每个盘中时点都通过固定 market-ledger CLI 持久化检查点，即使无用户通知。
+严格 Fresh-Delta 只能相对本轮 market-ledger 读取结果中的
 `previous_checkpoint` 计算；无上一检查点时写“无可比上一 checkpoint，
 不得声称严格 Fresh-Delta”。单个交易日只能称“单日显著相对超额”，不得称
 “持续独立超额”。
@@ -208,8 +202,8 @@ Recovery 必须明确是“10:10 补建盘前框架”，不能声称重建了 0
 - 输出下一交易日验证点。
 
 必须使用本轮 market-ledger 读取结果中的同日原始 PREOPEN Gate
-`action_gate_id` 与 `original_condition` 后再调用 `append_market_checkpoint`
-持久化 CLOSE。缺少 PREOPEN、Collector 返回账本冲突、mapping version 变化或链冲突时，
+`action_gate_id` 与 `original_condition` 后再通过固定 market-ledger CLI
+持久化 CLOSE。缺少 PREOPEN、market-ledger 返回账本冲突、mapping version 变化或链冲突时，
 结果只能为 `INCONCLUSIVE`；不得伪造精确核对或严格 Fresh-Delta。
 
 ## 状态链与证据纪律
@@ -243,7 +237,7 @@ Fresh-Delta：只处理尚未被市场充分交易的新增变化。旧财报、
 
 ## 错误分级
 
-- BLOCKER：Collector 核心服务不可用；认证或 `market:read` 失败；LIVE overlay 不可用；universe 不新鲜；portfolio 非 LIVE_COMPLETE；原生 market-ledger 与允许的 compatibility bridge 都不可用；market-ledger 返回 CHECKPOINT_CONFLICT；checkpoint 持久化失败或链冲突；正式收盘关键数据无法确认；P0 数据质量问题。
+- BLOCKER：Collector 核心服务不可用；认证或 `market:read` 失败；LIVE overlay 不可用；universe 不新鲜；portfolio 非 LIVE_COMPLETE；固定 market-ledger CLI 运输不可用；market-ledger 返回 CHECKPOINT_CONFLICT；checkpoint 持久化失败或链冲突；正式收盘关键数据无法确认；P0 数据质量问题。
 - WARNING：非关键历史数据缺口、局部 source fallback、Research backlog 但当前生产链仍可用。
 - INFO：正常运行或无重要变化。
 

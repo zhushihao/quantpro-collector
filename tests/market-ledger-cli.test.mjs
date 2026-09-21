@@ -37,7 +37,7 @@ function harness(overrides = {}) {
 	};
 }
 
-test("compat get uses fixed market-ledger API without exposing credential", async () => {
+test("market-ledger get uses fixed transport without exposing credential", async () => {
 	const h = harness({
 		getMarketCheckpoints: async (input) => {
 			assert.equal(input.token, "secret-token-that-must-not-leak");
@@ -56,7 +56,7 @@ test("compat get uses fixed market-ledger API without exposing credential", asyn
 	assert.equal(h.stdout.join("\n").includes("secret-token"), false);
 });
 
-test("compat append accepts checkpoint only from stdin and keeps target fixed", async () => {
+test("market-ledger append accepts checkpoint only from stdin and keeps target fixed", async () => {
 	const h = harness({
 		readStdin: async () => JSON.stringify(checkpoint),
 		appendMarketCheckpoint: async (input) => {
@@ -72,7 +72,7 @@ test("compat append accepts checkpoint only from stdin and keeps target fixed", 
 	assert.equal(h.stdout.join("\n").includes("secret-token"), false);
 });
 
-test("compat bridge rejects repo issue token and arbitrary append arguments", async () => {
+test("market-ledger transport rejects repo issue token and arbitrary append arguments", async () => {
 	for (const args of [
 		["get", "--repo", "other/repo", "--scheduled-slot", "09:10"],
 		["get", "--trading-date", "2026-09-21", "--issue", "99"],

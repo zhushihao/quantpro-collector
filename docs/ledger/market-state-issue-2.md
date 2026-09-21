@@ -7,9 +7,9 @@
 
 - GitHub Issue：`zhushihao/quantpro-collector#2`
 - 物理存储：append-only Issue Comment；不覆盖、编辑或删除历史评论。
-- 生产读取：Scheduled Task 只调用 Collector `get_market_checkpoints`，由服务端完成 GitHub comments 分页、过滤和链解析。
-- 生产写入：Scheduled Task 只调用 Collector `append_market_checkpoint`，由服务端固定 append 到本 Issue 并写后回读；模型不接触 GitHub token，也不依赖 GitHub Plugin / Connector。
-- 兼容桥：若个人开发者 ChatGPT Connector 的冻结工具快照尚未暴露上述新增 action，可临时通过已批准的 QuantPro RESEARCH `run_process` 调用固定 `scripts/market-ledger-cli.mjs`。CLI 复用同一 `src/market-ledger.ts`，目标仍固定本 Issue，不接受 repo/issue/token 参数；模型不得直接调用 `gh` 或任意 shell。兼容桥仅解决 Connector schema 刷新问题，不改变账本语义。
+- 生产读取：Scheduled Task 只通过 QuantPro RESEARCH `run_process` 调用固定 `scripts/market-ledger-cli.mjs get`，由 CLI 完成 GitHub comments 分页、过滤和链解析。
+- 生产写入：Scheduled Task 只通过同一固定 CLI 的 `append` 命令写本 Issue 并写后回读；模型不接触 GitHub token，也不依赖 GitHub Plugin / Connector。
+- 该 CLI 是唯一生产运输路径，复用同一 `src/market-ledger.ts`，目标固定本 Issue，不接受 repo/issue/token 参数；模型不得直接调用 `gh` 或任意 shell。
 - 行情原始事实：Issue #1；不是状态账本。
 - 产业/公司 Thesis：Issue #3；不是 Action Gate 或市场观察账本。
 - QuantPro #28：生产 Prompt 注册表；QuantPro #30：工程验收；两者都不是运行状态。
@@ -65,9 +65,9 @@ PREOPEN 的 records 还必须含 1–2 个 Action Gate；每个 Gate 保存不�
 
 ## 状态链和幂等
 
-1. `get_market_checkpoints` 在 Collector 服务端完整分页读取同日有效评论和上一交易日最后有效 CLOSE；Scheduled Task 不自行分页 GitHub。服务端分页/解析失败即状态链未知。
-2. `append_market_checkpoint` 写前以 `idempotency_key` 查重。相同 key 且内容相同返回 `IDEMPOTENT_REPLAY`；相同 key 内容不同为 `CHECKPOINT_CONFLICT`。
-3. `append_market_checkpoint` 写入后必须由服务端回读 GitHub comment id、URL、创建时间及 payload；回读一致才返回 `PERSISTED`。
+1. 固定 market-ledger CLI 读取时完整分页同日有效评论和上一交易日最后有效 CLOSE；Scheduled Task 不自行分页 GitHub。分页/解析失败即状态链未知。
+2. 固定 market-ledger CLI 写前以 `idempotency_key` 查重。相同 key 且内容相同返回 `IDEMPOTENT_REPLAY`；相同 key 内容不同为 `CHECKPOINT_CONFLICT`。
+3. 固定 market-ledger CLI 写入后必须回读 GitHub comment id、URL、创建时间及 payload；回读一致才返回 `PERSISTED`。
 4. 每个 INTRADAY 都要写 checkpoint，即使没有用户通知；它引用上一个成功 checkpoint。
    没有上一个 checkpoint 时，不能声称严格 Fresh-Delta。
 5. CLOSE 必须回读原始 PREOPEN Gate 和完整同日链。PREOPEN 缺失、链冲突、mapping

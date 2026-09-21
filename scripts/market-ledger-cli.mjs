@@ -58,7 +58,7 @@ function safeErrorPayload(error) {
 	}
 	return {
 		status: "MARKET_LEDGER_UNAVAILABLE",
-		message: "market ledger compatibility bridge failed",
+		message: "market ledger transport failed",
 	};
 }
 

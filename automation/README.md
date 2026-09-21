@@ -10,9 +10,9 @@
 
 1. Scheduled Task 本身保存完整业务 Prompt + 对应 Guidance；运行时不依赖公开 Web/GitHub/Collector 来加载配置。
 2. Git `production.json` 仅用于审计“当前正式版本应来自哪个 exact ref”，不属于运行时必需链路。
-3. Collector 提供业务数据、LIVE facts、Research replica / Research Job 协议，以及 holding-assistant 的结构化 market-ledger 语义；不得承载或分发 Automation Prompt。
+3. Collector 提供业务数据、LIVE facts、Research replica / Research Job 协议；不得承载或分发 Automation Prompt。holding-assistant 的 market-ledger 运行态由 QuantPro RESEARCH 固定 CLI 运输。
 4. Web 只用于业务 Prompt 明确要求的最新外部事实扫描；不得承担 Prompt/Guidance 控制面或 market-ledger 运行态读取。
-5. holding-assistant 的 GitHub Issue #2 只作为审计落点；Scheduled Task 不直接分页或写 GitHub，也不依赖 GitHub Plugin / Connector。原生路径优先使用 Collector `get_market_checkpoints` / `append_market_checkpoint`；若个人开发者 Connector 的冻结工具快照尚未暴露新增 action，可临时通过 QuantPro RESEARCH 固定 `scripts/market-ledger-cli.mjs` compatibility bridge 运输完全相同的 Issue #2 读写语义。该桥不得扩展为通用 GitHub 写入口。
+5. holding-assistant 的 GitHub Issue #2 只作为审计落点；Scheduled Task 不直接分页或写 GitHub，也不依赖 GitHub Plugin / Connector。market-ledger 唯一生产运输路径为 QuantPro RESEARCH 固定 `scripts/market-ledger-cli.mjs`；不得扩展为通用 GitHub 写入口。
 6. 所有生产 Prompt 都必须明确：任何 BLOCKER 只能结束本轮，绝对禁止任务修改自己的 title/schedule/enabled/notifications/email 配置。
 
 ## 变更流程
@@ -28,6 +28,6 @@
 这样 main 上尚未切生产的新 Prompt 不会被 Scheduled Task 自动采用，同时 Scheduled Task 也不会因为 Web/connector schema/cache 波动而无法加载自己的业务配置。
 同一业务 Prompt 可以被多个 registry key 复用；例如持仓助手的盘中任务与盘前+收盘任务共享同一个 mode-aware Prompt，但拥有不同调度与独立 Bootstrap key。盘前+收盘任务允许增加 10:10 PREOPEN Recovery，Recovery 的账本 semantic slot 仍为 09:10。
 
-`WRITE_SCOPE` 约束 Collector / Research MCP 的业务写权限。`MARKET_LEDGER_APPEND_ONLY` 只允许固定 Issue #2 的 market-ledger append：优先原生 Collector 工具，或在 Connector 快照未刷新时使用固定 RESEARCH compatibility CLI；不授权 Research Job 写入、通用 GitHub 写入、任意 shell 或其他目标。
+`WRITE_SCOPE` 约束 Collector / Research MCP 的业务写权限。`MARKET_LEDGER_APPEND_ONLY` 只允许固定 RESEARCH market-ledger CLI 对 Issue #2 的窄 append；不授权 Research Job 写入、通用 GitHub 写入、任意 shell 或其他目标。
 
 禁止在本目录存放 token、secret、账户、订单、持仓数量或其他敏感信息。
