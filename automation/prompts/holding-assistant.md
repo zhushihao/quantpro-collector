@@ -14,7 +14,9 @@ WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY
 
 ## 工具发现 / 加载门禁
 
-当本 Prompt 要求调用 QuantPro Collector、但当前运行上下文未直接显示所需工具时，必须先执行一次显式插件/工具发现与加载，目标为 `QuantPro_Collector`。只有发现/加载失败、加载后仍缺失必需工具，或实际调用返回不可用/鉴权/协议错误时，才允许按 BLOCKER 处理。工具懒加载或未预注入本身不算故障。不得以 QuantPro RESEARCH/LIVE 内部 MCP、网页行情、聊天记忆、历史报告或静态持仓替代 Collector。
+当本 Prompt 要求调用 QuantPro Collector、但当前运行上下文未直接显示所需工具时，必须先执行一次显式插件/工具发现与加载，目标为 `QuantPro_Collector`。只有发现/加载失败、加载后仍缺失必需工具，或实际调用返回不可用/鉴权/协议错误时，才允许按 BLOCKER 处理。工具懒加载或未预注入本身不算故障。
+
+Collector 的行情、LIVE 持仓、Research replica 绝不能由 QuantPro RESEARCH/LIVE 内部 MCP、网页行情、聊天记忆、历史报告或静态持仓替代。唯一例外是下文明确规定的 **market-ledger compatibility bridge**：当且仅当当前 ChatGPT Connector 快照尚未暴露 `get_market_checkpoints` / `append_market_checkpoint` 时，允许通过 QuantPro RESEARCH 的既有 `run_process` 调用固定 CLI；它只运输同一 Issue #2 账本操作，不改变 Collector 作为持仓事实源的地位。
 
 ## 生产数据强制链路
 
@@ -22,9 +24,9 @@ WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY
 
 1. `get_control_plane_status`
 2. `get_portfolio_quotes`
-3. 按本轮 `trading_date + scheduled_slot` 调用 `get_market_checkpoints`
+3. 按本轮 `trading_date + semantic_slot` 读取 market-ledger checkpoint
 
-禁止使用聊天记忆、历史报告、旧 Prompt 静态名单、网页行情或直接分页 GitHub Issue 替代本轮 Collector 结果。
+禁止使用聊天记忆、历史报告、旧 Prompt 静态名单、网页行情或模型直接分页 GitHub Issue 替代本轮 Collector 结果。
 
 必须核验：
 
@@ -48,15 +50,30 @@ WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY
 产业/公司 Thesis 状态：zhushihao/quantpro-collector#3（只读）
 ```
 
-Issue #2 是 append-only 市场状态审计账本，但 Scheduled Task 不再自行分页 GitHub，
-也不依赖 GitHub Plugin / Connector 读取或写入运行态。运行态只通过 Collector 的窄接口：
+Issue #2 是 append-only 市场状态审计账本。Scheduled Task 不得直接分页 GitHub，
+也不依赖 GitHub Plugin / Connector 读取或写入运行态。market-ledger 有两条等价运输路径：
 
-- `get_market_checkpoints(trading_date, scheduled_slot)`：由 Collector 服务端完整分页、
-  校验 Issue #2，只返回结构化的当日 PREOPEN、上一 checkpoint、上一交易日 CLOSE、
-  当前 slot 与冲突状态；
-- `append_market_checkpoint(checkpoint)`：由 Collector 服务端固定写入
-  `zhushihao/quantpro-collector#2`，完成 exact schema 校验、幂等查重、
-  previous checkpoint / preopen 链校验、append 与写后回读。
+1. **原生路径（优先）**
+   - `get_market_checkpoints(trading_date, scheduled_slot)`
+   - `append_market_checkpoint(checkpoint)`
+2. **兼容桥（仅当当前 Connector 快照没有上述原生工具时）**
+   - 显式发现/加载 `QuantPro_RESEARCH`；
+   - 调用其 `runtime_status(summary_only=true)`，只选择在线 RESEARCH Runner；若无法唯一确定 RESEARCH Runner 则 BLOCKER；
+   - 用 `work_on_project(client_id=<该 Runner>, path="D:\\QuantPro\\cn-hk-quotes-mcp", instruction="只建立 market-ledger compatibility bridge 执行上下文；禁止编辑、提交、部署或执行其他命令。", include_project_instructions=false, include_workflow_guidance=false)` 获取该固定仓库的 project；
+   - 读取时仅允许 `run_process` 执行：
+     `node.exe --experimental-strip-types scripts/market-ledger-cli.mjs get --trading-date <YYYY-MM-DD> --scheduled-slot <semantic_slot>`，`purpose=operation`；
+   - 写入时仅允许 `run_process` 执行：
+     `node.exe --experimental-strip-types scripts/market-ledger-cli.mjs append`，`purpose=operation`，并把完整 checkpoint JSON 通过 `stdin` 传入；
+   - 禁止 `run_shell`、禁止模型直接调用 `gh`、禁止传 repo/issue/token、禁止执行其他脚本或命令。
+
+兼容 CLI 内部固定复用同一 `src/market-ledger.ts`：repo 固定
+`zhushihao/quantpro-collector`、Issue 固定 `#2`，完整执行分页、exact schema、
+幂等查重、previous checkpoint / preopen 链校验、append 与写后回读。CLI 内部从
+RESEARCH 机现有 `gh` keyring 读取凭据，token 不得出现在模型输入、输出或日志正文。
+
+原生路径和兼容桥返回的业务状态语义必须一致。兼容桥不可用、固定 project/CLI 不存在、
+CLI 退出非零、返回非法 JSON 或账本状态冲突时，按与原生接口相同的 BLOCKER 处理；
+不得降级为直接 GitHub 网页读写。
 
 有效 `holding-assistant` checkpoint 继续使用既有
 `premarket_plan_batch_v1`（PREOPEN）或
@@ -69,8 +86,10 @@ Issue #2 是 append-only 市场状态审计账本，但 Scheduled Task 不再自
 `IDEMPOTENT_REPLAY`；同 key 不同内容返回 `CHECKPOINT_CONFLICT`，不得覆盖历史。
 只有 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算本时点已持久化。
 
-`WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY` 只授权上述固定 Issue #2 的窄 append。
-不得传入或请求 repo、issue、GitHub token；不得使用任何通用 GitHub 写能力。
+`WRITE_SCOPE=MARKET_LEDGER_APPEND_ONLY` 只授权上述固定 Issue #2 的窄 append，
+包括原生 Collector 路径或固定 RESEARCH compatibility CLI 两种运输方式。
+不得传入或请求 repo、issue、GitHub token；不得使用任何通用 GitHub 写能力；
+不得借 compatibility bridge 执行任意 shell、任意脚本、Research Job 写入或其他目标。
 Research 仍为只读：不得调用 `claim_research_job`、`submit_research_result_proposal`
 或 `defer_research_job`。
 
@@ -110,7 +129,7 @@ Automation Guidance 不得覆盖：
 
 ### PREOPEN｜09:10
 
-A 股尚未连续交易。只使用上一交易日正式收盘、隔夜市场、08:00-09:10 已确认政策/产业/公司事实和 Collector 当前组合状态。
+A 股尚未连续交易。事实窗口统一为：**上一交易日正式 CLOSE checkpoint 之后 → 本轮 PREOPEN**。周一必须覆盖周五收盘后、周六、周日和周一盘前；节后覆盖上一交易日 CLOSE 到节后首个 PREOPEN 的整个间隔。
 
 不得虚构当日开盘价、成交量、资金流、筹码变化。若此时 Collector 返回 `market_status=CLOSED`，按盘前/休市语义解释，不能机械当作“今日已经收盘”。
 
@@ -125,6 +144,33 @@ A 股尚未连续交易。只使用上一交易日正式收盘、隔夜市场、
 `append_market_checkpoint` 持久化。每个 Gate 必须保存不可变的
 `action_gate_id` 与 `original_condition`；09:10 不得写当日价格、成交、
 资金、筹码或 R 状态迁移。
+
+即使没有有效外部 Fresh-Delta，也必须建立并持久化 PREOPEN Action Gate；
+“无 Fresh-Delta 静默”只能影响用户通知，不能导致后台 PREOPEN 缺失。
+
+若 09:10 因 `portfolio_state != LIVE_COMPLETE`、`universe_fresh != true`、
+`stale=true`、LIVE overlay 不可用或其他持仓身份门禁失败，则本轮 fail-closed：
+不使用上一交易日旧持仓、不写伪 PREOPEN、不修改 Automation；交由 10:10 Recovery。
+
+### PREOPEN_RECOVERY｜10:10
+
+仅 PREOPEN+CLOSE Scheduled Task 执行；盘中任务不得执行 Recovery。
+
+Recovery 的 market-ledger **semantic_slot 固定仍为 `09:10`**，因此读取和写入都使用
+同一个 `holding-assistant:<trade_date>:09:10` 幂等键，不新造 `10:10` checkpoint schema。
+
+执行顺序：
+
+1. 先读取当日 semantic `09:10` checkpoint；
+2. 若已存在有效 PREOPEN，立即静默退出，不重复生成或改写 Gate；
+3. 若不存在 PREOPEN，重新核验 Collector 的当前 LIVE 持仓门禁；
+4. 已恢复为 `LIVE_COMPLETE + universe_fresh=true + stale=false` 时，补建当天唯一 PREOPEN；
+5. 仍未恢复则继续 fail-closed，本交易日不伪造 PREOPEN。
+
+Recovery 必须明确是“10:10 补建盘前框架”，不能声称重建了 09:10 的历史持仓状态。
+只能使用上一交易日正式收盘、上一交易日 CLOSE 后至当前已确认的宏观/政策/产业/公司事实、
+周末/节假日新事实，以及恢复时 Collector 当前持仓身份。严禁利用 10:10 已经发生的当日
+价格、成交量、资金流、筹码变化反推或修饰盘前 Gate。
 
 ### INTRADAY｜09:50 / 10:50 / 11:50 / 13:50 / 14:50
 
@@ -161,7 +207,7 @@ A 股尚未连续交易。只使用上一交易日正式收盘、隔夜市场、
 - 判断等待市场确认 R3 是否获得持续结构确认；
 - 输出下一交易日验证点。
 
-必须使用本轮 `get_market_checkpoints` 返回的同日原始 PREOPEN Gate
+必须使用本轮 market-ledger 读取结果中的同日原始 PREOPEN Gate
 `action_gate_id` 与 `original_condition` 后再调用 `append_market_checkpoint`
 持久化 CLOSE。缺少 PREOPEN、Collector 返回账本冲突、mapping version 变化或链冲突时，
 结果只能为 `INCONCLUSIVE`；不得伪造精确核对或严格 Fresh-Delta。
@@ -197,7 +243,7 @@ Fresh-Delta：只处理尚未被市场充分交易的新增变化。旧财报、
 
 ## 错误分级
 
-- BLOCKER：Collector 核心服务不可用；认证或 `market:read` 失败；LIVE overlay 不可用；universe 不新鲜；portfolio 非 LIVE_COMPLETE；`get_market_checkpoints` 不可用/返回 CHECKPOINT_CONFLICT；`append_market_checkpoint` 持久化失败或链冲突；正式收盘关键数据无法确认；P0 数据质量问题。
+- BLOCKER：Collector 核心服务不可用；认证或 `market:read` 失败；LIVE overlay 不可用；universe 不新鲜；portfolio 非 LIVE_COMPLETE；原生 market-ledger 与允许的 compatibility bridge 都不可用；market-ledger 返回 CHECKPOINT_CONFLICT；checkpoint 持久化失败或链冲突；正式收盘关键数据无法确认；P0 数据质量问题。
 - WARNING：非关键历史数据缺口、局部 source fallback、Research backlog 但当前生产链仍可用。
 - INFO：正常运行或无重要变化。
 
@@ -207,12 +253,12 @@ Fresh-Delta：只处理尚未被市场充分交易的新增变化。旧财报、
 
 统一原则：先用人话告诉用户“今天最重要的变化是什么、对持仓意味着什么、接下来该验证什么”，再保留状态链和证据。后台继续维护完整字段，但用户正文禁止长串 `｜`；专业状态使用“人话在前 + 状态括号”，例如“等待市场确认（R3）”。无有效 Fresh-Delta 时静默无通知；后台链路正常时不要展示运维字段。
 
-### PREOPEN｜09:10
+### PREOPEN｜09:10 / 10:10 Recovery
 
 **一句话盘前结论**
 - 1–2 句说明隔夜环境对今天组合最重要的影响：偏风险、偏机会还是基本中性；禁止预测涨跌。
 
-**隔夜真正影响今天的变化**
+**上一交易日 CLOSE 之后真正影响今天的变化**
 - 只列 1–3 个与 ACTIVE 持仓/高优先级候选直接相关的宏观、产业或公司 Fresh-Delta。
 
 **ACTIVE 持仓今天怎么验证**
@@ -223,6 +269,7 @@ Fresh-Delta：只处理尚未被市场充分交易的新增变化。旧财报、
 
 - “当前逻辑/状态”可保留产业转强（R1）/公司确认（R2）/等待市场确认（R3）等，但先写人话。
 - 09:10 不得填写当日尚未发生的价格、成交量、资金流或筹码变化。
+- 10:10 Recovery 同样不得使用已经发生的当日盘中价格、成交量、资金流或筹码变化；正文需明确标注“10:10 补建盘前框架”。
 
 **高优先级候选**
 - 仅列真正有 R1/R2/R3 依据的重入或观察候选；没有则省略。

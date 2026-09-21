@@ -9,6 +9,7 @@
 - 物理存储：append-only Issue Comment；不覆盖、编辑或删除历史评论。
 - 生产读取：Scheduled Task 只调用 Collector `get_market_checkpoints`，由服务端完成 GitHub comments 分页、过滤和链解析。
 - 生产写入：Scheduled Task 只调用 Collector `append_market_checkpoint`，由服务端固定 append 到本 Issue 并写后回读；模型不接触 GitHub token，也不依赖 GitHub Plugin / Connector。
+- 兼容桥：若个人开发者 ChatGPT Connector 的冻结工具快照尚未暴露上述新增 action，可临时通过已批准的 QuantPro RESEARCH `run_process` 调用固定 `scripts/market-ledger-cli.mjs`。CLI 复用同一 `src/market-ledger.ts`，目标仍固定本 Issue，不接受 repo/issue/token 参数；模型不得直接调用 `gh` 或任意 shell。兼容桥仅解决 Connector schema 刷新问题，不改变账本语义。
 - 行情原始事实：Issue #1；不是状态账本。
 - 产业/公司 Thesis：Issue #3；不是 Action Gate 或市场观察账本。
 - QuantPro #28：生产 Prompt 注册表；QuantPro #30：工程验收；两者都不是运行状态。
