@@ -2,13 +2,13 @@
   "schema_version": "quantpro-automation-control-v2",
   "status": "PRODUCTION",
   "repository": "zhushihao/quantpro-collector",
-  "content_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+  "content_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
   "registry": {
     "holding-assistant-intraday": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
-      "write_scope": "READ_ONLY",
+      "production_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
+      "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "INTRADAY",
       "automation_guidance": [
         "automation_guidance/holding-assistant/mode-discipline.md"
@@ -19,8 +19,8 @@
     "holding-assistant-preclose": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
-      "write_scope": "READ_ONLY",
+      "production_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
+      "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "PREOPEN_CLOSE",
       "automation_guidance": [
         "automation_guidance/holding-assistant/mode-discipline.md"
@@ -31,7 +31,7 @@
     "industry-research": {
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
       "write_scope": "RESEARCH_JOB_ONLY",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
@@ -44,7 +44,7 @@
     "company-facts": {
       "prompt_id": "company-facts",
       "path": "automation/prompts/company-facts.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/company-facts/capital-action-milestones.md"
@@ -55,7 +55,7 @@
     "central-policy": {
       "prompt_id": "central-policy",
       "path": "automation/prompts/central-policy.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/central-policy/authority-narrative-fresh-delta.md"
@@ -66,7 +66,7 @@
     "ai-financing-rates": {
       "prompt_id": "ai-financing-rates",
       "path": "automation/prompts/ai-financing-rates.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "ab2b6549e2ad4780691313d91796d1b875a81f1a",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/ai-financing-rates/causal-discipline.md"
