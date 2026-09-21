@@ -63,6 +63,13 @@ import {
 import { ingestResearchReplicaRecord, type ResearchReplicaStorage } from "./research-replica.ts";
 import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
+import {
+	appendMarketCheckpoint,
+	getMarketCheckpoints,
+	MARKET_CHECKPOINT_SCHEMA,
+	MARKET_LEDGER_SLOT_SCHEMA,
+	MarketLedgerError,
+} from "./market-ledger.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
 const GITHUB_ISSUE_NUMBER = 1;
@@ -827,6 +834,164 @@ export function createServer(
 		console.log(JSON.stringify({ event: "research_tool_client_denied", tool, principal: researchPrincipal ?? null, request_id: safe.request_id }));
 		return { isError: true as const, content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }] };
 	};
+
+	const marketLedgerErrorResponse = (error: unknown) => {
+		const code =
+			error instanceof MarketLedgerError ? error.code : "MARKET_LEDGER_UNAVAILABLE";
+		const message =
+			error instanceof MarketLedgerError ? error.message : "Market ledger operation failed";
+		return {
+			isError: true as const,
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify({ status: code, message }, null, 2),
+				},
+			],
+		};
+	};
+	const requireMarketLedgerRead = (tool: string) => {
+		if (
+			isLiveOverlayEnabled(liveOverlayStatus) &&
+			researchScopes.has(MARKET_READ_SCOPE)
+		) {
+			return null;
+		}
+		console.log(
+			JSON.stringify({
+				event: "market_ledger_scope_denied",
+				timestamp: new Date().toISOString(),
+				tool,
+				required_scope: MARKET_READ_SCOPE,
+				principal: researchPrincipal ?? "unverified-principal",
+			}),
+		);
+		return {
+			isError: true as const,
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify(
+						{
+							status: "MARKET_LEDGER_FORBIDDEN",
+							required_scope: MARKET_READ_SCOPE,
+						},
+						null,
+						2,
+					),
+				},
+			],
+		};
+	};
+	const requireMarketLedgerAppend = (tool: string) => {
+		const readDenied = requireMarketLedgerRead(tool);
+		if (readDenied) return readDenied;
+		if (
+			permitsFormalResearchOperation({
+				principal: researchPrincipal,
+				issuer: researchIssuer,
+				scopes: researchScopes,
+				requiredScope: MARKET_READ_SCOPE,
+			})
+		) {
+			return null;
+		}
+		console.log(
+			JSON.stringify({
+				event: "market_ledger_client_denied",
+				timestamp: new Date().toISOString(),
+				tool,
+				principal: researchPrincipal ?? null,
+			}),
+		);
+		return {
+			isError: true as const,
+			content: [
+				{
+					type: "text" as const,
+					text: JSON.stringify(
+						{ status: "MARKET_LEDGER_FORBIDDEN", required_scope: MARKET_READ_SCOPE },
+						null,
+						2,
+					),
+				},
+			],
+		};
+	};
+
+	server.registerTool(
+		"get_market_checkpoints",
+		{
+			description:
+				"读取 holding-assistant 市场状态检查点。Collector 服务端固定读取 zhushihao/quantpro-collector#2、完成 GitHub comments 分页/校验，并仅返回结构化 PREOPEN、上一检查点、上一交易日 CLOSE、当前 slot 与冲突状态；调用方不接触 GitHub token，也不需要 GitHub Plugin。",
+			inputSchema: z.object({
+				trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
+			}),
+		},
+		async ({ trading_date, scheduled_slot }) => {
+			const denied = requireMarketLedgerRead("get_market_checkpoints");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN) {
+				return marketLedgerErrorResponse(
+					new MarketLedgerError(
+						"MARKET_LEDGER_UNAVAILABLE",
+						"GitHub ledger credential is not configured",
+					),
+				);
+			}
+			try {
+				const state = await getMarketCheckpoints({
+					token: env.GITHUB_TOKEN,
+					tradingDate: trading_date,
+					scheduledSlot: scheduled_slot,
+				});
+				return {
+					content: [
+						{ type: "text" as const, text: JSON.stringify(state, null, 2) },
+					],
+				};
+			} catch (error) {
+				return marketLedgerErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"append_market_checkpoint",
+		{
+			description:
+				"将 holding-assistant 检查点 append-only 持久化到固定账本 zhushihao/quantpro-collector#2。服务端负责 exact schema、幂等查重、previous checkpoint/preopen 链校验、GitHub 写入与写后回读；不接受 repo、issue、token 或任意 GitHub 写目标。仅允许已认证的正式 chatgpt-production 主体使用。",
+			inputSchema: z.object({
+				checkpoint: MARKET_CHECKPOINT_SCHEMA,
+			}),
+		},
+		async ({ checkpoint }) => {
+			const denied = requireMarketLedgerAppend("append_market_checkpoint");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN) {
+				return marketLedgerErrorResponse(
+					new MarketLedgerError(
+						"MARKET_LEDGER_UNAVAILABLE",
+						"GitHub ledger credential is not configured",
+					),
+				);
+			}
+			try {
+				const result = await appendMarketCheckpoint({
+					token: env.GITHUB_TOKEN,
+					checkpoint,
+				});
+				return {
+					content: [
+						{ type: "text" as const, text: JSON.stringify(result, null, 2) },
+					],
+				};
+			} catch (error) {
+				return marketLedgerErrorResponse(error);
+			}
+		},
+	);
 
 	server.registerTool(
 		"search_documents",

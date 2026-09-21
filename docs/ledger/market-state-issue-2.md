@@ -6,7 +6,9 @@
 ## 账本定位
 
 - GitHub Issue：`zhushihao/quantpro-collector#2`
-- 写入方式：append-only Issue Comment；不覆盖、编辑或删除历史评论。
+- 物理存储：append-only Issue Comment；不覆盖、编辑或删除历史评论。
+- 生产读取：Scheduled Task 只调用 Collector `get_market_checkpoints`，由服务端完成 GitHub comments 分页、过滤和链解析。
+- 生产写入：Scheduled Task 只调用 Collector `append_market_checkpoint`，由服务端固定 append 到本 Issue 并写后回读；模型不接触 GitHub token，也不依赖 GitHub Plugin / Connector。
 - 行情原始事实：Issue #1；不是状态账本。
 - 产业/公司 Thesis：Issue #3；不是 Action Gate 或市场观察账本。
 - QuantPro #28：生产 Prompt 注册表；QuantPro #30：工程验收；两者都不是运行状态。
@@ -62,10 +64,9 @@ PREOPEN 的 records 还必须含 1–2 个 Action Gate；每个 Gate 保存不�
 
 ## 状态链和幂等
 
-1. 写前必须完整分页读取同日有效评论和上一交易日最后有效 CLOSE；分页不完整即状态链未知。
-2. 写前以 `idempotency_key` 查重。相同 key 且内容相同复用原 checkpoint；相同 key
-   内容不同为 `CHECKPOINT_CONFLICT`。
-3. 写入后必须回读 GitHub 返回的 comment id、URL 与创建时间；回读成功才算 persisted。
+1. `get_market_checkpoints` 在 Collector 服务端完整分页读取同日有效评论和上一交易日最后有效 CLOSE；Scheduled Task 不自行分页 GitHub。服务端分页/解析失败即状态链未知。
+2. `append_market_checkpoint` 写前以 `idempotency_key` 查重。相同 key 且内容相同返回 `IDEMPOTENT_REPLAY`；相同 key 内容不同为 `CHECKPOINT_CONFLICT`。
+3. `append_market_checkpoint` 写入后必须由服务端回读 GitHub comment id、URL、创建时间及 payload；回读一致才返回 `PERSISTED`。
 4. 每个 INTRADAY 都要写 checkpoint，即使没有用户通知；它引用上一个成功 checkpoint。
    没有上一个 checkpoint 时，不能声称严格 Fresh-Delta。
 5. CLOSE 必须回读原始 PREOPEN Gate 和完整同日链。PREOPEN 缺失、链冲突、mapping
