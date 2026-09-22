@@ -340,6 +340,33 @@ test("append_market_checkpoint rejects ACTIVE membership drift when hash is unch
 	);
 });
 
+test("append_market_checkpoint reports unknown top-level schema keys without echoing values", async () => {
+	const proposed = {
+		...payload({
+			date: "2026-09-22",
+			slot: "14:50",
+			previous: "211",
+			preopen: "210",
+		}),
+		unexpected_private_field: "secret-value-must-not-leak",
+	};
+	await assert.rejects(
+		appendMarketCheckpoint({
+			token: "fake-server-secret",
+			checkpoint: proposed,
+			fetchImpl: async () => {
+				throw new Error("fetch must not run for schema rejection");
+			},
+		}),
+		(error) =>
+			error instanceof MarketLedgerError &&
+			error.code === "CHECKPOINT_VALIDATION_FAILED" &&
+			error.message.includes("unrecognized_keys") &&
+			error.message.includes("unexpected_private_field") &&
+			!error.message.includes("secret-value-must-not-leak"),
+	);
+});
+
 test("append_market_checkpoint preserves idempotent replay after server-owned transition enrichment", async () => {
 	const stablePreopen = comment(
 		220,

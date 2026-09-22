@@ -62,6 +62,15 @@ function safeErrorPayload(error) {
 	};
 }
 
+function sanitizeAppendCheckpoint(checkpoint) {
+	if (!checkpoint || typeof checkpoint !== "object" || Array.isArray(checkpoint)) {
+		return checkpoint;
+	}
+	const { universe_transition: _serverOwnedUniverseTransition, ...callerCheckpoint } =
+		checkpoint;
+	return callerCheckpoint;
+}
+
 export async function runMarketLedgerCli(argv, overrides = {}) {
 	const deps = {
 		tokenProvider: githubTokenFromGh,
@@ -93,6 +102,7 @@ export async function runMarketLedgerCli(argv, overrides = {}) {
 		} catch {
 			throw validationError("stdin is not valid checkpoint JSON");
 		}
+		checkpoint = sanitizeAppendCheckpoint(checkpoint);
 		const token = await deps.tokenProvider();
 		const result = await deps.appendMarketCheckpoint({ token, checkpoint });
 		deps.writeStdout(JSON.stringify(result));

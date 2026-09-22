@@ -76,6 +76,12 @@ RESEARCH 机现有 `gh` keyring 读取凭据，token 不得出现在模型输入
 `prompt_id`、exact `production_ref`、`scheduled_slot`、`idempotency_key`、
 `previous_checkpoint_comment_id`、`preopen_comment_id`、`live_universe_hash`。
 
+`universe_transition` 是 market-ledger 服务端在持久化后补充的审计字段，只允许出现在
+`get` / append 返回结果中。组装下一条 append payload 时必须从允许的 checkpoint 输入字段
+重新构造，不得直接复制上一条 persisted payload；严禁把
+`universe_transition` 回灌到 append stdin。固定 CLI 会作为最后防线丢弃这一
+服务端字段，但其他未知顶层字段仍必须按 exact schema fail-closed。
+
 每个时点最多 append 一条同日检查点。幂等键固定为
 `holding-assistant:<trade_date>:<scheduled_slot>`。同 key 同内容返回
 `IDEMPOTENT_REPLAY`；同 key 不同内容返回 `CHECKPOINT_CONFLICT`，不得覆盖历史。

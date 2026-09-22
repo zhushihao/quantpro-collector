@@ -72,6 +72,32 @@ test("market-ledger append accepts checkpoint only from stdin and keeps target f
 	assert.equal(h.stdout.join("\n").includes("secret-token"), false);
 });
 
+test("market-ledger append drops server-owned universe_transition before validation", async () => {
+	const serverEnrichedCheckpoint = {
+		...checkpoint,
+		universe_transition: {
+			status: "MEMBERSHIP_CHANGED",
+			previous_live_universe_hash: "sha256:before",
+			current_live_universe_hash: "sha256:after",
+			hash_changed: true,
+			membership_changed: true,
+			added_active: [],
+			removed_active: ["300394.SZ"],
+		},
+	};
+	const h = harness({
+		readStdin: async () => JSON.stringify(serverEnrichedCheckpoint),
+		appendMarketCheckpoint: async (input) => {
+			assert.equal("universe_transition" in input.checkpoint, false);
+			assert.deepEqual(input.checkpoint, checkpoint);
+			return { status: "PERSISTED", persisted: true, comment_id: "124" };
+		},
+	});
+	const code = await runMarketLedgerCli(["append"], h.deps);
+	assert.equal(code, 0);
+	assert.equal(h.stderr.length, 0);
+});
+
 test("market-ledger transport rejects repo issue token and arbitrary append arguments", async () => {
 	for (const args of [
 		["get", "--repo", "other/repo", "--scheduled-slot", "09:10"],

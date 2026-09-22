@@ -515,9 +515,18 @@ export async function appendMarketCheckpoint(input: {
 }): Promise<MarketCheckpointAppendResult> {
 	const parsed = MARKET_CHECKPOINT_INPUT_SCHEMA.safeParse(input.checkpoint);
 	if (!parsed.success) {
+		const issueSummary = parsed.error.issues
+			.slice(0, 8)
+			.map((issue) => {
+				const path = issue.path.length > 0 ? issue.path.join(".") : "<root>";
+				const keys =
+					issue.code === "unrecognized_keys" ? ` keys=${issue.keys.join(",")}` : "";
+				return `${path}:${issue.code}${keys}`;
+			})
+			.join("; ");
 		throw new MarketLedgerError(
 			"CHECKPOINT_VALIDATION_FAILED",
-			"checkpoint does not match the exact market ledger schema",
+			`checkpoint does not match the exact market ledger schema: ${issueSummary}`,
 		);
 	}
 	const submittedCheckpoint = parsed.data;
