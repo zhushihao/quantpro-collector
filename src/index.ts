@@ -66,7 +66,7 @@ import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import {
 	appendMarketCheckpoint,
 	getMarketCheckpoints,
-	MARKET_CHECKPOINT_SCHEMA,
+	MARKET_CHECKPOINT_INPUT_SCHEMA,
 	MARKET_LEDGER_SLOT_SCHEMA,
 	MarketLedgerError,
 } from "./market-ledger.ts";
@@ -963,7 +963,7 @@ export function createServer(
 			description:
 				"将 holding-assistant 检查点 append-only 持久化到固定账本 zhushihao/quantpro-collector#2。服务端负责 exact schema、幂等查重、previous checkpoint/preopen 链校验、GitHub 写入与写后回读；不接受 repo、issue、token 或任意 GitHub 写目标。仅允许已认证的正式 chatgpt-production 主体使用。",
 			inputSchema: z.object({
-				checkpoint: MARKET_CHECKPOINT_SCHEMA,
+				checkpoint: MARKET_CHECKPOINT_INPUT_SCHEMA,
 			}),
 		},
 		async ({ checkpoint }) => {

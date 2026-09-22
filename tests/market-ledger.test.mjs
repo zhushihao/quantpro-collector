@@ -43,6 +43,13 @@ function payload({
 	};
 }
 
+function activeRecord(subjectKey) {
+	return {
+		subject_key: subjectKey,
+		holding_status: "ACTIVE",
+	};
+}
+
 function comment(id, checkpoint, createdAt = "2026-09-21T01:10:00Z") {
 	return {
 		id,
@@ -176,11 +183,7 @@ test("append_market_checkpoint appends fixed Issue #2 and verifies readback", as
 		preopen: "100",
 		records: [{ instrument_key: "300308.SZ", gate_status: "PENDING" }],
 	});
-	const created = comment(
-		102,
-		proposed,
-		"2026-09-21T01:50:05Z",
-	);
+	let created = null;
 	const requests = [];
 	const result = await appendMarketCheckpoint({
 		token: "fake-server-secret",
@@ -194,6 +197,11 @@ test("append_market_checkpoint appends fixed Issue #2 and verifies readback", as
 					url,
 					"https://api.github.com/repos/zhushihao/quantpro-collector/issues/2/comments",
 				);
+				const posted = JSON.parse(init.body);
+				const persisted = JSON.parse(
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
+				);
+				created = comment(102, persisted, "2026-09-21T01:50:05Z");
 				return jsonResponse(created, { status: 201 });
 			}
 			if (url.endsWith("/issues/comments/102")) {
@@ -228,4 +236,216 @@ test("append_market_checkpoint fails closed when checkpoint chain is stale", asy
 			error instanceof MarketLedgerError &&
 			error.code === "CHECKPOINT_CHAIN_MISMATCH",
 	);
+});
+
+
+test("append_market_checkpoint allows ACTIVE removal and persists universe transition", async () => {
+	const stablePreopen = comment(
+		200,
+		payload({
+			date: "2026-09-22",
+			slot: "09:10",
+			records: [activeRecord("A"), activeRecord("B"), activeRecord("C")],
+			universeHash: "sha256:abc",
+		}),
+		"2026-09-22T01:10:00Z",
+	);
+	const stable0950 = comment(
+		201,
+		payload({
+			date: "2026-09-22",
+			slot: "09:50",
+			previous: "200",
+			preopen: "200",
+			records: [activeRecord("A"), activeRecord("B"), activeRecord("C")],
+			universeHash: "sha256:abc",
+		}),
+		"2026-09-22T01:50:00Z",
+	);
+	const proposed = payload({
+		date: "2026-09-22",
+		slot: "10:50",
+		previous: "201",
+		preopen: "200",
+		records: [activeRecord("A"), activeRecord("B")],
+		universeHash: "sha256:ab",
+	});
+	let created = null;
+	const result = await appendMarketCheckpoint({
+		token: "fake-server-secret",
+		checkpoint: proposed,
+		fetchImpl: async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			if (method === "POST") {
+				const posted = JSON.parse(init.body);
+				const persisted = JSON.parse(
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
+				);
+				assert.equal(persisted.universe_transition.status, "MEMBERSHIP_CHANGED");
+				assert.equal(persisted.universe_transition.membership_changed, true);
+				assert.equal(persisted.universe_transition.hash_changed, true);
+				assert.deepEqual(persisted.universe_transition.added_active, []);
+				assert.deepEqual(persisted.universe_transition.removed_active, ["C"]);
+				created = comment(202, persisted, "2026-09-22T02:50:05Z");
+				return jsonResponse(created, { status: 201 });
+			}
+			if (url.endsWith("/issues/comments/202")) return jsonResponse(created);
+			return jsonResponse([previousClose, stablePreopen, stable0950]);
+		},
+	});
+	assert.equal(result.status, "PERSISTED");
+	assert.equal(result.checkpoint.live_universe_hash, "sha256:ab");
+	assert.deepEqual(result.checkpoint.universe_transition.removed_active, ["C"]);
+});
+
+test("append_market_checkpoint rejects ACTIVE membership drift when hash is unchanged", async () => {
+	const stablePreopen = comment(
+		210,
+		payload({
+			date: "2026-09-22",
+			slot: "09:10",
+			records: [activeRecord("A"), activeRecord("B"), activeRecord("C")],
+			universeHash: "sha256:same",
+		}),
+	);
+	const stable0950 = comment(
+		211,
+		payload({
+			date: "2026-09-22",
+			slot: "09:50",
+			previous: "210",
+			preopen: "210",
+			records: [activeRecord("A"), activeRecord("B"), activeRecord("C")],
+			universeHash: "sha256:same",
+		}),
+	);
+	const proposed = payload({
+		date: "2026-09-22",
+		slot: "10:50",
+		previous: "211",
+		preopen: "210",
+		records: [activeRecord("A"), activeRecord("B")],
+		universeHash: "sha256:same",
+	});
+	await assert.rejects(
+		appendMarketCheckpoint({
+			token: "fake-server-secret",
+			checkpoint: proposed,
+			fetchImpl: async () => jsonResponse([previousClose, stablePreopen, stable0950]),
+		}),
+		(error) =>
+			error instanceof MarketLedgerError &&
+			error.code === "CHECKPOINT_VALIDATION_FAILED",
+	);
+});
+
+test("append_market_checkpoint preserves idempotent replay after server-owned transition enrichment", async () => {
+	const stablePreopen = comment(
+		220,
+		payload({
+			date: "2026-09-22",
+			slot: "09:10",
+			records: [activeRecord("A"), activeRecord("B")],
+			universeHash: "sha256:ab",
+		}),
+	);
+	const raw = payload({
+		date: "2026-09-22",
+		slot: "09:50",
+		previous: "220",
+		preopen: "220",
+		records: [activeRecord("A"), activeRecord("B")],
+		universeHash: "sha256:ab",
+	});
+	const enriched = {
+		...raw,
+		universe_transition: {
+			status: "UNCHANGED",
+			previous_live_universe_hash: "sha256:ab",
+			current_live_universe_hash: "sha256:ab",
+			hash_changed: false,
+			membership_changed: false,
+			added_active: [],
+			removed_active: [],
+		},
+	};
+	const existing = comment(221, enriched, "2026-09-22T01:50:00Z");
+	let writes = 0;
+	const result = await appendMarketCheckpoint({
+		token: "fake-server-secret",
+		checkpoint: raw,
+		fetchImpl: async (_input, init) => {
+			if (init?.method === "POST") writes += 1;
+			return jsonResponse([previousClose, stablePreopen, existing]);
+		},
+	});
+	assert.equal(result.status, "IDEMPOTENT_REPLAY");
+	assert.equal(writes, 0);
+});
+
+test("market ledger E2E keeps strict chain across remove, add, replace and CLOSE", async () => {
+	const comments = [previousClose];
+	let nextId = 300;
+	const fetchImpl = async (input, init) => {
+		const url = String(input);
+		const method = init?.method ?? "GET";
+		if (method === "POST") {
+			const posted = JSON.parse(init.body);
+			const persisted = JSON.parse(
+				posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
+			);
+			const created = comment(nextId++, persisted, new Date().toISOString());
+			comments.push(created);
+			return jsonResponse(created, { status: 201 });
+		}
+		const match = url.match(/\/issues\/comments\/(\d+)$/);
+		if (match) {
+			const found = comments.find((item) => String(item.id) === match[1]);
+			return jsonResponse(found);
+		}
+		return jsonResponse(comments);
+	};
+
+	const date = "2026-09-23";
+	const steps = [
+		{ slot: "09:10", keys: ["A", "B", "C"], hash: "sha256:abc" },
+		{ slot: "09:50", keys: ["A", "B", "C"], hash: "sha256:abc" },
+		{ slot: "10:50", keys: ["A", "B"], hash: "sha256:ab" },
+		{ slot: "11:50", keys: ["A", "B", "D"], hash: "sha256:abd" },
+		{ slot: "13:50", keys: ["A", "D"], hash: "sha256:ad" },
+		{ slot: "16:45", keys: ["A", "D"], hash: "sha256:ad" },
+	];
+
+	let previous = null;
+	let preopenId = null;
+	const transitions = [];
+	for (const step of steps) {
+		const proposed = payload({
+			date,
+			slot: step.slot,
+			previous,
+			preopen: step.slot === "09:10" ? null : preopenId,
+			records: step.keys.map(activeRecord),
+			universeHash: step.hash,
+		});
+		const result = await appendMarketCheckpoint({
+			token: "fake-server-secret",
+			checkpoint: proposed,
+			fetchImpl,
+		});
+		assert.equal(result.status, "PERSISTED");
+		if (step.slot === "09:10") preopenId = result.comment_id;
+		previous = result.comment_id;
+		transitions.push(result.checkpoint.universe_transition);
+	}
+
+	assert.equal(transitions[0].status, "BASELINE");
+	assert.equal(transitions[1].status, "UNCHANGED");
+	assert.deepEqual(transitions[2].removed_active, ["C"]);
+	assert.deepEqual(transitions[3].added_active, ["D"]);
+	assert.deepEqual(transitions[4].removed_active, ["B"]);
+	assert.equal(transitions[5].status, "UNCHANGED");
+	const close = comments[comments.length - 1].body;
+	assert.match(close, /"observation_type": "CLOSE"/);
 });

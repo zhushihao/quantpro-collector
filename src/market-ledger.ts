@@ -15,27 +15,51 @@ export const MARKET_LEDGER_SLOT_SCHEMA = z.enum(MARKET_LEDGER_SLOTS);
 
 const CHECKPOINT_RECORD_SCHEMA = z.record(z.string().min(1), z.unknown());
 
-export const MARKET_CHECKPOINT_SCHEMA = z
+const UNIVERSE_TRANSITION_SCHEMA = z
 	.object({
-		schema_version: z.enum(["premarket_plan_batch_v1", "market_observation_batch_v1"]),
-		prompt_id: z.literal("holding-assistant"),
-		production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
-		portfolio_version: z.string().min(1).max(512),
-		event_id: z.string().min(1).max(512),
-		idempotency_key: z.string().min(1).max(256),
-		trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-		as_of: z.string().min(1).max(128),
-		scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
-		producer: z.literal("holding-assistant"),
-		observation_type: z.enum(["PREMARKET", "INTRADAY", "CLOSE"]),
-		previous_checkpoint_comment_id: z.union([z.string().min(1).max(64), z.null()]),
-		preopen_comment_id: z.union([z.string().min(1).max(64), z.null()]),
-		live_universe_hash: z.string().min(1).max(256),
-		source_task: z.string().min(1).max(128),
-		records: z.array(CHECKPOINT_RECORD_SCHEMA).max(512),
+		status: z.enum(["BASELINE", "UNCHANGED", "MEMBERSHIP_CHANGED", "METADATA_CHANGED"]),
+		previous_live_universe_hash: z.union([z.string().min(1).max(256), z.null()]),
+		current_live_universe_hash: z.string().min(1).max(256),
+		hash_changed: z.boolean(),
+		membership_changed: z.boolean(),
+		added_active: z.array(z.string().min(1).max(128)).max(512),
+		removed_active: z.array(z.string().min(1).max(128)).max(512),
 	})
 	.strict();
 
+const MARKET_CHECKPOINT_BASE_SHAPE = {
+	schema_version: z.enum(["premarket_plan_batch_v1", "market_observation_batch_v1"]),
+	prompt_id: z.literal("holding-assistant"),
+	production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
+	portfolio_version: z.string().min(1).max(512),
+	event_id: z.string().min(1).max(512),
+	idempotency_key: z.string().min(1).max(256),
+	trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+	as_of: z.string().min(1).max(128),
+	scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
+	producer: z.literal("holding-assistant"),
+	observation_type: z.enum(["PREMARKET", "INTRADAY", "CLOSE"]),
+	previous_checkpoint_comment_id: z.union([z.string().min(1).max(64), z.null()]),
+	preopen_comment_id: z.union([z.string().min(1).max(64), z.null()]),
+	live_universe_hash: z.string().min(1).max(256),
+	source_task: z.string().min(1).max(128),
+	records: z.array(CHECKPOINT_RECORD_SCHEMA).max(512),
+} as const;
+
+// Caller-facing append contract stays narrow. universe_transition is server-owned
+// audit metadata and cannot be supplied by Scheduled Tasks or MCP clients.
+export const MARKET_CHECKPOINT_INPUT_SCHEMA = z
+	.object(MARKET_CHECKPOINT_BASE_SHAPE)
+	.strict();
+
+export const MARKET_CHECKPOINT_SCHEMA = z
+	.object({
+		...MARKET_CHECKPOINT_BASE_SHAPE,
+		universe_transition: UNIVERSE_TRANSITION_SCHEMA.optional(),
+	})
+	.strict();
+
+export type MarketCheckpointInputPayload = z.infer<typeof MARKET_CHECKPOINT_INPUT_SCHEMA>;
 export type MarketCheckpointPayload = z.infer<typeof MARKET_CHECKPOINT_SCHEMA>;
 export type MarketLedgerSlot = z.infer<typeof MARKET_LEDGER_SLOT_SCHEMA>;
 
@@ -384,6 +408,76 @@ function checkpointEquals(
 	return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
 }
 
+function activeSubjectKeys(checkpoint: MarketCheckpointPayload): string[] {
+	const keys = new Set<string>();
+	for (const record of checkpoint.records) {
+		if (
+			record.holding_status === "ACTIVE" &&
+			typeof record.subject_key === "string" &&
+			record.subject_key.length > 0
+		) {
+			keys.add(record.subject_key);
+		}
+	}
+	return [...keys].sort();
+}
+
+function withUniverseTransition(
+	checkpoint: MarketCheckpointPayload,
+	previousCheckpoint: MarketCheckpointPayload | null,
+): MarketCheckpointPayload {
+	if (checkpoint.scheduled_slot === "09:10" || previousCheckpoint === null) {
+		return {
+			...checkpoint,
+			universe_transition: {
+				status: "BASELINE",
+				previous_live_universe_hash: null,
+				current_live_universe_hash: checkpoint.live_universe_hash,
+				hash_changed: false,
+				membership_changed: false,
+				added_active: [],
+				removed_active: [],
+			},
+		};
+	}
+
+	const previousActive = activeSubjectKeys(previousCheckpoint);
+	const currentActive = activeSubjectKeys(checkpoint);
+	const previousSet = new Set(previousActive);
+	const currentSet = new Set(currentActive);
+	const addedActive = currentActive.filter((key) => !previousSet.has(key));
+	const removedActive = previousActive.filter((key) => !currentSet.has(key));
+	const membershipChanged = addedActive.length > 0 || removedActive.length > 0;
+	const hashChanged =
+		checkpoint.live_universe_hash !== previousCheckpoint.live_universe_hash;
+
+	if (membershipChanged && !hashChanged) {
+		throw new MarketLedgerError(
+			"CHECKPOINT_VALIDATION_FAILED",
+			"ACTIVE membership changed without a corresponding live_universe_hash change",
+		);
+	}
+
+	const status = membershipChanged
+		? "MEMBERSHIP_CHANGED"
+		: hashChanged
+			? "METADATA_CHANGED"
+			: "UNCHANGED";
+
+	return {
+		...checkpoint,
+		universe_transition: {
+			status,
+			previous_live_universe_hash: previousCheckpoint.live_universe_hash,
+			current_live_universe_hash: checkpoint.live_universe_hash,
+			hash_changed: hashChanged,
+			membership_changed: membershipChanged,
+			added_active: addedActive,
+			removed_active: removedActive,
+		},
+	};
+}
+
 function checkpointBody(checkpoint: MarketCheckpointPayload): string {
 	return `\`\`\`json\n${JSON.stringify(checkpoint, null, 2)}\n\`\`\``;
 }
@@ -416,23 +510,23 @@ export async function getMarketCheckpoints(input: {
 
 export async function appendMarketCheckpoint(input: {
 	token: string;
-	checkpoint: MarketCheckpointPayload;
+	checkpoint: MarketCheckpointInputPayload;
 	fetchImpl?: typeof fetch;
 }): Promise<MarketCheckpointAppendResult> {
-	const parsed = MARKET_CHECKPOINT_SCHEMA.safeParse(input.checkpoint);
+	const parsed = MARKET_CHECKPOINT_INPUT_SCHEMA.safeParse(input.checkpoint);
 	if (!parsed.success) {
 		throw new MarketLedgerError(
 			"CHECKPOINT_VALIDATION_FAILED",
 			"checkpoint does not match the exact market ledger schema",
 		);
 	}
-	const checkpoint = parsed.data;
-	validateCheckpointRelations(checkpoint);
+	const submittedCheckpoint = parsed.data;
+	validateCheckpointRelations(submittedCheckpoint);
 
 	const state = await getMarketCheckpoints({
 		token: input.token,
-		tradingDate: checkpoint.trading_date,
-		scheduledSlot: checkpoint.scheduled_slot,
+		tradingDate: submittedCheckpoint.trading_date,
+		scheduledSlot: submittedCheckpoint.scheduled_slot,
 		fetchImpl: input.fetchImpl,
 	});
 	if (state.status === "CHECKPOINT_CONFLICT") {
@@ -441,8 +535,17 @@ export async function appendMarketCheckpoint(input: {
 			"market ledger already contains duplicate checkpoint keys",
 		);
 	}
+	const checkpoint = withUniverseTransition(
+		submittedCheckpoint,
+		state.previous_checkpoint?.payload ?? null,
+	);
+	validateCheckpointRelations(checkpoint);
+
 	if (state.current_slot) {
-		if (checkpointEquals(checkpoint, state.current_slot.payload)) {
+		if (
+			checkpointEquals(submittedCheckpoint, state.current_slot.payload) ||
+			checkpointEquals(checkpoint, state.current_slot.payload)
+		) {
 			return {
 				status: "IDEMPOTENT_REPLAY",
 				persisted: true,
@@ -473,16 +576,15 @@ export async function appendMarketCheckpoint(input: {
 			"preopen_comment_id does not match the server-side ledger state",
 		);
 	}
-	if (checkpoint.scheduled_slot !== "09:10" && state.preopen) {
-		if (
-			checkpoint.production_ref !== state.preopen.payload.production_ref ||
-			checkpoint.live_universe_hash !== state.preopen.payload.live_universe_hash
-		) {
-			throw new MarketLedgerError(
-				"CHECKPOINT_CHAIN_MISMATCH",
-				"production_ref or live_universe_hash drifted from PREMARKET",
-			);
-		}
+	if (
+		checkpoint.scheduled_slot !== "09:10" &&
+		state.preopen &&
+		checkpoint.production_ref !== state.preopen.payload.production_ref
+	) {
+		throw new MarketLedgerError(
+			"CHECKPOINT_CHAIN_MISMATCH",
+			"production_ref drifted from PREMARKET",
+		);
 	}
 
 	const fetchImpl = input.fetchImpl ?? fetch;
