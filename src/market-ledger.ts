@@ -524,8 +524,17 @@ export async function appendMarketCheckpoint(input: {
 			"market ledger already contains duplicate checkpoint keys",
 		);
 	}
+	const checkpoint = withUniverseTransition(
+		submittedCheckpoint,
+		state.previous_checkpoint?.payload ?? null,
+	);
+	validateCheckpointRelations(checkpoint);
+
 	if (state.current_slot) {
-		if (checkpointEquals(submittedCheckpoint, state.current_slot.payload)) {
+		if (
+			checkpointEquals(submittedCheckpoint, state.current_slot.payload) ||
+			checkpointEquals(checkpoint, state.current_slot.payload)
+		) {
 			return {
 				status: "IDEMPOTENT_REPLAY",
 				persisted: true,
@@ -540,12 +549,6 @@ export async function appendMarketCheckpoint(input: {
 			"same checkpoint idempotency key already exists with different content",
 		);
 	}
-
-	const checkpoint = withUniverseTransition(
-		submittedCheckpoint,
-		state.previous_checkpoint?.payload ?? null,
-	);
-	validateCheckpointRelations(checkpoint);
 
 	const expectedPrevious = state.previous_checkpoint?.comment_id ?? null;
 	if (checkpoint.previous_checkpoint_comment_id !== expectedPrevious) {
