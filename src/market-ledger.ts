@@ -27,28 +27,39 @@ const UNIVERSE_TRANSITION_SCHEMA = z
 	})
 	.strict();
 
+const MARKET_CHECKPOINT_BASE_SHAPE = {
+	schema_version: z.enum(["premarket_plan_batch_v1", "market_observation_batch_v1"]),
+	prompt_id: z.literal("holding-assistant"),
+	production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
+	portfolio_version: z.string().min(1).max(512),
+	event_id: z.string().min(1).max(512),
+	idempotency_key: z.string().min(1).max(256),
+	trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+	as_of: z.string().min(1).max(128),
+	scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
+	producer: z.literal("holding-assistant"),
+	observation_type: z.enum(["PREMARKET", "INTRADAY", "CLOSE"]),
+	previous_checkpoint_comment_id: z.union([z.string().min(1).max(64), z.null()]),
+	preopen_comment_id: z.union([z.string().min(1).max(64), z.null()]),
+	live_universe_hash: z.string().min(1).max(256),
+	source_task: z.string().min(1).max(128),
+	records: z.array(CHECKPOINT_RECORD_SCHEMA).max(512),
+} as const;
+
+// Caller-facing append contract stays narrow. universe_transition is server-owned
+// audit metadata and cannot be supplied by Scheduled Tasks or MCP clients.
+export const MARKET_CHECKPOINT_INPUT_SCHEMA = z
+	.object(MARKET_CHECKPOINT_BASE_SHAPE)
+	.strict();
+
 export const MARKET_CHECKPOINT_SCHEMA = z
 	.object({
-		schema_version: z.enum(["premarket_plan_batch_v1", "market_observation_batch_v1"]),
-		prompt_id: z.literal("holding-assistant"),
-		production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
-		portfolio_version: z.string().min(1).max(512),
-		event_id: z.string().min(1).max(512),
-		idempotency_key: z.string().min(1).max(256),
-		trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-		as_of: z.string().min(1).max(128),
-		scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
-		producer: z.literal("holding-assistant"),
-		observation_type: z.enum(["PREMARKET", "INTRADAY", "CLOSE"]),
-		previous_checkpoint_comment_id: z.union([z.string().min(1).max(64), z.null()]),
-		preopen_comment_id: z.union([z.string().min(1).max(64), z.null()]),
-		live_universe_hash: z.string().min(1).max(256),
+		...MARKET_CHECKPOINT_BASE_SHAPE,
 		universe_transition: UNIVERSE_TRANSITION_SCHEMA.optional(),
-		source_task: z.string().min(1).max(128),
-		records: z.array(CHECKPOINT_RECORD_SCHEMA).max(512),
 	})
 	.strict();
 
+export type MarketCheckpointInputPayload = z.infer<typeof MARKET_CHECKPOINT_INPUT_SCHEMA>;
 export type MarketCheckpointPayload = z.infer<typeof MARKET_CHECKPOINT_SCHEMA>;
 export type MarketLedgerSlot = z.infer<typeof MARKET_LEDGER_SLOT_SCHEMA>;
 
@@ -499,10 +510,10 @@ export async function getMarketCheckpoints(input: {
 
 export async function appendMarketCheckpoint(input: {
 	token: string;
-	checkpoint: MarketCheckpointPayload;
+	checkpoint: MarketCheckpointInputPayload;
 	fetchImpl?: typeof fetch;
 }): Promise<MarketCheckpointAppendResult> {
-	const parsed = MARKET_CHECKPOINT_SCHEMA.safeParse(input.checkpoint);
+	const parsed = MARKET_CHECKPOINT_INPUT_SCHEMA.safeParse(input.checkpoint);
 	if (!parsed.success) {
 		throw new MarketLedgerError(
 			"CHECKPOINT_VALIDATION_FAILED",
