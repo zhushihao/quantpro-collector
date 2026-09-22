@@ -15,6 +15,18 @@ export const MARKET_LEDGER_SLOT_SCHEMA = z.enum(MARKET_LEDGER_SLOTS);
 
 const CHECKPOINT_RECORD_SCHEMA = z.record(z.string().min(1), z.unknown());
 
+const UNIVERSE_TRANSITION_SCHEMA = z
+	.object({
+		status: z.enum(["BASELINE", "UNCHANGED", "MEMBERSHIP_CHANGED", "METADATA_CHANGED"]),
+		previous_live_universe_hash: z.union([z.string().min(1).max(256), z.null()]),
+		current_live_universe_hash: z.string().min(1).max(256),
+		hash_changed: z.boolean(),
+		membership_changed: z.boolean(),
+		added_active: z.array(z.string().min(1).max(128)).max(512),
+		removed_active: z.array(z.string().min(1).max(128)).max(512),
+	})
+	.strict();
+
 export const MARKET_CHECKPOINT_SCHEMA = z
 	.object({
 		schema_version: z.enum(["premarket_plan_batch_v1", "market_observation_batch_v1"]),
@@ -31,6 +43,7 @@ export const MARKET_CHECKPOINT_SCHEMA = z
 		previous_checkpoint_comment_id: z.union([z.string().min(1).max(64), z.null()]),
 		preopen_comment_id: z.union([z.string().min(1).max(64), z.null()]),
 		live_universe_hash: z.string().min(1).max(256),
+		universe_transition: UNIVERSE_TRANSITION_SCHEMA.optional(),
 		source_task: z.string().min(1).max(128),
 		records: z.array(CHECKPOINT_RECORD_SCHEMA).max(512),
 	})
@@ -384,6 +397,76 @@ function checkpointEquals(
 	return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
 }
 
+function activeSubjectKeys(checkpoint: MarketCheckpointPayload): string[] {
+	const keys = new Set<string>();
+	for (const record of checkpoint.records) {
+		if (
+			record.holding_status === "ACTIVE" &&
+			typeof record.subject_key === "string" &&
+			record.subject_key.length > 0
+		) {
+			keys.add(record.subject_key);
+		}
+	}
+	return [...keys].sort();
+}
+
+function withUniverseTransition(
+	checkpoint: MarketCheckpointPayload,
+	previousCheckpoint: MarketCheckpointPayload | null,
+): MarketCheckpointPayload {
+	if (checkpoint.scheduled_slot === "09:10" || previousCheckpoint === null) {
+		return {
+			...checkpoint,
+			universe_transition: {
+				status: "BASELINE",
+				previous_live_universe_hash: null,
+				current_live_universe_hash: checkpoint.live_universe_hash,
+				hash_changed: false,
+				membership_changed: false,
+				added_active: [],
+				removed_active: [],
+			},
+		};
+	}
+
+	const previousActive = activeSubjectKeys(previousCheckpoint);
+	const currentActive = activeSubjectKeys(checkpoint);
+	const previousSet = new Set(previousActive);
+	const currentSet = new Set(currentActive);
+	const addedActive = currentActive.filter((key) => !previousSet.has(key));
+	const removedActive = previousActive.filter((key) => !currentSet.has(key));
+	const membershipChanged = addedActive.length > 0 || removedActive.length > 0;
+	const hashChanged =
+		checkpoint.live_universe_hash !== previousCheckpoint.live_universe_hash;
+
+	if (membershipChanged && !hashChanged) {
+		throw new MarketLedgerError(
+			"CHECKPOINT_VALIDATION_FAILED",
+			"ACTIVE membership changed without a corresponding live_universe_hash change",
+		);
+	}
+
+	const status = membershipChanged
+		? "MEMBERSHIP_CHANGED"
+		: hashChanged
+			? "METADATA_CHANGED"
+			: "UNCHANGED";
+
+	return {
+		...checkpoint,
+		universe_transition: {
+			status,
+			previous_live_universe_hash: previousCheckpoint.live_universe_hash,
+			current_live_universe_hash: checkpoint.live_universe_hash,
+			hash_changed: hashChanged,
+			membership_changed: membershipChanged,
+			added_active: addedActive,
+			removed_active: removedActive,
+		},
+	};
+}
+
 function checkpointBody(checkpoint: MarketCheckpointPayload): string {
 	return `\`\`\`json\n${JSON.stringify(checkpoint, null, 2)}\n\`\`\``;
 }
@@ -426,13 +509,13 @@ export async function appendMarketCheckpoint(input: {
 			"checkpoint does not match the exact market ledger schema",
 		);
 	}
-	const checkpoint = parsed.data;
-	validateCheckpointRelations(checkpoint);
+	const submittedCheckpoint = parsed.data;
+	validateCheckpointRelations(submittedCheckpoint);
 
 	const state = await getMarketCheckpoints({
 		token: input.token,
-		tradingDate: checkpoint.trading_date,
-		scheduledSlot: checkpoint.scheduled_slot,
+		tradingDate: submittedCheckpoint.trading_date,
+		scheduledSlot: submittedCheckpoint.scheduled_slot,
 		fetchImpl: input.fetchImpl,
 	});
 	if (state.status === "CHECKPOINT_CONFLICT") {
@@ -442,7 +525,7 @@ export async function appendMarketCheckpoint(input: {
 		);
 	}
 	if (state.current_slot) {
-		if (checkpointEquals(checkpoint, state.current_slot.payload)) {
+		if (checkpointEquals(submittedCheckpoint, state.current_slot.payload)) {
 			return {
 				status: "IDEMPOTENT_REPLAY",
 				persisted: true,
@@ -457,6 +540,12 @@ export async function appendMarketCheckpoint(input: {
 			"same checkpoint idempotency key already exists with different content",
 		);
 	}
+
+	const checkpoint = withUniverseTransition(
+		submittedCheckpoint,
+		state.previous_checkpoint?.payload ?? null,
+	);
+	validateCheckpointRelations(checkpoint);
 
 	const expectedPrevious = state.previous_checkpoint?.comment_id ?? null;
 	if (checkpoint.previous_checkpoint_comment_id !== expectedPrevious) {
@@ -473,16 +562,15 @@ export async function appendMarketCheckpoint(input: {
 			"preopen_comment_id does not match the server-side ledger state",
 		);
 	}
-	if (checkpoint.scheduled_slot !== "09:10" && state.preopen) {
-		if (
-			checkpoint.production_ref !== state.preopen.payload.production_ref ||
-			checkpoint.live_universe_hash !== state.preopen.payload.live_universe_hash
-		) {
-			throw new MarketLedgerError(
-				"CHECKPOINT_CHAIN_MISMATCH",
-				"production_ref or live_universe_hash drifted from PREMARKET",
-			);
-		}
+	if (
+		checkpoint.scheduled_slot !== "09:10" &&
+		state.preopen &&
+		checkpoint.production_ref !== state.preopen.payload.production_ref
+	) {
+		throw new MarketLedgerError(
+			"CHECKPOINT_CHAIN_MISMATCH",
+			"production_ref drifted from PREMARKET",
+		);
 	}
 
 	const fetchImpl = input.fetchImpl ?? fetch;
