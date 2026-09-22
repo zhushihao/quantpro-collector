@@ -199,7 +199,7 @@ test("append_market_checkpoint appends fixed Issue #2 and verifies readback", as
 				);
 				const posted = JSON.parse(init.body);
 				const persisted = JSON.parse(
-					posted.body.match(/\`\`\`json\\s*([\\s\\S]*?)\\s*\`\`\`/)[1],
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
 				);
 				created = comment(102, persisted, "2026-09-21T01:50:05Z");
 				return jsonResponse(created, { status: 201 });
@@ -280,7 +280,7 @@ test("append_market_checkpoint allows ACTIVE removal and persists universe trans
 			if (method === "POST") {
 				const posted = JSON.parse(init.body);
 				const persisted = JSON.parse(
-					posted.body.match(/\`\`\`json\\s*([\\s\\S]*?)\\s*\`\`\`/)[1],
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
 				);
 				assert.equal(persisted.universe_transition.status, "MEMBERSHIP_CHANGED");
 				assert.equal(persisted.universe_transition.membership_changed, true);
@@ -393,7 +393,7 @@ test("market ledger E2E keeps strict chain across remove, add, replace and CLOSE
 		if (method === "POST") {
 			const posted = JSON.parse(init.body);
 			const persisted = JSON.parse(
-				posted.body.match(/\`\`\`json\\s*([\\s\\S]*?)\\s*\`\`\`/)[1],
+				posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
 			);
 			const created = comment(nextId++, persisted, new Date().toISOString());
 			comments.push(created);
