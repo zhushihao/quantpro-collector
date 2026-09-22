@@ -2,12 +2,12 @@
   "schema_version": "quantpro-automation-control-v2",
   "status": "PRODUCTION",
   "repository": "zhushihao/quantpro-collector",
-  "content_ref": "8b8f4c97a8155ea704c7604a0aa5dc95442f47d6",
+  "content_ref": "129a088aeb3d4711e7808da6bc4b31c14f3352fc",
   "registry": {
     "holding-assistant-intraday": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "8b8f4c97a8155ea704c7604a0aa5dc95442f47d6",
+      "production_ref": "129a088aeb3d4711e7808da6bc4b31c14f3352fc",
       "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "INTRADAY",
       "automation_guidance": [
@@ -19,7 +19,7 @@
     "holding-assistant-preclose": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "8b8f4c97a8155ea704c7604a0aa5dc95442f47d6",
+      "production_ref": "129a088aeb3d4711e7808da6bc4b31c14f3352fc",
       "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "PREOPEN_CLOSE",
       "automation_guidance": [
