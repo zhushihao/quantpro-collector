@@ -71,6 +71,104 @@ function sanitizeAppendCheckpoint(checkpoint) {
 	return callerCheckpoint;
 }
 
+function compactPreopenRecord(record) {
+	return {
+		subject_key: record?.subject_key,
+		instrument_key: record?.instrument_key,
+		name: record?.name,
+		group: record?.group,
+		holding_status: record?.holding_status,
+		previous_close_pct_change: record?.previous_close_pct_change,
+		action_gates: Array.isArray(record?.action_gates)
+			? record.action_gates.map((gate) => ({
+					action_gate_id: gate?.action_gate_id,
+					original_condition: gate?.original_condition,
+				}))
+			: [],
+	};
+}
+
+function compactPreviousRecord(record) {
+	return {
+		subject_key: record?.subject_key,
+		instrument_key: record?.instrument_key,
+		name: record?.name,
+		group: record?.group,
+		holding_status: record?.holding_status,
+		price: record?.price,
+		pct_change: record?.pct_change,
+		market_data_time: record?.market_data_time,
+		gate_status: record?.gate_status,
+	};
+}
+
+function compactCheckpoint(checkpoint) {
+	if (!checkpoint) return null;
+	const payload = checkpoint.payload ?? {};
+	const premarket = payload.observation_type === "PREMARKET";
+	return {
+		comment_id: checkpoint.comment_id,
+		created_at: checkpoint.created_at,
+		payload: {
+			schema_version: payload.schema_version,
+			prompt_id: payload.prompt_id,
+			production_ref: payload.production_ref,
+			portfolio_version: payload.portfolio_version,
+			event_id: payload.event_id,
+			idempotency_key: payload.idempotency_key,
+			trading_date: payload.trading_date,
+			as_of: payload.as_of,
+			scheduled_slot: payload.scheduled_slot,
+			observation_type: payload.observation_type,
+			previous_checkpoint_comment_id: payload.previous_checkpoint_comment_id,
+			preopen_comment_id: payload.preopen_comment_id,
+			live_universe_hash: payload.live_universe_hash,
+			records: Array.isArray(payload.records)
+				? payload.records.map(premarket ? compactPreopenRecord : compactPreviousRecord)
+				: [],
+		},
+	};
+}
+
+function checkpointSummary(checkpoint) {
+	if (!checkpoint) return null;
+	return {
+		comment_id: checkpoint.comment_id,
+		created_at: checkpoint.created_at,
+		payload: {
+			trading_date: checkpoint.payload?.trading_date,
+			scheduled_slot: checkpoint.payload?.scheduled_slot,
+			idempotency_key: checkpoint.payload?.idempotency_key,
+			production_ref: checkpoint.payload?.production_ref,
+			live_universe_hash: checkpoint.payload?.live_universe_hash,
+		},
+	};
+}
+
+function compactGetState(state) {
+	const currentDaySlots = Array.isArray(state?.current_day_checkpoints)
+		? state.current_day_checkpoints.map((checkpoint) => ({
+				scheduled_slot: checkpoint?.payload?.scheduled_slot ?? null,
+				comment_id: checkpoint?.comment_id ?? null,
+				created_at: checkpoint?.created_at ?? null,
+				idempotency_key: checkpoint?.payload?.idempotency_key ?? null,
+				live_universe_hash: checkpoint?.payload?.live_universe_hash ?? null,
+			}))
+		: [];
+
+	return {
+		status: state?.status,
+		trading_date: state?.trading_date,
+		scheduled_slot: state?.scheduled_slot,
+		preopen: compactCheckpoint(state?.preopen),
+		previous_checkpoint: compactCheckpoint(state?.previous_checkpoint),
+		previous_close: checkpointSummary(state?.previous_close),
+		current_slot: checkpointSummary(state?.current_slot),
+		current_day_slots: currentDaySlots,
+		conflicts: Array.isArray(state?.conflicts) ? state.conflicts : [],
+	};
+}
+
 export async function runMarketLedgerCli(argv, overrides = {}) {
 	const deps = {
 		tokenProvider: githubTokenFromGh,
@@ -90,7 +188,7 @@ export async function runMarketLedgerCli(argv, overrides = {}) {
 			const input = parseGetArgs(args);
 			const token = await deps.tokenProvider();
 			const state = await deps.getMarketCheckpoints({ token, ...input });
-			deps.writeStdout(JSON.stringify(state));
+			deps.writeStdout(JSON.stringify(compactGetState(state)));
 			return 0;
 		}
 
