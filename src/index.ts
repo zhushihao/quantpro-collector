@@ -63,6 +63,7 @@ import {
 import { ingestResearchReplicaRecord, type ResearchReplicaStorage } from "./research-replica.ts";
 import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
+import { withResearchReadRetry } from "./research-read-retry.ts";
 import {
 	appendMarketCheckpoint,
 	getMarketCheckpoints,
@@ -799,7 +800,9 @@ export function createServer(
 			};
 		}
 	};
-	const researchRead = researchDomain;
+	const researchRead = <T>(operation: () => Promise<T>) =>
+		researchDomain(() => withResearchReadRetry(operation));
+	const researchWrite = researchDomain;
 	const callerPrincipal = (): Promise<string | null> => formalResearchOwner(researchIssuer, researchPrincipal);
 	const requireResearchScope = (scope: string, tool: string) => {
 		if (researchScopes.has(scope)) return null;
@@ -1115,7 +1118,7 @@ export function createServer(
 			// principal and issuer, so callerPrincipal cannot return null here.
 		const owner = await callerPrincipal();
 			if (!owner) return requireFormalResearchClient("claim_research_job", RESEARCH_CLAIM_SCOPE)!;
-			return researchRead(async () =>
+			return researchWrite(async () =>
 				claimResearchJob(researchWorkflowDb(), {
 					jobId: job_id,
 					leaseOwner: owner,
@@ -1156,7 +1159,7 @@ export function createServer(
 			// principal and issuer, so callerPrincipal cannot return null here.
 		const owner = await callerPrincipal();
 			if (!owner) return requireFormalResearchClient("submit_research_result_proposal", RESEARCH_SUBMIT_SCOPE)!;
-			return researchRead(async () =>
+			return researchWrite(async () =>
 				submitResearchResultProposal(researchWorkflowDb(), {
 					jobId: job_id,
 					expectedGeneration: expected_generation,
@@ -1194,7 +1197,7 @@ export function createServer(
 			// principal and issuer, so callerPrincipal cannot return null here.
 		const owner = await callerPrincipal();
 			if (!owner) return requireFormalResearchClient("defer_research_job", RESEARCH_SUBMIT_SCOPE)!;
-			return researchRead(async () =>
+			return researchWrite(async () =>
 				deferResearchJob(researchWorkflowDb(), {
 					jobId: job_id,
 					expectedGeneration: expected_generation,
