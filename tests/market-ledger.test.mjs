@@ -50,6 +50,13 @@ function activeRecord(subjectKey) {
 	};
 }
 
+function activeInstrumentRecord(instrumentKey) {
+	return {
+		instrument_key: instrumentKey,
+		holding_status: "ACTIVE",
+	};
+}
+
 function comment(id, checkpoint, createdAt = "2026-09-21T01:10:00Z") {
 	return {
 		id,
@@ -235,6 +242,129 @@ test("append_market_checkpoint fails closed when checkpoint chain is stale", asy
 		(error) =>
 			error instanceof MarketLedgerError &&
 			error.code === "CHECKPOINT_CHAIN_MISMATCH",
+	);
+});
+
+test("append_market_checkpoint treats PREMARKET instrument_key and INTRADAY subject_key as the same ACTIVE membership", async () => {
+	const mixedPreopen = comment(
+		230,
+		payload({
+			date: "2026-09-24",
+			slot: "09:10",
+			records: [activeInstrumentRecord("300308.SZ"), activeInstrumentRecord("300502.SZ")],
+			universeHash: "sha256:mixed-same",
+		}),
+		"2026-09-24T01:10:00Z",
+	);
+	const proposed = payload({
+		date: "2026-09-24",
+		slot: "09:50",
+		previous: "230",
+		preopen: "230",
+		records: [activeRecord("300308.SZ"), activeRecord("300502.SZ")],
+		universeHash: "sha256:mixed-same",
+	});
+	let created = null;
+	const result = await appendMarketCheckpoint({
+		token: "fake-server-secret",
+		checkpoint: proposed,
+		fetchImpl: async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			if (method === "POST") {
+				const posted = JSON.parse(init.body);
+				const persisted = JSON.parse(
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
+				);
+				assert.equal(persisted.universe_transition.status, "UNCHANGED");
+				assert.equal(persisted.universe_transition.membership_changed, false);
+				created = comment(231, persisted, "2026-09-24T01:50:05Z");
+				return jsonResponse(created, { status: 201 });
+			}
+			if (url.endsWith("/issues/comments/231")) return jsonResponse(created);
+			return jsonResponse([previousClose, mixedPreopen]);
+		},
+	});
+	assert.equal(result.status, "PERSISTED");
+	assert.equal(result.checkpoint.universe_transition.status, "UNCHANGED");
+});
+
+test("append_market_checkpoint supports instrument_key-only ACTIVE records across checkpoints", async () => {
+	const instrumentPreopen = comment(
+		240,
+		payload({
+			date: "2026-09-24",
+			slot: "09:10",
+			records: [activeInstrumentRecord("300308.SZ"), activeInstrumentRecord("300502.SZ")],
+			universeHash: "sha256:instrument-only",
+		}),
+		"2026-09-24T01:10:00Z",
+	);
+	const proposed = payload({
+		date: "2026-09-24",
+		slot: "09:50",
+		previous: "240",
+		preopen: "240",
+		records: [activeInstrumentRecord("300308.SZ"), activeInstrumentRecord("300502.SZ")],
+		universeHash: "sha256:instrument-only",
+	});
+	let created = null;
+	const result = await appendMarketCheckpoint({
+		token: "fake-server-secret",
+		checkpoint: proposed,
+		fetchImpl: async (input, init) => {
+			const url = String(input);
+			const method = init?.method ?? "GET";
+			if (method === "POST") {
+				const posted = JSON.parse(init.body);
+				const persisted = JSON.parse(
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
+				);
+				assert.equal(persisted.universe_transition.status, "UNCHANGED");
+				created = comment(241, persisted, "2026-09-24T01:50:05Z");
+				return jsonResponse(created, { status: 201 });
+			}
+			if (url.endsWith("/issues/comments/241")) return jsonResponse(created);
+			return jsonResponse([previousClose, instrumentPreopen]);
+		},
+	});
+	assert.equal(result.status, "PERSISTED");
+});
+
+test("append_market_checkpoint fails closed when subject_key and instrument_key conflict", async () => {
+	const conflictPreopen = comment(
+		250,
+		payload({
+			date: "2026-09-24",
+			slot: "09:10",
+			records: [activeInstrumentRecord("300308.SZ")],
+			universeHash: "sha256:conflict",
+		}),
+	);
+	const proposed = payload({
+		date: "2026-09-24",
+		slot: "09:50",
+		previous: "250",
+		preopen: "250",
+		records: [
+			{
+				subject_key: "300308.SZ",
+				instrument_key: "300502.SZ",
+				holding_status: "ACTIVE",
+			},
+		],
+		universeHash: "sha256:conflict",
+	});
+	await assert.rejects(
+		appendMarketCheckpoint({
+			token: "fake-server-secret",
+			checkpoint: proposed,
+			fetchImpl: async () => jsonResponse([previousClose, conflictPreopen]),
+		}),
+		(error) =>
+			error instanceof MarketLedgerError &&
+			error.code === "CHECKPOINT_VALIDATION_FAILED" &&
+			error.message.includes("subject_key conflicts with instrument_key"),
 	);
 });
 
