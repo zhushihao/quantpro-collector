@@ -274,7 +274,7 @@ test("append_market_checkpoint treats PREMARKET instrument_key and INTRADAY subj
 			if (method === "POST") {
 				const posted = JSON.parse(init.body);
 				const persisted = JSON.parse(
-					posted.body.match(/```json\\s*([\\s\\S]*?)\\s*```/)[1],
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
 				);
 				assert.equal(persisted.universe_transition.status, "UNCHANGED");
 				assert.equal(persisted.universe_transition.membership_changed, false);
@@ -318,7 +318,7 @@ test("append_market_checkpoint supports instrument_key-only ACTIVE records acros
 			if (method === "POST") {
 				const posted = JSON.parse(init.body);
 				const persisted = JSON.parse(
-					posted.body.match(/```json\\s*([\\s\\S]*?)\\s*```/)[1],
+					posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1],
 				);
 				assert.equal(persisted.universe_transition.status, "UNCHANGED");
 				created = comment(241, persisted, "2026-09-24T01:50:05Z");
