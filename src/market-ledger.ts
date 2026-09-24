@@ -408,16 +408,35 @@ function checkpointEquals(
 	return JSON.stringify(canonicalize(left)) === JSON.stringify(canonicalize(right));
 }
 
-function activeSubjectKeys(checkpoint: MarketCheckpointPayload): string[] {
+function activeInstrumentKeys(checkpoint: MarketCheckpointPayload): string[] {
 	const keys = new Set<string>();
 	for (const record of checkpoint.records) {
-		if (
-			record.holding_status === "ACTIVE" &&
-			typeof record.subject_key === "string" &&
-			record.subject_key.length > 0
-		) {
-			keys.add(record.subject_key);
+		if (record.holding_status !== "ACTIVE") continue;
+
+		const subjectKey =
+			typeof record.subject_key === "string" && record.subject_key.trim().length > 0
+				? record.subject_key.trim()
+				: null;
+		const instrumentKey =
+			typeof record.instrument_key === "string" && record.instrument_key.trim().length > 0
+				? record.instrument_key.trim()
+				: null;
+
+		if (subjectKey !== null && instrumentKey !== null && subjectKey !== instrumentKey) {
+			throw new MarketLedgerError(
+				"CHECKPOINT_VALIDATION_FAILED",
+				"ACTIVE record subject_key conflicts with instrument_key",
+			);
 		}
+
+		const canonicalKey = subjectKey ?? instrumentKey;
+		if (canonicalKey === null) {
+			throw new MarketLedgerError(
+				"CHECKPOINT_VALIDATION_FAILED",
+				"ACTIVE record is missing subject_key/instrument_key",
+			);
+		}
+		keys.add(canonicalKey);
 	}
 	return [...keys].sort();
 }
@@ -441,8 +460,8 @@ function withUniverseTransition(
 		};
 	}
 
-	const previousActive = activeSubjectKeys(previousCheckpoint);
-	const currentActive = activeSubjectKeys(checkpoint);
+	const previousActive = activeInstrumentKeys(previousCheckpoint);
+	const currentActive = activeInstrumentKeys(checkpoint);
 	const previousSet = new Set(previousActive);
 	const currentSet = new Set(currentActive);
 	const addedActive = currentActive.filter((key) => !previousSet.has(key));
