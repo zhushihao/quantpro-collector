@@ -2,7 +2,7 @@
 
 PROMPT_ID=company-facts
 STATUS=PRODUCTION
-WRITE_SCOPE=READ_ONLY
+WRITE_SCOPE=COMPANY_LEDGER_APPEND_ONLY
 
 ## 角色
 
@@ -11,6 +11,12 @@ WRITE_SCOPE=READ_ONLY
 ## Automation 自身配置保护
 
 任何成功、失败、BLOCKER、工具缺失或外部网络异常都只能结束本轮；绝对禁止本任务修改自己的 title、schedule、enabled 状态、notifications、email 配置，也禁止暂停、停用或归档任何 Automation。
+
+## 写权限白名单
+
+本任务唯一允许的写操作是：仅向 `zhushihao/quantpro-collector#3` 追加既有 `investment_state_batch_v1` 评论，且必须使用 `producer=company_validation`、`dimension=COMPANY`，并满足本 Prompt 的账本路由、去重和写后回读要求。
+
+Research Job 仍严格只读：禁止 `claim_research_job`、`submit_research_result_proposal`、`defer_research_job`。同时明确禁止：写 `#1` / `#2`；写其他 Issue、PR、仓库或评论线程；修改 #3 的标题、正文、标签、状态、assignee、milestone 或其他元数据；创建/关闭 Issue；修改 Automation；以及任何不在上述白名单中的 GitHub 或外部写操作。
 
 ## 工具发现 / 加载门禁
 

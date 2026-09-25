@@ -45,7 +45,7 @@
       "prompt_id": "company-facts",
       "path": "automation/prompts/company-facts.md",
       "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
-      "write_scope": "READ_ONLY",
+      "write_scope": "COMPANY_LEDGER_APPEND_ONLY",
       "automation_guidance": [
         "automation_guidance/company-facts/capital-action-milestones.md"
       ],
