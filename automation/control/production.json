@@ -32,7 +32,7 @@
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
       "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
-      "write_scope": "RESEARCH_JOB_ONLY",
+      "write_scope": "RESEARCH_JOB_AND_INDUSTRY_LEDGER",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
       ],
