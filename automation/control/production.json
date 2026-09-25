@@ -31,7 +31,7 @@
     "industry-research": {
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
-      "production_ref": "339e83121a82e467c16913a3109e4cb121516faa",
+      "production_ref": "dcfee4d71af58d7b561ea3d57b185e43ab585973",
       "write_scope": "RESEARCH_JOB_AND_INDUSTRY_LEDGER",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
@@ -44,7 +44,7 @@
     "company-facts": {
       "prompt_id": "company-facts",
       "path": "automation/prompts/company-facts.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "dcfee4d71af58d7b561ea3d57b185e43ab585973",
       "write_scope": "COMPANY_LEDGER_APPEND_ONLY",
       "automation_guidance": [
         "automation_guidance/company-facts/capital-action-milestones.md"
