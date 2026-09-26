@@ -108,7 +108,7 @@ test("legacy scope compatibility never grants state write to market-read-only ca
 	}
 });
 
-test("State Gateway MCP exposes five narrow tools without caller-controlled external targets", async () => {
+test("State Gateway MCP exposes narrow tools without caller-controlled external targets", async () => {
 	const server = createServer(
 		undefined,
 		"ENABLED",
@@ -125,6 +125,7 @@ test("State Gateway MCP exposes five narrow tools without caller-controlled exte
 			"append_state_batch",
 			"get_gateway_status",
 			"get_state_snapshot",
+			"read_state_snapshot",
 			"get_state_write_receipt",
 			"validate_state_batch",
 		];
@@ -160,6 +161,9 @@ test("State Gateway MCP exposes five narrow tools without caller-controlled exte
 		assert.match(snapshotSchema, /CN:\[0-9\]\{6\}/);
 		assert.match(snapshotSchema, /HK:\[0-9\]\{5\}/);
 		assert.doesNotMatch(snapshotSchema, /\\\\d/);
+		const compatibleSnapshot = tools.read_state_snapshot.inputSchema;
+		assert.equal(compatibleSnapshot.properties.symbols.items.pattern, undefined);
+		assert.equal(compatibleSnapshot.properties.trading_date.pattern, undefined);
 		assert.equal(tools.append_state_batch.annotations.readOnlyHint, false);
 		assert.equal(tools.append_state_batch.annotations.destructiveHint, false);
 		assert.equal(tools.append_state_batch.annotations.idempotentHint, true);

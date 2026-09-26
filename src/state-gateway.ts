@@ -414,6 +414,23 @@ export async function getStateSnapshot(input: {
 	fully_paginated: true;
 	channels: Record<string, unknown>;
 }> {
+	const invalidSymbol = input.symbols.find(
+		(symbol) => !/^(?:CN:[0-9]{6}|HK:[0-9]{5})$/.test(symbol),
+	);
+	if (invalidSymbol) {
+		throw new StateGatewayError({
+			code: "STATE_VALIDATION_FAILED",
+			phase: "VALIDATE",
+			message: `invalid state symbol: ${invalidSymbol}`,
+		});
+	}
+	if (input.tradingDate && !/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(input.tradingDate)) {
+		throw new StateGatewayError({
+			code: "STATE_VALIDATION_FAILED",
+			phase: "VALIDATE",
+			message: "trading_date must use YYYY-MM-DD",
+		});
+	}
 	if (!input.token) {
 		throw new StateGatewayError({
 			code: "STATE_UNAVAILABLE",
@@ -640,6 +657,7 @@ export async function getGatewayStatus(input: {
 		mcp_contract_version: STATE_GATEWAY_CONTRACT_VERSION,
 		registered_tools: [
 			"get_state_snapshot",
+			"read_state_snapshot",
 			"validate_state_batch",
 			"append_state_batch",
 			"get_state_write_receipt",
