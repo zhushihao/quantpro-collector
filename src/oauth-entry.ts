@@ -14,6 +14,7 @@ import {
 	RESEARCH_CLAIM_SCOPE,
 	RESEARCH_SUBMIT_SCOPE,
 } from "./research-scopes";
+import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes";
 
 const ORIGIN = "https://cn-hk-quotes-mcp.zhushihao710.workers.dev";
 const MCP_RESOURCE = `${ORIGIN}/mcp`;
@@ -24,12 +25,16 @@ const SUPPORTED_SCOPES: readonly string[] = [
 	MARKET_READ_SCOPE,
 	RESEARCH_CLAIM_SCOPE,
 	RESEARCH_SUBMIT_SCOPE,
+	STATE_READ_SCOPE,
+	STATE_WRITE_SCOPE,
 	OFFLINE_ACCESS_SCOPE,
 ];
 const RESOURCE_SUPPORTED_SCOPES: readonly string[] = [
 	MARKET_READ_SCOPE,
 	RESEARCH_CLAIM_SCOPE,
 	RESEARCH_SUBMIT_SCOPE,
+	STATE_READ_SCOPE,
+	STATE_WRITE_SCOPE,
 ];
 const OWNER_USER_ID = "quantpro-owner";
 const MAX_OWNER_KEY_LENGTH = 512;
@@ -240,6 +245,11 @@ function authorizationPage(options: {
 	)
 		? `<p class="muted">研究工作流：认领/提交研究候选。</p>`
 		: "";
+	const stateNote = options.scopes.some(
+		(scope) => scope === STATE_READ_SCOPE || scope === STATE_WRITE_SCOPE,
+	)
+		? `<p class="muted">状态网关：按固定 Channel 读取/追加 QuantPro 生产状态账本；不能选择任意外部目标。</p>`
+		: "";
 	return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -257,13 +267,13 @@ code{background:#f1f2f4;padding:2px 5px;border-radius:4px}
 <body><main>
 <h1>授权 QuantPro Collector</h1>
 <p>客户端：<strong>${escapeHtml(options.clientName)}</strong></p>
-<p class="muted">仅授权只读行情能力。不会授予交易、撤单、账户、成本或订单权限。</p>
-${researchNote}<ul>${scopeList}</ul>${error}
+<p class="muted">授权范围仅限所列 QuantPro 能力；不会授予交易、撤单、账户、成本或订单权限。</p>
+${researchNote}${stateNote}<ul>${scopeList}</ul>${error}
 <form method="post" action="${escapeHtml(options.action)}" autocomplete="off">
 <input type="hidden" name="csrf" value="${escapeHtml(options.csrf)}">
 <label for="owner_key">QuantPro Collector 授权密钥</label>
 <input id="owner_key" name="owner_key" type="password" required maxlength="${MAX_OWNER_KEY_LENGTH}" autocomplete="off">
-<button type="submit">授权只读访问</button>
+<button type="submit">授权访问</button>
 </form>
 </main></body></html>`;
 }

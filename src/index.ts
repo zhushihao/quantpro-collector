@@ -65,12 +65,21 @@ import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import { withResearchReadRetry } from "./research-read-retry.ts";
 import {
-	appendMarketCheckpoint,
 	getMarketCheckpoints,
 	MARKET_CHECKPOINT_INPUT_SCHEMA,
 	MARKET_LEDGER_SLOT_SCHEMA,
 	MarketLedgerError,
 } from "./market-ledger.ts";
+import {
+	appendStateBatch,
+	getGatewayStatus,
+	getStateSnapshot,
+	getStateWriteReceipt,
+	STATE_CHANNEL_SCHEMA,
+	StateGatewayError,
+	validateStateBatch,
+} from "./state-gateway.ts";
+import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
 const GITHUB_ISSUE_NUMBER = 1;
@@ -99,6 +108,11 @@ interface Env {
 	RESEARCH_OBJECTS?: R2Bucket;
 	/** RESEARCH 私有 transport credential；ingest 与 receipts 共用，不与 market/research OAuth scopes 混用。 */
 	RESEARCH_REPLICA_INGEST_TOKEN?: string;
+	CF_VERSION_METADATA?: {
+		id: string;
+		tag: string;
+		timestamp: string;
+	};
 }
 
 /**
@@ -581,7 +595,7 @@ export function createServer(
 ) {
 	const server = new McpServer({
 		name: "QuantPro Collector",
-		version: "1.1.0",
+		version: "1.2.0",
 	});
 
 	// 保留测试工具，确认 MCP 基础链路持续正常
@@ -642,11 +656,9 @@ export function createServer(
 			const context = bridgeContext("mcp:get_portfolio_quotes");
 			try {
 				if (!env) throw new BridgeError("quote_catalog", "runtime env is required");
-				const upstream = await fetchPrivateCatalogSnapshot(
-					context,
-					env,
-					{ liveOverlayStatus },
-				);
+				const upstream = await fetchPrivateCatalogSnapshot(context, env, {
+					liveOverlayStatus,
+				});
 				// 双契约（issue #7 Step 2）：有效 bearer 保留完整 LIVE 语义；
 				// 匿名 / 未授权调用投影为 quote-only（白名单 + 精确键断言）。
 				const displaySnapshot = isLiveOverlayEnabled(liveOverlayStatus)
@@ -803,7 +815,8 @@ export function createServer(
 	const researchRead = <T>(operation: () => Promise<T>) =>
 		researchDomain(() => withResearchReadRetry(operation));
 	const researchWrite = researchDomain;
-	const callerPrincipal = (): Promise<string | null> => formalResearchOwner(researchIssuer, researchPrincipal);
+	const callerPrincipal = (): Promise<string | null> =>
+		formalResearchOwner(researchIssuer, researchPrincipal);
 	const requireResearchScope = (scope: string, tool: string) => {
 		if (researchScopes.has(scope)) return null;
 		const safe = new ResearchBoundaryError("FILTERED").asError();
@@ -827,20 +840,315 @@ export function createServer(
 	const requireFormalResearchClient = (tool: string, requiredScope: string) => {
 		// #19：正式身份 = 已验证 stable principal + issuer + 必需 scope；
 		// Job eligibility 完全由服务端记录/租约状态裁决，job_id 格式不参与授权。
-		if (permitsFormalResearchOperation({
-			principal: researchPrincipal,
-			issuer: researchIssuer,
-			scopes: researchScopes,
-			requiredScope,
-		})) return null;
+		if (
+			permitsFormalResearchOperation({
+				principal: researchPrincipal,
+				issuer: researchIssuer,
+				scopes: researchScopes,
+				requiredScope,
+			})
+		)
+			return null;
 		const safe = new ResearchBoundaryError("FILTERED").asError();
-		console.log(JSON.stringify({ event: "research_tool_client_denied", tool, principal: researchPrincipal ?? null, request_id: safe.request_id }));
-		return { isError: true as const, content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }] };
+		console.log(
+			JSON.stringify({
+				event: "research_tool_client_denied",
+				tool,
+				principal: researchPrincipal ?? null,
+				request_id: safe.request_id,
+			}),
+		);
+		return {
+			isError: true as const,
+			content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
+		};
 	};
 
+	const stateGatewayErrorResponse = (error: unknown) => {
+		const safe =
+			error instanceof StateGatewayError
+				? {
+						status: error.code,
+						phase: error.phase,
+						retryable: error.retryable,
+						request_id: error.requestId,
+						message: error.message,
+						...(error.httpStatus == null ? {} : { http_status: error.httpStatus }),
+					}
+				: {
+						status: "STATE_UNAVAILABLE",
+						phase: "READ",
+						retryable: true,
+						request_id: crypto.randomUUID().replaceAll("-", ""),
+						message: "state gateway operation failed",
+					};
+		return {
+			isError: true as const,
+			content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
+		};
+	};
+	const requireStateScope = (scope: string, tool: string) => {
+		if (
+			permitsFormalResearchOperation({
+				principal: researchPrincipal,
+				issuer: researchIssuer,
+				scopes: researchScopes,
+				requiredScope: scope,
+			})
+		) {
+			return null;
+		}
+		const error = new StateGatewayError({
+			code: "STATE_FORBIDDEN",
+			phase: "AUTH",
+			message: "state gateway scope or formal principal is not authorized",
+		});
+		console.log(
+			JSON.stringify({
+				event: "state_gateway_scope_denied",
+				timestamp: new Date().toISOString(),
+				tool,
+				required_scope: scope,
+				principal: researchPrincipal ?? null,
+				request_id: error.requestId,
+			}),
+		);
+		return stateGatewayErrorResponse(error);
+	};
+
+	server.registerTool(
+		"get_state_snapshot",
+		{
+			description:
+				"读取固定生产状态账本：MARKET 固定 Issue #2，INDUSTRY/COMPANY/CLOSE 固定 Issue #3。调用方不能指定外部目标。需要 state:read scope。",
+			inputSchema: z.object({
+				symbols: z
+					.array(z.string().regex(/^(?:CN:\\d{6}|HK:\\d{5})$/))
+					.min(1)
+					.max(512),
+				include: z.array(STATE_CHANNEL_SCHEMA).min(1).max(4),
+				trading_date: z
+					.string()
+					.regex(/^\\d{4}-\\d{2}-\\d{2}$/)
+					.optional(),
+				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA.optional(),
+				history_limit: z.number().int().min(0).max(20).optional(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async ({ symbols, include, trading_date, scheduled_slot, history_limit }) => {
+			const denied = requireStateScope(STATE_READ_SCOPE, "get_state_snapshot");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "READ",
+						message: "GitHub ledger credential is not configured",
+					}),
+				);
+			}
+			try {
+				const result = await getStateSnapshot({
+					token: env.GITHUB_TOKEN,
+					symbols,
+					include,
+					tradingDate: trading_date,
+					scheduledSlot: scheduled_slot,
+					historyLimit: history_limit,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"validate_state_batch",
+		{
+			description:
+				"仅校验 State Gateway batch，不产生外部写入；返回 channel、write_key、schema version 与 canonical payload hash。需要 state:read scope。",
+			inputSchema: z.object({ channel: STATE_CHANNEL_SCHEMA, batch: z.unknown() }),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async ({ channel, batch }) => {
+			const denied = requireStateScope(STATE_READ_SCOPE, "validate_state_batch");
+			if (denied) return denied;
+			try {
+				const result = await validateStateBatch(channel, batch);
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify(
+								{
+									status: result.status,
+									channel: result.channel,
+									write_key: result.write_key,
+									payload_sha256: result.payload_sha256,
+									schema_version: result.schema_version,
+								},
+								null,
+								2,
+							),
+						},
+					],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"append_state_batch",
+		{
+			description:
+				"将 exact-schema 状态批次 append-only 持久化到固定 QuantPro 账本。调用方只能选择 MARKET/INDUSTRY/COMPANY/CLOSE，不能选择 repo、issue、URL、credential、producer 或 dimension。服务端执行权限、幂等、关系校验、持久化回执与写后回读。需要 state:write scope。",
+			inputSchema: z.object({ channel: STATE_CHANNEL_SCHEMA, batch: z.unknown() }),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async ({ channel, batch }) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "append_state_batch");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
+				);
+			}
+			try {
+				const result = await appendStateBatch({
+					db: env.RESEARCH_REPLICA,
+					token: env.GITHUB_TOKEN,
+					channel,
+					batch,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_state_write_receipt",
+		{
+			description:
+				"读取 State Gateway D1 持久化回执。只接受 channel + write_key，不返回 credential。需要 state:read scope。",
+			inputSchema: z.object({
+				channel: STATE_CHANNEL_SCHEMA,
+				write_key: z.string().min(1).max(512),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async ({ channel, write_key }) => {
+			const denied = requireStateScope(STATE_READ_SCOPE, "get_state_write_receipt");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "READ",
+						message: "State Gateway receipt storage is not configured",
+					}),
+				);
+			}
+			try {
+				const receipt = await getStateWriteReceipt(env.RESEARCH_REPLICA, write_key);
+				if (receipt && receipt.channel !== channel) {
+					return stateGatewayErrorResponse(
+						new StateGatewayError({
+							code: "STATE_CONFLICT",
+							phase: "READ",
+							message: "write_key belongs to a different state channel",
+						}),
+					);
+				}
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify(
+								{ status: receipt ? "OK" : "NOT_FOUND", receipt },
+								null,
+								2,
+							),
+						},
+					],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_gateway_status",
+		{
+			description:
+				"读取 Collector State Gateway 的版本、Channel、有效 scopes 与固定账本可达性，用于发现源码/部署/tools-list 漂移；不返回 secret。已认证正式主体持有 market:read 即可诊断。",
+			inputSchema: z.object({}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async () => {
+			const denied = requireStateScope(MARKET_READ_SCOPE, "get_gateway_status");
+			if (denied) return denied;
+			try {
+				const result = await getGatewayStatus({
+					token: env?.GITHUB_TOKEN,
+					effectiveScopes: researchScopes,
+					principalVerified: Boolean(researchPrincipal && researchIssuer),
+					deployedGitSha: env?.CF_VERSION_METADATA?.tag ?? null,
+					cloudflareVersionId: env?.CF_VERSION_METADATA?.id ?? null,
+					cloudflareVersionTimestamp: env?.CF_VERSION_METADATA?.timestamp ?? null,
+					serviceVersion: "1.2.0",
+					db: env?.RESEARCH_REPLICA,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
 	const marketLedgerErrorResponse = (error: unknown) => {
-		const code =
-			error instanceof MarketLedgerError ? error.code : "MARKET_LEDGER_UNAVAILABLE";
+		const code = error instanceof MarketLedgerError ? error.code : "MARKET_LEDGER_UNAVAILABLE";
 		const message =
 			error instanceof MarketLedgerError ? error.message : "Market ledger operation failed";
 		return {
@@ -854,10 +1162,7 @@ export function createServer(
 		};
 	};
 	const requireMarketLedgerRead = (tool: string) => {
-		if (
-			isLiveOverlayEnabled(liveOverlayStatus) &&
-			researchScopes.has(MARKET_READ_SCOPE)
-		) {
+		if (isLiveOverlayEnabled(liveOverlayStatus) && researchScopes.has(MARKET_READ_SCOPE)) {
 			return null;
 		}
 		console.log(
@@ -886,41 +1191,7 @@ export function createServer(
 			],
 		};
 	};
-	const requireMarketLedgerAppend = (tool: string) => {
-		const readDenied = requireMarketLedgerRead(tool);
-		if (readDenied) return readDenied;
-		if (
-			permitsFormalResearchOperation({
-				principal: researchPrincipal,
-				issuer: researchIssuer,
-				scopes: researchScopes,
-				requiredScope: MARKET_READ_SCOPE,
-			})
-		) {
-			return null;
-		}
-		console.log(
-			JSON.stringify({
-				event: "market_ledger_client_denied",
-				timestamp: new Date().toISOString(),
-				tool,
-				principal: researchPrincipal ?? null,
-			}),
-		);
-		return {
-			isError: true as const,
-			content: [
-				{
-					type: "text" as const,
-					text: JSON.stringify(
-						{ status: "MARKET_LEDGER_FORBIDDEN", required_scope: MARKET_READ_SCOPE },
-						null,
-						2,
-					),
-				},
-			],
-		};
-	};
+	const requireMarketLedgerAppend = (tool: string) => requireStateScope(STATE_WRITE_SCOPE, tool);
 
 	server.registerTool(
 		"get_market_checkpoints",
@@ -931,6 +1202,12 @@ export function createServer(
 				trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
 			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
 		},
 		async ({ trading_date, scheduled_slot }) => {
 			const denied = requireMarketLedgerRead("get_market_checkpoints");
@@ -950,9 +1227,7 @@ export function createServer(
 					scheduledSlot: scheduled_slot,
 				});
 				return {
-					content: [
-						{ type: "text" as const, text: JSON.stringify(state, null, 2) },
-					],
+					content: [{ type: "text" as const, text: JSON.stringify(state, null, 2) }],
 				};
 			} catch (error) {
 				return marketLedgerErrorResponse(error);
@@ -964,34 +1239,71 @@ export function createServer(
 		"append_market_checkpoint",
 		{
 			description:
-				"将 holding-assistant 检查点 append-only 持久化到固定账本 zhushihao/quantpro-collector#2。服务端负责 exact schema、幂等查重、previous checkpoint/preopen 链校验、GitHub 写入与写后回读；不接受 repo、issue、token 或任意 GitHub 写目标。仅允许已认证的正式 chatgpt-production 主体使用。",
+				"DEPRECATED 兼容入口：将 holding-assistant 检查点通过 State Gateway MARKET profile 持久化到固定 Issue #2。必须通过 state:write、D1 receipt、幂等、链校验和写后回读；不接受任意外部目标。",
 			inputSchema: z.object({
 				checkpoint: MARKET_CHECKPOINT_INPUT_SCHEMA,
 			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
 		},
 		async ({ checkpoint }) => {
 			const denied = requireMarketLedgerAppend("append_market_checkpoint");
 			if (denied) return denied;
-			if (!env?.GITHUB_TOKEN) {
-				return marketLedgerErrorResponse(
-					new MarketLedgerError(
-						"MARKET_LEDGER_UNAVAILABLE",
-						"GitHub ledger credential is not configured",
-					),
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
 				);
 			}
 			try {
-				const result = await appendMarketCheckpoint({
+				const gatewayResult = await appendStateBatch({
+					db: env.RESEARCH_REPLICA,
 					token: env.GITHUB_TOKEN,
-					checkpoint,
+					channel: "MARKET",
+					batch: checkpoint,
 				});
+				const state = await getMarketCheckpoints({
+					token: env.GITHUB_TOKEN,
+					tradingDate: checkpoint.trading_date,
+					scheduledSlot: checkpoint.scheduled_slot,
+				});
+				const current = state.current_slot;
+				if (!current || current.comment_id !== gatewayResult.comment_id) {
+					throw new StateGatewayError({
+						code: "STATE_READBACK_FAILED",
+						phase: "READBACK",
+						message: "legacy MARKET wrapper could not resolve the persisted checkpoint",
+						retryable: true,
+					});
+				}
 				return {
 					content: [
-						{ type: "text" as const, text: JSON.stringify(result, null, 2) },
+						{
+							type: "text" as const,
+							text: JSON.stringify(
+								{
+									status: gatewayResult.status,
+									persisted: true,
+									comment_id: current.comment_id,
+									url: current.url,
+									created_at: current.created_at,
+									checkpoint: current.payload,
+								},
+								null,
+								2,
+							),
+						},
 					],
 				};
 			} catch (error) {
-				return marketLedgerErrorResponse(error);
+				return stateGatewayErrorResponse(error);
 			}
 		},
 	);
@@ -1061,7 +1373,8 @@ export function createServer(
 	server.registerTool(
 		"get_source_health",
 		{
-			description: "读取 Research source health（outbound-v3 source_health 记录投影，实读 replica）。",
+			description:
+				"读取 Research source health（outbound-v3 source_health 记录投影，实读 replica）。",
 			inputSchema: z.object({
 				limit: z.number().int().min(1).max(100).optional(),
 			}),
@@ -1112,12 +1425,16 @@ export function createServer(
 		async ({ job_id }) => {
 			const denied = requireResearchScope(RESEARCH_CLAIM_SCOPE, "claim_research_job");
 			if (denied) return denied;
-			const clientDenied = requireFormalResearchClient("claim_research_job", RESEARCH_CLAIM_SCOPE);
+			const clientDenied = requireFormalResearchClient(
+				"claim_research_job",
+				RESEARCH_CLAIM_SCOPE,
+			);
 			if (clientDenied) return clientDenied;
 			// Belt-and-suspenders: the formal gate above already implies a non-null
 			// principal and issuer, so callerPrincipal cannot return null here.
-		const owner = await callerPrincipal();
-			if (!owner) return requireFormalResearchClient("claim_research_job", RESEARCH_CLAIM_SCOPE)!;
+			const owner = await callerPrincipal();
+			if (!owner)
+				return requireFormalResearchClient("claim_research_job", RESEARCH_CLAIM_SCOPE)!;
 			return researchWrite(async () =>
 				claimResearchJob(researchWorkflowDb(), {
 					jobId: job_id,
@@ -1135,8 +1452,8 @@ export function createServer(
 				"提交研究结果 proposal。正式（CHATGPT）提交被接受即 Job 终态 COMPLETED；非生产主体的 CHATGPT 声明一律降级为 SYNTHETIC 隔离存储（不完成 Job）。需要 research:submit scope。" +
 				" proposal 是 exact-keys 对象——键集合必须与下面完全一致，多余/缺失/改名任一都会被拒（REJECTED=VALIDATION_FAILED）：" +
 				" job_id（必须等于本工具的 job_id 参数）；summary（非空字符串，≤4000 字符）；" +
-				" findings（数组 ≤50 项，每项恰为 {claim: 字符串 ≤2000, evidence_ids: 字符串数组且元素非空, confidence: \"HIGH\"|\"MEDIUM\"|\"LOW\", counter_evidence: null 或字符串 ≤2000}）；" +
-				" recommendation_hint（枚举 \"NONE\"|\"THESIS_REVIEW\"|\"COUNTER_EVIDENCE_FOUND\"|\"NO_SECOND_SOURCE\"|\"INSUFFICIENT_DATA\"）；" +
+				' findings（数组 ≤50 项，每项恰为 {claim: 字符串 ≤2000, evidence_ids: 字符串数组且元素非空, confidence: "HIGH"|"MEDIUM"|"LOW", counter_evidence: null 或字符串 ≤2000}）；' +
+				' recommendation_hint（枚举 "NONE"|"THESIS_REVIEW"|"COUNTER_EVIDENCE_FOUND"|"NO_SECOND_SOURCE"|"INSUFFICIENT_DATA"）；' +
 				" sources_consulted（字符串数组 ≤100 项，每项 ≤500 字符，可为空数组）；completed_at（可解析的 ISO 时间字符串）；" +
 				" 可选 tokens_used（非负整数）。禁止任何其他键；整体负载 ≤64KiB。" +
 				" 写权限由服务端裁决：当前 OAuth 稳定主体必须是该 Job 现行租约的持有者，expected_generation 取 claim_research_job 返回的 lease_generation；不需要也不接受任何提交凭据。" +
@@ -1151,14 +1468,24 @@ export function createServer(
 			}),
 		},
 		async ({ job_id, expected_generation, idempotency_key, origin, proposal }) => {
-			const denied = requireResearchScope(RESEARCH_SUBMIT_SCOPE, "submit_research_result_proposal");
+			const denied = requireResearchScope(
+				RESEARCH_SUBMIT_SCOPE,
+				"submit_research_result_proposal",
+			);
 			if (denied) return denied;
-			const clientDenied = requireFormalResearchClient("submit_research_result_proposal", RESEARCH_SUBMIT_SCOPE);
+			const clientDenied = requireFormalResearchClient(
+				"submit_research_result_proposal",
+				RESEARCH_SUBMIT_SCOPE,
+			);
 			if (clientDenied) return clientDenied;
 			// Belt-and-suspenders: the formal gate above already implies a non-null
 			// principal and issuer, so callerPrincipal cannot return null here.
-		const owner = await callerPrincipal();
-			if (!owner) return requireFormalResearchClient("submit_research_result_proposal", RESEARCH_SUBMIT_SCOPE)!;
+			const owner = await callerPrincipal();
+			if (!owner)
+				return requireFormalResearchClient(
+					"submit_research_result_proposal",
+					RESEARCH_SUBMIT_SCOPE,
+				)!;
 			return researchWrite(async () =>
 				submitResearchResultProposal(researchWorkflowDb(), {
 					jobId: job_id,
@@ -1191,12 +1518,16 @@ export function createServer(
 		async ({ job_id, expected_generation, idempotency_key, reason, recheck_at }) => {
 			const denied = requireResearchScope(RESEARCH_SUBMIT_SCOPE, "defer_research_job");
 			if (denied) return denied;
-			const clientDenied = requireFormalResearchClient("defer_research_job", RESEARCH_SUBMIT_SCOPE);
+			const clientDenied = requireFormalResearchClient(
+				"defer_research_job",
+				RESEARCH_SUBMIT_SCOPE,
+			);
 			if (clientDenied) return clientDenied;
 			// Belt-and-suspenders: the formal gate above already implies a non-null
 			// principal and issuer, so callerPrincipal cannot return null here.
-		const owner = await callerPrincipal();
-			if (!owner) return requireFormalResearchClient("defer_research_job", RESEARCH_SUBMIT_SCOPE)!;
+			const owner = await callerPrincipal();
+			if (!owner)
+				return requireFormalResearchClient("defer_research_job", RESEARCH_SUBMIT_SCOPE)!;
 			return researchWrite(async () =>
 				deferResearchJob(researchWorkflowDb(), {
 					jobId: job_id,
@@ -1765,7 +2096,13 @@ export default {
 				ctx.requestInfo?.headers.get(FORWARDED_ISSUER_HEADER) ?? null,
 				env.COLLECTOR_MCP_CLIENT_TOKEN,
 			);
-			return createServer(env, liveOverlayStatus, researchScopes, researchPrincipal, researchIssuer);
+			return createServer(
+				env,
+				liveOverlayStatus,
+				researchScopes,
+				researchPrincipal,
+				researchIssuer,
+			);
 		});
 		return handler(request, env, ctx);
 	},

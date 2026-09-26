@@ -3,7 +3,7 @@ import { z } from "zod";
 export const INVESTMENT_LEDGER_REPOSITORY = "zhushihao/quantpro-collector";
 export const INVESTMENT_LEDGER_ISSUE_NUMBER = 3;
 
-export const INVESTMENT_LEDGER_ROLES = ["industry", "company"] as const;
+export const INVESTMENT_LEDGER_ROLES = ["industry", "company", "close"] as const;
 export type InvestmentLedgerRole = (typeof INVESTMENT_LEDGER_ROLES)[number];
 
 const ROLE_CONFIG = {
@@ -18,6 +18,12 @@ const ROLE_CONFIG = {
 		dimension: "COMPANY",
 		sourceTask: "公司事实监控",
 		allowedRProposals: new Set(["R2"]),
+	},
+	close: {
+		producer: "close_review",
+		dimension: "CLOSE",
+		sourceTask: "持仓助手｜收盘",
+		allowedRProposals: new Set<string>(),
 	},
 } as const;
 
@@ -42,10 +48,12 @@ export const INVESTMENT_LEDGER_EVENT_INPUT_SCHEMA = z
 		company_thesis: OPTIONAL_TEXT,
 		company_validation: OPTIONAL_TEXT,
 		r_proposal: z.union([z.enum(["R0", "R1", "R2"]), z.null()]).optional(),
-		effective_r_state: z.null().optional(),
-		market_confirmation: z.null().optional(),
-		r4_candidate: z.null().optional(),
-		close_thesis_view: z.null().optional(),
+		effective_r_state: z
+			.union([z.enum(["R0", "R1", "R2", "R3", "R4"]), z.null()])
+			.optional(),
+		market_confirmation: OPTIONAL_TEXT,
+		r4_candidate: z.union([z.boolean(), z.null()]).optional(),
+		close_thesis_view: OPTIONAL_TEXT,
 		evidence_types: z.array(EVIDENCE_TYPE_SCHEMA).max(6),
 		evidence_keys: z.array(z.string().min(1).max(512)).max(100),
 		counter_evidence: z.array(z.string().min(1).max(4000)).max(20),
@@ -68,12 +76,12 @@ export type InvestmentLedgerBatchInput = z.infer<typeof INVESTMENT_LEDGER_BATCH_
 export type InvestmentLedgerEventInput = z.infer<typeof INVESTMENT_LEDGER_EVENT_INPUT_SCHEMA>;
 
 export type PersistedInvestmentEvent = InvestmentLedgerEventInput & {
-	dimension: "INDUSTRY" | "COMPANY";
+	dimension: "INDUSTRY" | "COMPANY" | "CLOSE";
 };
 
 export type PersistedInvestmentBatch = InvestmentLedgerBatchInput & {
-	producer: "industry_trend" | "company_validation";
-	source_task: "产业趋势与研究" | "公司事实监控";
+	producer: "industry_trend" | "company_validation" | "close_review";
+	source_task: "产业趋势与研究" | "公司事实监控" | "持仓助手｜收盘";
 	events: PersistedInvestmentEvent[];
 };
 
@@ -95,7 +103,7 @@ export type InvestmentLedgerComment = {
 export type InvestmentLedgerState = {
 	status: "OK";
 	producer: string;
-	dimension: "INDUSTRY" | "COMPANY";
+	dimension: "INDUSTRY" | "COMPANY" | "CLOSE";
 	fully_paginated: true;
 	symbols: string[];
 	latest_by_symbol: Record<
@@ -106,6 +114,16 @@ export type InvestmentLedgerState = {
 			as_of: string;
 			event: PersistedInvestmentEvent;
 		} | null
+	>;
+	latest_r_proposal_by_symbol: Record<string, "R0" | "R1" | "R2" | null>;
+	history_by_symbol: Record<
+		string,
+		Array<{
+			comment_id: string;
+			created_at: string;
+			as_of: string;
+			event: PersistedInvestmentEvent;
+		}>
 	>;
 	evidence_keys_by_symbol: Record<string, string[]>;
 	event_count_by_symbol: Record<string, number>;
@@ -186,7 +204,7 @@ function roleConfig(role: InvestmentLedgerRole) {
 	return ROLE_CONFIG[role];
 }
 
-function validateRoleSemantics(
+export function validateRoleSemantics(
 	role: InvestmentLedgerRole,
 	batch: InvestmentLedgerBatchInput,
 ): void {
@@ -216,17 +234,57 @@ function validateRoleSemantics(
 			);
 		}
 		if (role === "industry") {
-			if (event.company_thesis != null || event.company_validation != null) {
+			if (
+				event.company_thesis != null ||
+				event.company_validation != null ||
+				event.effective_r_state != null ||
+				event.market_confirmation != null ||
+				event.r4_candidate != null ||
+				event.close_thesis_view != null
+			) {
 				throw new InvestmentLedgerError(
 					"INVESTMENT_LEDGER_VALIDATION_FAILED",
-					"industry writer cannot persist company fields",
+					"industry writer cannot persist company or close fields",
 				);
 			}
-		} else if (event.industry_thesis != null) {
-			throw new InvestmentLedgerError(
-				"INVESTMENT_LEDGER_VALIDATION_FAILED",
-				"company writer cannot persist industry_thesis",
-			);
+		} else if (role === "company") {
+			if (
+				event.industry_thesis != null ||
+				event.effective_r_state != null ||
+				event.market_confirmation != null ||
+				event.r4_candidate != null ||
+				event.close_thesis_view != null
+			) {
+				throw new InvestmentLedgerError(
+					"INVESTMENT_LEDGER_VALIDATION_FAILED",
+					"company writer cannot persist industry or close fields",
+				);
+			}
+		} else {
+			if (
+				event.research_priority != null ||
+				event.industry_thesis != null ||
+				event.company_thesis != null ||
+				event.company_validation != null ||
+				event.r_proposal != null
+			) {
+				throw new InvestmentLedgerError(
+					"INVESTMENT_LEDGER_VALIDATION_FAILED",
+					"close writer cannot persist industry/company ownership fields",
+				);
+			}
+			if (
+				event.effective_r_state == null &&
+				event.market_confirmation == null &&
+				event.r4_candidate == null &&
+				event.close_thesis_view == null &&
+				event.next_validation == null
+			) {
+				throw new InvestmentLedgerError(
+					"INVESTMENT_LEDGER_VALIDATION_FAILED",
+					"close writer must persist at least one close-owned field",
+				);
+			}
 		}
 	}
 }
@@ -257,7 +315,11 @@ function parseExistingPayload(body: string | null | undefined): PersistedInvestm
 	if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 	const object = value as Record<string, unknown>;
 	if (object.schema_version !== "investment_state_batch_v1") return null;
-	if (object.producer !== "industry_trend" && object.producer !== "company_validation")
+	if (
+		object.producer !== "industry_trend" &&
+		object.producer !== "company_validation" &&
+		object.producer !== "close_review"
+	)
 		return null;
 	if (!Array.isArray(object.events)) return null;
 	const events = object.events.filter((event): event is PersistedInvestmentEvent => {
@@ -265,7 +327,9 @@ function parseExistingPayload(body: string | null | undefined): PersistedInvestm
 		const candidate = event as Record<string, unknown>;
 		return (
 			typeof candidate.symbol === "string" &&
-			(candidate.dimension === "INDUSTRY" || candidate.dimension === "COMPANY")
+			(candidate.dimension === "INDUSTRY" ||
+				candidate.dimension === "COMPANY" ||
+				candidate.dimension === "CLOSE")
 		);
 	});
 	if (events.length === 0) return null;
@@ -380,6 +444,7 @@ export async function getInvestmentLedgerState(input: {
 	token: string;
 	role: InvestmentLedgerRole;
 	symbols: string[];
+	historyLimit?: number;
 	fetchImpl?: typeof fetch;
 }): Promise<InvestmentLedgerState> {
 	if (!input.token) {
@@ -403,10 +468,14 @@ export async function getInvestmentLedgerState(input: {
 	const raw = await fetchAllComments(input.token, input.fetchImpl ?? fetch);
 	const comments = validRoleComments(raw, input.role);
 	const latestBySymbol: InvestmentLedgerState["latest_by_symbol"] = {};
+	const latestRProposalBySymbol: InvestmentLedgerState["latest_r_proposal_by_symbol"] = {};
+	const historyBySymbol: InvestmentLedgerState["history_by_symbol"] = {};
 	const evidenceBySymbol: InvestmentLedgerState["evidence_keys_by_symbol"] = {};
 	const countBySymbol: InvestmentLedgerState["event_count_by_symbol"] = {};
 	for (const symbol of symbols) {
 		latestBySymbol[symbol] = null;
+		latestRProposalBySymbol[symbol] = null;
+		historyBySymbol[symbol] = [];
 		evidenceBySymbol[symbol] = [];
 		countBySymbol[symbol] = 0;
 	}
@@ -424,9 +493,23 @@ export async function getInvestmentLedgerState(input: {
 				as_of: String(comment.payload.as_of ?? ""),
 				event,
 			};
+			if (event.r_proposal === "R0" || event.r_proposal === "R1" || event.r_proposal === "R2") {
+				latestRProposalBySymbol[event.symbol] = event.r_proposal;
+			}
+			historyBySymbol[event.symbol].push({
+				comment_id: comment.comment_id,
+				created_at: comment.created_at,
+				as_of: String(comment.payload.as_of ?? ""),
+				event,
+			});
 		}
 	}
-	for (const symbol of symbols) evidenceBySymbol[symbol] = [...evidenceSets[symbol]].sort();
+	const historyLimit = Math.max(0, Math.min(20, input.historyLimit ?? 0));
+	for (const symbol of symbols) {
+		if (historyLimit === 0) historyBySymbol[symbol] = [];
+		else historyBySymbol[symbol] = historyBySymbol[symbol].slice(-historyLimit);
+		evidenceBySymbol[symbol] = [...evidenceSets[symbol]].sort();
+	}
 	return {
 		status: "OK",
 		producer: config.producer,
@@ -434,6 +517,8 @@ export async function getInvestmentLedgerState(input: {
 		fully_paginated: true,
 		symbols,
 		latest_by_symbol: latestBySymbol,
+		latest_r_proposal_by_symbol: latestRProposalBySymbol,
+		history_by_symbol: historyBySymbol,
 		evidence_keys_by_symbol: evidenceBySymbol,
 		event_count_by_symbol: countBySymbol,
 	};

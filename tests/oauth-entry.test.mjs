@@ -61,19 +61,19 @@ test("temporary production storage diagnostic is removed after identifying the K
 	assert.doesNotMatch(oauth, /OAUTH_PROVIDER_DCR/);
 });
 
-test("OAuth discovery advertises market:read, research write scopes and offline refresh support with PKCE S256 only", async () => {
+test("OAuth discovery advertises market, research and State Gateway scopes with offline refresh support", async () => {
 	const oauth = await source("../src/oauth-entry.ts");
 	// #5 §A4 pure increment: research:claim / research:submit join the
 	// supported list; market:read remains mandatory and offline_access stays.
 	assert.match(oauth, /scopesSupported: \[\.\.\.SUPPORTED_SCOPES\]/);
 	assert.match(
 		oauth,
-		/const SUPPORTED_SCOPES: readonly string\[\] = \[\n\tMARKET_READ_SCOPE,\n\tRESEARCH_CLAIM_SCOPE,\n\tRESEARCH_SUBMIT_SCOPE,\n\tOFFLINE_ACCESS_SCOPE,\n\]/,
+		/const SUPPORTED_SCOPES: readonly string\[\] = \[\n\tMARKET_READ_SCOPE,\n\tRESEARCH_CLAIM_SCOPE,\n\tRESEARCH_SUBMIT_SCOPE,\n\tSTATE_READ_SCOPE,\n\tSTATE_WRITE_SCOPE,\n\tOFFLINE_ACCESS_SCOPE,\n\]/,
 	);
 	assert.match(oauth, /scopes_supported: \[\.\.\.RESOURCE_SUPPORTED_SCOPES\]/);
 	assert.match(
 		oauth,
-		/const RESOURCE_SUPPORTED_SCOPES: readonly string\[\] = \[\n\tMARKET_READ_SCOPE,\n\tRESEARCH_CLAIM_SCOPE,\n\tRESEARCH_SUBMIT_SCOPE,\n\]/,
+		/const RESOURCE_SUPPORTED_SCOPES: readonly string\[\] = \[\n\tMARKET_READ_SCOPE,\n\tRESEARCH_CLAIM_SCOPE,\n\tRESEARCH_SUBMIT_SCOPE,\n\tSTATE_READ_SCOPE,\n\tSTATE_WRITE_SCOPE,\n\]/,
 	);
 	assert.match(oauth, /clientIdMetadataDocumentEnabled: true/);
 	assert.match(oauth, /allowImplicitFlow: false/);
@@ -192,12 +192,15 @@ test("authorization CSP grants only the minimal ChatGPT callback origin", async 
 	assert.match(headers, /frame-ancestors 'none'/);
 });
 
-test("OAuth authorization stays market-read only", async () => {
+test("OAuth authorization remains market-read anchored while explicitly listing state scopes", async () => {
 	const oauth = await source("../src/oauth-entry.ts");
 	assert.match(oauth, /if \(!requested\.has\(MARKET_READ_SCOPE\)\) return null/);
 	assert.match(oauth, /scope: scopes/);
 	assert.match(oauth, /userId: OWNER_USER_ID/);
 	assert.match(oauth, /不会授予交易、撤单、账户、成本或订单权限/);
+	assert.match(oauth, /状态网关：按固定 Channel/);
+	assert.match(oauth, /STATE_READ_SCOPE/);
+	assert.match(oauth, /STATE_WRITE_SCOPE/);
 });
 
 // Issue #19 源码锁：formal 授权的信任根是桥接层盖章的 stable principal 头。

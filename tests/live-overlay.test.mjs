@@ -560,7 +560,7 @@ test("Issue #8 wiring: external MCP market:read and internal universe auth are s
 	// 匹配 + 转发头 ∩ 配置上限），只扩研究写面，不触碰 market:read 门。
 	assert.match(
 		source,
-		/\);\s*[\s\S]*?return createServer\(env, liveOverlayStatus, researchScopes[^)]*\);/,
+		/\);\s*[\s\S]*?return createServer\(\s*env,\s*liveOverlayStatus,\s*researchScopes[\s\S]*?\);/,
 	);
 	assert.match(source, /request\?\.headers\.get\("Authorization"\)/);
 	assert.match(source, /env\.COLLECTOR_MCP_CLIENT_TOKEN/);
@@ -587,7 +587,7 @@ test("Issue #8 wiring: external MCP market:read and internal universe auth are s
 	const toolStart = source.indexOf('"get_portfolio_quotes"');
 	const toolBody = source.slice(toolStart, source.indexOf('"get_control_plane_status"'));
 	assert.ok(toolStart > 0);
-	assert.match(toolBody, /\{ liveOverlayStatus \},/);
+	assert.match(toolBody, /\{\s*liveOverlayStatus,?\s*\}/);
 	assert.equal((toolBody.match(/live_overlay_status: liveOverlayStatus/g) ?? []).length, 2);
 	assert.equal(
 		(toolBody.match(/market_read_auth: marketReadAuditFields\(env, liveOverlayStatus\)/g) ?? [])
