@@ -10,6 +10,7 @@
 | 全ACTIVE覆盖、MAPPING_ONLY排除、闭市不等于节假日、官方确认、混合市场 | holding-assistant 本轮事实与休市闸门 | 保留；应交易市场必要行情不可stale，canonical CN/HK输入明确 |
 | 固定比较基准、3/5/10日、缺数据降级、两类筹码证据、单日不R4 | holding-assistant 市场状态与输入 | 保留，不由价格制造R1/R2 |
 | 09:10原始条件、10:10同键补建、无前视、16:45闭环 | modes/holding-preclose | 保留；盘中产物不编入此执行段 |
+| 盘前流程名与真实写入枚举不得混用 | holding-assistant 市场状态与输入 | 修正初版v3把PREOPEN当作observation_type；按现有服务端合同，09:10及10:10补建写PREMARKET，业务模式仍叫PREOPEN；增加真实schema对照测试 |
 | 盘中语义时点、午休/尾盘、上一检查点比较、每时点后台落账 | modes/holding-intraday | 保留；盘前收盘产物不编入此执行段 |
 | 唯一Research Job writer、最多1非backfill、先终态化lease、真实Evidence ID、submit/defer | industry-research Research Job优先 | 原流程保留；失败不能假装释放，不用空洞proposal清队列 |
 | 系统BOM数量/端口/速度/能耗/价值量、5500 NPO vs48000 800G只是校准线索 | 原system-bom Guidance完整编入 | 保留；新数据可二次获得新增资格 |

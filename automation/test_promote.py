@@ -188,6 +188,15 @@ class CompilerTests(unittest.TestCase):
             self.assertNotIn("STATE_CHANNEL=", prompts[key])
             self.assertNotIn("append_state_batch", prompts[key])
             self.assertIn("WRITE_SCOPE=READ_ONLY", prompts[key])
+    def test_holding_premarket_wire_enum_not_workflow_label(self):
+        _, prompts = self.compile()
+        for key in ("holding-assistant-preclose", "holding-assistant-intraday"):
+            self.assertIn("observation_type=PREMARKET（不是PREOPEN）", prompts[key])
+            self.assertNotIn("observation_type按PREOPEN", prompts[key])
+            self.assertNotIn("observation_type=PREOPEN", prompts[key])
+        # Read the actual domain contract: no production write is needed.
+        domain = (b.ROOT / "src/market-ledger.ts").read_text(encoding="utf-8")
+        self.assertIn('observation_type: z.enum(["PREMARKET", "INTRADAY", "CLOSE"])', domain)
     def test_business_invariant_regression_net(self):
         _, p = self.compile()
         checks = {
@@ -235,6 +244,11 @@ class VerificationTests(unittest.TestCase):
             after = copy.deepcopy(self.after); del after[0][field]
             with self.assertRaises(b.BuildError):
                 v.verify(self.manifest, self.prompts, self.before, after)
+    def test_equal_utc_offset_does_not_hide_timezone_metadata_drift(self):
+        after = copy.deepcopy(self.after)
+        after[0]["default_timezone"] = "Australia/Perth"
+        with self.assertRaisesRegex(b.BuildError, "protected setting changed: default_timezone"):
+            v.verify(self.manifest, self.prompts, self.before, after)
     def test_update_request_is_not_actual_readback(self):
         requests = [{"jawbone_id": item["id"], "prompt": item["prompt"]} for item in self.after]
         with self.assertRaises(b.BuildError):
