@@ -34,6 +34,7 @@ python -B automation/promote.py --ref <候选SHA> --apply --before automation/_b
 
 ## 部分发布与回滚
 `--keys <registry...>`可只准备/验证实际切换的任务；其他项production_ref保持原值，不能宣称六项已全切。更新返回不明时先读服务对象，不盲目再次提交。任何失败不自动关闭任务。
+若任务已保存新Prompt，但受保护配置回读不一致，`registry.production_ref`保留最后验收通过版本；必须同时在`deployment_observations`记录实际`observed_ref`、全文hash、差异字段及审计路径。查询运行版本时须先看异常观察，不能将最后验收版本误称为当前实际内容，也不能把新内容保存成功误称为配置验收通过。配置差异未恢复或未经Owner明确接受前，不弱化校验门禁。
 回滚优先用保存的原始prompt做prompt-only恢复，再读回全文/原设置；或者使用上一份已验证manifest与其exact版本编译器恢复。v2旧版本以当时发布记录中的完整静态快照/源及Guidance恢复，不用v3规则假造旧hash。回滚需正常授权和留痕，不绕过安全拦截。
 
 ## 审核与测试边界

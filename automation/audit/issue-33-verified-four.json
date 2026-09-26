@@ -1,0 +1,78 @@
+{
+  "contract_version": "automation-v3",
+  "status": "VERIFIED",
+  "source_refs": [
+    "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+    "f5ab9b644366b470807a3d89ece7289d5b02b5b4"
+  ],
+  "registry": {
+    "company-facts": {
+      "automation_id": "6a86bfae3a2481919afae415eca00b60",
+      "status": "MATCH",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "compiled_prompt_sha256": "1525384fcefbb61b7628ec9fdaf8e9bede31b8d358921a67bee820c3d4924ca9",
+      "compiled_prompt_chars": 3457,
+      "protected_settings": {
+        "title": "公司事实监控",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260821T000000\nRRULE:FREQ=HOURLY;BYMINUTE=0;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "condition_watch",
+        "notifications_enabled": false,
+        "email_enabled": false
+      },
+      "protected_settings_unchanged": true
+    },
+    "industry-research": {
+      "automation_id": "6a8471af3b688191b076a7bb50bf956f",
+      "status": "MATCH",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "compiled_prompt_sha256": "53af2e5aa66b9fa741b9d79ce76f1e96f7db99860ead1bf44334db8fe24df065",
+      "compiled_prompt_chars": 4486,
+      "protected_settings": {
+        "title": "产业趋势与研究",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260820T163436\nRRULE:FREQ=HOURLY;BYMINUTE=25;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "exact_schedule",
+        "notifications_enabled": false,
+        "email_enabled": false
+      },
+      "protected_settings_unchanged": true
+    },
+    "holding-assistant-intraday": {
+      "automation_id": "6aaa7ffb73c48191abbb0666b6147816",
+      "status": "MATCH",
+      "production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "compiled_prompt_sha256": "0ce227fa317f901ea94c62689207f1823914cb298c1d918cdf2e644ad5a778bd",
+      "compiled_prompt_chars": 4461,
+      "protected_settings": {
+        "title": "持仓助手｜盘中",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260917T095000\nRRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9,10,11,13,14;BYMINUTE=50;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "exact_schedule",
+        "notifications_enabled": false,
+        "email_enabled": false
+      },
+      "protected_settings_unchanged": true
+    },
+    "holding-assistant-preclose": {
+      "automation_id": "6aaa80041c74819191a7d6eb5d3568d8",
+      "status": "MATCH",
+      "production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "compiled_prompt_sha256": "6e9d96a02b9515e546261e405a14453126bac94863bc92f73fef09b0fde54c01",
+      "compiled_prompt_chars": 4948,
+      "protected_settings": {
+        "title": "持仓助手｜盘前+收盘",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260917T091000\nRRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9,10,16;BYMINUTE=10,45;BYSETPOS=1,3,6;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "exact_schedule",
+        "notifications_enabled": false,
+        "email_enabled": false
+      },
+      "protected_settings_unchanged": true
+    }
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "issue": 33,
+  "status": "PARTIALLY_DEPLOYED",
+  "capture_method": "Actual Automation tool responses manually transcribed and compared with independently compiled exact-ref artifacts; final holding capture applied the two observed differences to the previous literal actual capture. Not a direct API export.",
+  "compiled_tasks": 6,
+  "saved_full_text_matches": 5,
+  "fully_verified_tasks": 4,
+  "tests": {
+    "unittest_total": 35,
+    "passed": 34,
+    "skipped": 1,
+    "skip_reason": "Windows symlink privilege unavailable",
+    "initial_public_git_exact_byte_parity": "6/6",
+    "holding_fix_public_git_exact_byte_parity": "2/2"
+  },
+  "registry": {
+    "ai-financing-rates": {
+      "status": "CONFIG_DRIFT",
+      "full_text_match": true,
+      "actual_prompt_sha256": "dd9de93c5d7b8d9df60df14774100f609604839613871bd2a5df65f45bc2f4c7",
+      "actual_prompt_chars": 2478,
+      "reason": "ai-financing-rates: protected setting changed: default_timezone",
+      "observed_production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "protected_settings": {
+        "title": "AI 融资与长端利率",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260825T050452\nRRULE:FREQ=HOURLY;INTERVAL=4\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "condition_watch",
+        "notifications_enabled": false,
+        "email_enabled": false
+      }
+    },
+    "central-policy": {
+      "status": "NOT_UPDATED",
+      "candidate_chars": 2534
+    },
+    "company-facts": {
+      "status": "VERIFIED",
+      "actual_prompt_sha256": "1525384fcefbb61b7628ec9fdaf8e9bede31b8d358921a67bee820c3d4924ca9",
+      "actual_prompt_chars": 3457,
+      "observed_production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "protected_settings": {
+        "title": "公司事实监控",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260821T000000\nRRULE:FREQ=HOURLY;BYMINUTE=0;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "condition_watch",
+        "notifications_enabled": false,
+        "email_enabled": false
+      }
+    },
+    "holding-assistant-intraday": {
+      "status": "VERIFIED",
+      "actual_prompt_sha256": "0ce227fa317f901ea94c62689207f1823914cb298c1d918cdf2e644ad5a778bd",
+      "actual_prompt_chars": 4461,
+      "observed_production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "protected_settings": {
+        "title": "持仓助手｜盘中",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260917T095000\nRRULE:FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9,10,11,13,14;BYMINUTE=50;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "exact_schedule",
+        "notifications_enabled": false,
+        "email_enabled": false
+      }
+    },
+    "holding-assistant-preclose": {
+      "status": "VERIFIED",
+      "actual_prompt_sha256": "6e9d96a02b9515e546261e405a14453126bac94863bc92f73fef09b0fde54c01",
+      "actual_prompt_chars": 4948,
+      "observed_production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "protected_settings": {
+        "title": "持仓助手｜盘前+收盘",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260917T091000\nRRULE:FREQ=DAILY;BYDAY=MO,TU,WE,TH,FR;BYHOUR=9,10,16;BYMINUTE=10,45;BYSETPOS=1,3,6;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "exact_schedule",
+        "notifications_enabled": false,
+        "email_enabled": false
+      }
+    },
+    "industry-research": {
+      "status": "VERIFIED",
+      "actual_prompt_sha256": "53af2e5aa66b9fa741b9d79ce76f1e96f7db99860ead1bf44334db8fe24df065",
+      "actual_prompt_chars": 4486,
+      "observed_production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "protected_settings": {
+        "title": "产业趋势与研究",
+        "schedule": "BEGIN:VEVENT\nDTSTART:20260820T163436\nRRULE:FREQ=HOURLY;BYMINUTE=25;BYSECOND=0\nEND:VEVENT",
+        "is_enabled": true,
+        "default_timezone": "Australia/Perth",
+        "timing_mode": "exact_schedule",
+        "notifications_enabled": false,
+        "email_enabled": false
+      }
+    }
+  },
+  "exceptions": {
+    "ai-financing-rates": {
+      "status": "CONFIG_DRIFT",
+      "field": "default_timezone",
+      "before": "Asia/Shanghai",
+      "after": "Australia/Perth",
+      "prompt_only_update": true,
+      "remediation": "Current Automation update schema has no timezone setter. Do not relax exact setting gate; seek authorized preservation mechanism or explicit owner acceptance.",
+      "other_protected_fields_unchanged": true
+    },
+    "industry-research": {
+      "status": "RESTORED_AND_VERIFIED",
+      "observed_during_update": "is_enabled=false",
+      "corrective_action": "Restored original is_enabled=true, then full readback and protected-settings verification passed.",
+      "restored_updated_at": "2026-09-26T16:30:11.233441Z",
+      "cause": "NOT_ESTABLISHED"
+    },
+    "central-policy": {
+      "status": "NOT_UPDATED",
+      "reason": "Retained old static Prompt to avoid the known Shanghai-to-Perth metadata rewrite before owner decision.",
+      "observed_production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "observed_timezone": "Asia/Shanghai",
+      "enabled": true
+    }
+  },
+  "collector_code_or_deployment_changed": false,
+  "business_ledger_writes": false,
+  "new_automations_created": false,
+  "source_refs": [
+    "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+    "f5ab9b644366b470807a3d89ece7289d5b02b5b4"
+  ],
+  "holding_wire_contract_review": {
+    "code_fact": "src/market-ledger.ts accepts observation_type=PREMARKET, not PREOPEN",
+    "fix_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+    "changed_runtime_code": false,
+    "result": "Both holding tasks corrected, saved and full-text/settings verified"
+  }
+}
