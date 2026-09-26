@@ -37,14 +37,26 @@ Research Job 仍严格只读：禁止 `claim_research_job`、`submit_research_re
 
 本任务只读 Research；不得 claim/submit/defer Research Job。不得读取、请求或搬运 token、secret、账户、订单信息。
 
+## #3 公司账本唯一生产运输路径
+
+Collector 仍是持仓、行情与 Research replica 的唯一事实入口；QuantPro RESEARCH 在本任务中只承担 `zhushihao/quantpro-collector#3` 的固定账本运输，不得替代 Collector 业务数据。
+
+当需要读取或写入公司账本时，唯一允许的生产路径为：
+
+1. 显式发现/加载 `QuantPro_RESEARCH`；
+2. 调用 `runtime_status(summary_only=true)`，只选择唯一在线 RESEARCH Runner；无法唯一确定则本轮 BLOCKER；
+3. 用 `work_on_project(client_id=<Runner>, path="D:\\QuantPro\\cn-hk-quotes-mcp", instruction="只建立 investment-ledger 执行上下文；禁止编辑、提交、部署或执行其他命令。", include_project_instructions=false, include_workflow_guidance=false)` 获取固定仓库 project；
+4. 读取账本时，仅允许结构化 `run_process` 执行 `node.exe --experimental-strip-types scripts/investment-ledger-cli.mjs get-company`，`purpose=operation`；stdin 只能是 `{"symbols":["CN:xxxxxx","HK:xxxxx",...]}`，symbols 仅取本轮确需去重/继承状态的标的；
+5. 写入账本时，仅允许结构化 `run_process` 执行 `node.exe --experimental-strip-types scripts/investment-ledger-cli.mjs append-company`，`purpose=operation`；完整候选 batch JSON 通过 stdin 输入；
+6. 禁止 Scheduled Task 直接使用 GitHub Plugin / Connector 写 #3；禁止直接调用 `gh`、`run_shell` 或其他脚本/命令；禁止传入 repo、issue、GitHub token、producer 或 dimension；禁止寻找其他写入通道。
+
+固定 CLI 内部目标只能是 `zhushihao/quantpro-collector#3`，并强制 `producer=company_validation`、`dimension=COMPANY`、`source_task=公司事实监控`；它负责 GitHub comments 完整分页、`investment_state_batch_v1` exact schema、公司层仅 R2 的写边界、`event_id` 幂等、append 与写后回读。CLI 只从 RESEARCH 机既有 GitHub keyring 内部取得凭据，token 不得进入模型输入、输出或正文日志。
+
+固定 project/CLI 不存在、RESEARCH Runner 不可用、CLI 非零退出、返回非法 JSON、账本冲突或写后回读失败时，本轮 BLOCKER；不得降级为通用 GitHub 写入，也不得修改任何 Automation。
+
 ## 账本路由
 
-只在出现实质公司 Evidence、公司 Thesis、公司确认或反证迁移时，向
-`zhushihao/quantpro-collector#3` append 一条既有
-`investment_state_batch_v1` 批量评论，`producer=company_validation`、
-`dimension=COMPANY`。写前完整分页读取同一标的 + COMPANY 的最新有效事件；无实质
-新增不写，写后回读确认。公司确认 R2 只能由公司级事实形成，价格、成交量或市场结构
-不得形成 R2。
+只在出现实质公司 Evidence、公司 Thesis、公司确认或反证迁移时，才通过上述固定 investment-ledger CLI 向 `zhushihao/quantpro-collector#3` append 一条既有 `investment_state_batch_v1` 批量评论。写前必须先用 `get-company` 完整分页读取同一标的 + COMPANY 的最新有效事件与 Evidence keys；无实质新增不写。只有 CLI 返回 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算持久化成功；写后必须再次 `get-company` 回读确认。公司确认 R2 只能由公司级事实形成，价格、成交量或市场结构不得形成 R2。
 
 `zhushihao/quantpro-collector#1` 仅是行情原始事实，`#2` 仅是持仓助手市场状态账本；
 本任务对二者只读且不写。不得以本地文件、旧报告、聊天记忆或 QuantPro #28/#30 代替
@@ -61,6 +73,7 @@ Research replica 用于发现线索和交叉验证，不能替代正式公司事
 生产 Scheduled Task 会在发布时把对应 Automation Guidance 完整内嵌到本 Prompt 末尾；直接执行内嵌 Guidance，不依赖运行时外部读取。
 
 Automation Guidance 用于补充：
+
 - 任务执行方法；
 - 历史复盘经验；
 - 判断标准；
@@ -68,6 +81,7 @@ Automation Guidance 用于补充：
 - 边界约束。
 
 Automation Guidance 不得覆盖：
+
 - 本 Prompt；
 - 安全边界；
 - WRITE_SCOPE；
@@ -144,26 +158,33 @@ Evidence：需求 D、供给 S、变现 M、盈利暴露 E、平台/项目采用
 ### 【公司】<公司名>｜<事件短标题>
 
 **一句话结论**
+
 - 1–2 句直接说明：这是实质利好、实质反证、资本行为里程碑，还是仅补充信息；公司 Thesis 是否因此改变。
 
 **发生了什么**
+
 - 只写 1–3 个本轮新增公司事实，并明确“相较上一次已知状态新增在哪里”。
 
 **为什么重要**
+
 - 用人话解释它对订单、收入、利润、产能、客户、产品、现金流或资本配置的实际含义；不要把股价涨跌当成原因。
 
 **对公司逻辑的影响**
+
 - **公司确认（R2）**：新进入 / 强化 / 维持 / 削弱 / 不迁移；只有公司级正式事实才能改变 R2。
 - 若只是资本行为里程碑而未改变经营事实，要明确写“只改变资本行为判断，不自动升级经营 Thesis”。
 
 **证据与基本面信号**
+
 - **来源/确认**：P0/P1/P2、是否完成交叉确认；分开“已确认事实 / 投资推断 / 待验证”。
 - 仅列本轮变化的 Evidence：**需求强弱（D）**、**供给/产能变化（S）**、**变现进展（M）**、**利润是否开始体现（E）**、**真实客户/项目采用（P）**；每项一句。
 
 **什么情况会证明这件事没那么重要（C）**
+
 - 只列 1–3 个关键反证或不确定性，例如订单可撤销、确认周期、客户集中、毛利压力、监管/诉讼、竞争替代。
 
 **接下来只盯什么**
+
 - 只列 1–3 个最能验证公司 Thesis 的具体后续信号。
 
 表达要求：结论前置、短句优先，不重复旧公告背景；保留所有关键数字、来源状态和相较上次的新增。

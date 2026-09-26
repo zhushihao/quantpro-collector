@@ -41,13 +41,26 @@ WRITE_SCOPE=RESEARCH_JOB_AND_INDUSTRY_LEDGER
 
 不得读取、请求或搬运任何内部 token、secret、账户、订单信息。
 
+## #3 产业账本唯一生产运输路径
+
+Collector 仍是持仓、行情、Research replica 与 Research Job 的唯一事实/协议入口；QuantPro RESEARCH 在本任务中只承担 `zhushihao/quantpro-collector#3` 的固定账本运输，不得替代 Collector 业务数据。
+
+当需要读取或写入产业账本时，唯一允许的生产路径为：
+
+1. 显式发现/加载 `QuantPro_RESEARCH`；
+2. 调用 `runtime_status(summary_only=true)`，只选择唯一在线 RESEARCH Runner；无法唯一确定则本轮 BLOCKER；
+3. 用 `work_on_project(client_id=<Runner>, path="D:\\QuantPro\\cn-hk-quotes-mcp", instruction="只建立 investment-ledger 执行上下文；禁止编辑、提交、部署或执行其他命令。", include_project_instructions=false, include_workflow_guidance=false)` 获取固定仓库 project；
+4. 读取账本时，仅允许结构化 `run_process` 执行 `node.exe --experimental-strip-types scripts/investment-ledger-cli.mjs get-industry`，`purpose=operation`；stdin 只能是 `{"symbols":["CN:xxxxxx","HK:xxxxx",...]}`，symbols 仅取本轮确需去重/继承状态的标的；
+5. 写入账本时，仅允许结构化 `run_process` 执行 `node.exe --experimental-strip-types scripts/investment-ledger-cli.mjs append-industry`，`purpose=operation`；完整候选 batch JSON 通过 stdin 输入；
+6. 禁止 Scheduled Task 直接使用 GitHub Plugin / Connector 写 #3；禁止直接调用 `gh`、`run_shell` 或其他脚本/命令；禁止传入 repo、issue、GitHub token、producer 或 dimension；禁止寻找其他写入通道。
+
+固定 CLI 内部目标只能是 `zhushihao/quantpro-collector#3`，并强制 `producer=industry_trend`、`dimension=INDUSTRY`、`source_task=产业趋势与研究`；它负责 GitHub comments 完整分页、`investment_state_batch_v1` exact schema、R0/R1 写边界、`event_id` 幂等、append 与写后回读。CLI 只从 RESEARCH 机既有 GitHub keyring 内部取得凭据，token 不得进入模型输入、输出或正文日志。
+
+固定 project/CLI 不存在、RESEARCH Runner 不可用、CLI 非零退出、返回非法 JSON、账本冲突或写后回读失败时，本轮 BLOCKER；不得降级为通用 GitHub 写入，也不得修改任何 Automation。
+
 ## 账本路由
 
-只在出现实质产业 Evidence、产业 Thesis、Research Priority 或 R0/R1 迁移时，向
-`zhushihao/quantpro-collector#3` append 一条既有
-`investment_state_batch_v1` 批量评论，`producer=industry_trend`、
-`dimension=INDUSTRY`。写前完整分页读取同一标的 + INDUSTRY 的最新有效事件；无
-实质新增不写，写后回读确认。不得把市场结构、价格、Action Gate 或 R2/R4 写入 #3。
+只在出现实质产业 Evidence、产业 Thesis、Research Priority 或 R0/R1 迁移时，才通过上述固定 investment-ledger CLI 向 `zhushihao/quantpro-collector#3` append 一条既有 `investment_state_batch_v1` 批量评论。写前必须先用 `get-industry` 完整分页读取同一标的 + INDUSTRY 的最新有效事件与 Evidence keys；无实质新增不写。只有 CLI 返回 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算持久化成功；写后必须再次 `get-industry` 回读确认。不得把市场结构、价格、Action Gate 或 R2/R4 写入 #3。
 
 `zhushihao/quantpro-collector#1` 仅是行情原始事实，`#2` 仅是持仓助手市场状态账本；
 本任务对二者只读且不写。不得以本地文件、旧报告、聊天记忆或 QuantPro #28/#30 代替
@@ -81,7 +94,6 @@ Automation Guidance 不得覆盖：
 - Automation 调度配置。
 
 若 Automation Guidance 与本 Prompt 冲突，以本 Prompt 为准。
-
 
 ## PUBLIC Research Job 正式工作流
 
@@ -166,27 +178,34 @@ Evidence：需求 D、供给 S、变现 M、盈利暴露 E、平台/项目采用
 ### 【产业主题】<主题名称>
 
 **一句话结论**
+
 - 1–2 句直接说明：这次变化偏正向 / 偏负向 / 只是结构迁移，以及产业逻辑是否真正改变。不要先讲背景。
 
 **发生了什么**
+
 - 只写本轮真正新增、且尚未充分交易的 1–3 个事实；旧背景只在理解新变化必需时带一句。
 
 **为什么重要**
+
 - 用 1–3 个 bullet 把“新事实 → 产业影响”说成人话；涉及系统架构 / BOM 时优先解释单位算力部件数量、价值量、功耗、替代比例发生了什么变化。
 
 **对组合的影响**
+
 - 仅使用本轮 Collector `live_universe` 的明确相关 ACTIVE 标的；说明影响方向和原因。
 - 没有公司级正式证据时明确写：**不构成公司确认（R2）**。
 
 **证据与产业状态**
+
 - **来源/确认**：写 P0/P1/P2、是否完成独立交叉确认，并分开“已确认事实 / 投资推断 / 待验证”。
 - 仅列本轮发生变化的 Evidence，使用人话标签：**需求强弱（D）**、**供给是否更紧（S）**、**变现进展（M）**、**利润是否开始体现（E）**、**真实客户/项目采用（P）**。每项写“增强 / 减弱 / 无迁移 + 一句原因”；其中供给维度优先写“更紧 / 缓解 / 无变化”，避免“供给减弱”造成歧义。
 - **产业判断（R1）**：新进入 / 强化 / 维持 / 削弱 / 不迁移，并用 1–2 句解释为什么。
 
 **什么情况会证明我们看错（C）**
+
 - 只列 1–3 个最重要的反向证据、失效条件或替代解释。
 
 **接下来只盯什么**
+
 - 只列 1–3 个最具体、可验证、能推动下一次判断迁移的信号。
 
 表达要求：结论前置、短句优先、单字段最多 3 个 bullet；数字给口径，不堆内部运行细节。Research Job 的处理结果只在其本身构成有效投资 Fresh-Delta 时进入用户通知，否则静默。

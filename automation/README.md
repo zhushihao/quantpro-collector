@@ -10,9 +10,9 @@
 
 1. Scheduled Task 本身保存完整业务 Prompt + 对应 Guidance；运行时不依赖公开 Web/GitHub/Collector 来加载配置。
 2. Git `production.json` 仅用于审计“当前正式版本应来自哪个 exact ref”，不属于运行时必需链路。
-3. Collector 提供业务数据、LIVE facts、Research replica / Research Job 协议；不得承载或分发 Automation Prompt。holding-assistant 的 market-ledger 运行态由 QuantPro RESEARCH 固定 CLI 运输。
-4. Web 只用于业务 Prompt 明确要求的最新外部事实扫描；不得承担 Prompt/Guidance 控制面或 market-ledger 运行态读取。
-5. holding-assistant 的 GitHub Issue #2 只作为审计落点；Scheduled Task 不直接分页或写 GitHub，也不依赖 GitHub Plugin / Connector。market-ledger 唯一生产运输路径为 QuantPro RESEARCH 固定 `scripts/market-ledger-cli.mjs`；不得扩展为通用 GitHub 写入口。
+3. Collector 提供业务数据、LIVE facts、Research replica / Research Job 协议；不得承载或分发 Automation Prompt。holding-assistant 的 market-ledger 与产业/公司任务的 investment-ledger 运行态均由 QuantPro RESEARCH 固定 CLI 运输；RESEARCH 运输层不得替代 Collector 业务事实源。
+4. Web 只用于业务 Prompt 明确要求的最新外部事实扫描；不得承担 Prompt/Guidance 控制面或账本运行态读取。
+5. GitHub Issue #2/#3 只作为审计落点；Scheduled Task 不直接分页或写 GitHub，也不依赖 GitHub Plugin / Connector 完成运行态持久化。Issue #2 唯一运输路径为 `scripts/market-ledger-cli.mjs`；Issue #3 产业/公司维度唯一运输路径为 `scripts/investment-ledger-cli.mjs`。两者都必须通过 QuantPro RESEARCH 结构化 `run_process` 调用，且不得扩展为通用 GitHub 写入口。
 6. 所有生产 Prompt 都必须明确：任何 BLOCKER 只能结束本轮，绝对禁止任务修改自己的 title/schedule/enabled/notifications/email 配置。
 
 ## 变更流程
@@ -28,6 +28,6 @@
 这样 main 上尚未切生产的新 Prompt 不会被 Scheduled Task 自动采用，同时 Scheduled Task 也不会因为 Web/connector schema/cache 波动而无法加载自己的业务配置。
 同一业务 Prompt 可以被多个 registry key 复用；例如持仓助手的盘中任务与盘前+收盘任务共享同一个 mode-aware Prompt，但拥有不同调度与独立 Bootstrap key。盘前+收盘任务允许增加 10:10 PREOPEN Recovery，Recovery 的账本 semantic slot 仍为 09:10。
 
-`WRITE_SCOPE` 约束 Collector / Research MCP 的业务写权限。`MARKET_LEDGER_APPEND_ONLY` 只允许固定 RESEARCH market-ledger CLI 对 Issue #2 的窄 append；不授权 Research Job 写入、通用 GitHub 写入、任意 shell 或其他目标。
+`WRITE_SCOPE` 约束 Collector / Research MCP 的业务写权限。`MARKET_LEDGER_APPEND_ONLY` 只允许固定 RESEARCH market-ledger CLI 对 Issue #2 的窄 append；`RESEARCH_JOB_AND_INDUSTRY_LEDGER` 仅在 Research Job 正式协议之外额外允许固定 investment-ledger CLI 写 #3 的 `industry_trend/INDUSTRY`；`COMPANY_LEDGER_APPEND_ONLY` 仅允许固定 investment-ledger CLI 写 #3 的 `company_validation/COMPANY`。这些 scope 均不授权通用 GitHub 写入、任意 shell 或其他目标。
 
 禁止在本目录存放 token、secret、账户、订单、持仓数量或其他敏感信息。
