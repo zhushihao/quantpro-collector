@@ -888,14 +888,39 @@ export function createServer(
 		};
 	};
 	const requireStateScope = (scope: string, tool: string) => {
-		if (
+		const exact = permitsFormalResearchOperation({
+			principal: researchPrincipal,
+			issuer: researchIssuer,
+			scopes: researchScopes,
+			requiredScope: scope,
+		});
+		const compatibilityScope =
+			scope === STATE_READ_SCOPE
+				? MARKET_READ_SCOPE
+				: scope === STATE_WRITE_SCOPE
+					? RESEARCH_SUBMIT_SCOPE
+					: null;
+		const compatible =
+			compatibilityScope !== null &&
 			permitsFormalResearchOperation({
 				principal: researchPrincipal,
 				issuer: researchIssuer,
 				scopes: researchScopes,
-				requiredScope: scope,
-			})
-		) {
+				requiredScope: compatibilityScope,
+			});
+		if (exact || compatible) {
+			if (!exact && compatible) {
+				console.log(
+					JSON.stringify({
+						event: "state_gateway_legacy_scope_compat",
+						timestamp: new Date().toISOString(),
+						tool,
+						required_scope: scope,
+						compatibility_scope: compatibilityScope,
+						principal: researchPrincipal ?? null,
+					}),
+				);
+			}
 			return null;
 		}
 		const error = new StateGatewayError({

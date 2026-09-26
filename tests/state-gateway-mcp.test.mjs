@@ -18,6 +18,96 @@ const { createServer } = await import("../src/index.ts");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
+test("legacy production OAuth scopes remain compatible only for verified chatgpt-production", async () => {
+	const server = createServer(
+		undefined,
+		"ENABLED",
+		new Set(["market:read", "research:submit"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "state-gateway-legacy-scope-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		const validate = await client.callTool({
+			name: "validate_state_batch",
+			arguments: {
+				channel: "INDUSTRY",
+				batch: {
+					schema_version: "investment_state_batch_v1",
+					portfolio_version: "live:sha256:test",
+					event_id: "20260926T224500+08|industry_trend|BATCH",
+					as_of: "2026-09-26T22:45:00+08:00",
+					events: [
+						{
+							symbol: "CN:300308",
+							event_type: "EVIDENCE_ADD",
+							research_priority: "P0",
+							industry_thesis: "probe",
+							r_proposal: "R1",
+							evidence_types: [],
+							evidence_keys: [],
+							counter_evidence: [],
+							confidence: 0.5,
+							next_validation: "probe",
+						},
+					],
+				},
+			},
+		});
+		assert.equal(validate.isError, undefined);
+		assert.match(validate.content[0].text, /"status": "VALID"/);
+
+		const append = await client.callTool({
+			name: "append_state_batch",
+			arguments: {
+				channel: "INDUSTRY",
+				batch: {
+					schema_version: "investment_state_batch_v1",
+					portfolio_version: "live:sha256:test",
+					event_id: "20260926T224500+08|industry_trend|BATCH",
+					as_of: "2026-09-26T22:45:00+08:00",
+					events: [],
+				},
+			},
+		});
+		assert.equal(append.isError, true);
+		assert.doesNotMatch(append.content[0].text, /STATE_FORBIDDEN/);
+		assert.match(append.content[0].text, /STATE_UNAVAILABLE|STATE_VALIDATION_FAILED/);
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});
+
+test("legacy scope compatibility never grants state write to market-read-only callers", async () => {
+	const server = createServer(
+		undefined,
+		"ENABLED",
+		new Set(["market:read"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "state-gateway-deny-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		const append = await client.callTool({
+			name: "append_state_batch",
+			arguments: {
+				channel: "INDUSTRY",
+				batch: {},
+			},
+		});
+		assert.equal(append.isError, true);
+		assert.match(append.content[0].text, /STATE_FORBIDDEN/);
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});
+
 test("State Gateway MCP exposes five narrow tools without caller-controlled external targets", async () => {
 	const server = createServer(
 		undefined,
