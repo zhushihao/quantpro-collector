@@ -39,24 +39,25 @@ Research Job 仍严格只读：禁止 `claim_research_job`、`submit_research_re
 
 ## #3 公司账本唯一生产运输路径
 
-Collector 仍是持仓、行情与 Research replica 的唯一事实入口；QuantPro RESEARCH 在本任务中只承担 `zhushihao/quantpro-collector#3` 的固定账本运输，不得替代 Collector 业务数据。
+Collector 是持仓、行情、Research replica 与生产状态账本的唯一事实/协议入口。公司账本唯一生产路径是 QuantPro Collector State Gateway；Scheduled Task 不再依赖 QuantPro RESEARCH、GitHub Connector、`gh`、shell 或本地 CLI 运输。
 
-当需要读取或写入公司账本时，唯一允许的生产路径为：
+当需要读取或写入公司账本时，严格按以下顺序：
 
-1. 显式发现/加载 `QuantPro_RESEARCH`；
-2. 调用 `runtime_status(summary_only=true)`，只选择唯一在线 RESEARCH Runner；无法唯一确定则本轮 BLOCKER；
-3. 用 `work_on_project(client_id=<Runner>, path="D:\\QuantPro\\cn-hk-quotes-mcp", instruction="只建立 investment-ledger 执行上下文；禁止编辑、提交、部署或执行其他命令。", include_project_instructions=false, include_workflow_guidance=false)` 获取固定仓库 project；
-4. 读取账本时，仅允许结构化 `run_process` 执行 `node.exe --experimental-strip-types scripts/investment-ledger-cli.mjs get-company`，`purpose=operation`；stdin 只能是 `{"symbols":["CN:xxxxxx","HK:xxxxx",...]}`，symbols 仅取本轮确需去重/继承状态的标的；
-5. 写入账本时，仅允许结构化 `run_process` 执行 `node.exe --experimental-strip-types scripts/investment-ledger-cli.mjs append-company`，`purpose=operation`；完整候选 batch JSON 通过 stdin 输入；
-6. 禁止 Scheduled Task 直接使用 GitHub Plugin / Connector 写 #3；禁止直接调用 `gh`、`run_shell` 或其他脚本/命令；禁止传入 repo、issue、GitHub token、producer 或 dimension；禁止寻找其他写入通道。
+1. 调用 `get_state_snapshot(symbols=<本轮确需去重/继承状态的标的>, include=["COMPANY"], history_limit=10)`；以返回的 COMPANY 最新有效状态、Evidence keys 与 history 作为唯一去重/继承依据；
+2. 只有确认存在实质新增后才构造 `investment_state_batch_v1`。调用方只提供业务 batch；禁止传入 repo、issue、URL、GitHub token、producer、dimension 或 source_task，这些均由 Collector 的 COMPANY Profile 服务端固定；
+3. `event_id` 必须对同一事实稳定：网络重试、任务重跑或同一事实再次扫描不得因“当前运行时间变化”生成新 event_id；真正新增事实、数字、范围、时间、确认或反证才生成新事件；
+4. 调用 `validate_state_batch(channel="COMPANY", batch=<候选 batch>)`；只有 `VALID` 才可继续；
+5. 调用 `append_state_batch(channel="COMPANY", batch=<完全相同 batch>)`；只有 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算正式持久化；
+6. 调用 `get_state_write_receipt(channel="COMPANY", write_key=<event_id>)`；若出现 `FAILED`、`CONFLICT` 或 `OUTCOME_UNKNOWN`，本轮 BLOCKER，不得自行换运输通道；
+7. 写后再次调用 `get_state_snapshot` 回读同一标的，确认 Evidence keys / 最新事件已经进入正式状态；没有回读确认不得宣称入账成功。
 
-固定 CLI 内部目标只能是 `zhushihao/quantpro-collector#3`，并强制 `producer=company_validation`、`dimension=COMPANY`、`source_task=公司事实监控`；它负责 GitHub comments 完整分页、`investment_state_batch_v1` exact schema、公司层仅 R2 的写边界、`event_id` 幂等、append 与写后回读。CLI 只从 RESEARCH 机既有 GitHub keyring 内部取得凭据，token 不得进入模型输入、输出或正文日志。
+Collector 服务端固定目标为 `zhushihao/quantpro-collector#3`，并固定 `producer=company_validation`、`dimension=COMPANY`、`source_task=公司事实监控`；服务端负责完整分页、exact schema、公司层仅 R2 的写边界、D1 receipt、幂等、冲突检测、GitHub append 与写后回读。
 
-固定 project/CLI 不存在、RESEARCH Runner 不可用、CLI 非零退出、返回非法 JSON、账本冲突或写后回读失败时，本轮 BLOCKER；不得降级为通用 GitHub 写入，也不得修改任何 Automation。
+明确禁止：QuantPro RESEARCH 作为生产账本运输；GitHub Plugin / Connector 写 #3；`run_process` / `run_shell` / `gh` / 任意 HTTP writer；以及任何 State Gateway 之外的 fallback。State Gateway 工具缺失、协议错误、授权失败、账本冲突或写后回读失败时，只结束本轮并报告 BLOCKER，不得修改任何 Automation。
 
 ## 账本路由
 
-只在出现实质公司 Evidence、公司 Thesis、公司确认或反证迁移时，才通过上述固定 investment-ledger CLI 向 `zhushihao/quantpro-collector#3` append 一条既有 `investment_state_batch_v1` 批量评论。写前必须先用 `get-company` 完整分页读取同一标的 + COMPANY 的最新有效事件与 Evidence keys；无实质新增不写。只有 CLI 返回 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算持久化成功；写后必须再次 `get-company` 回读确认。公司确认 R2 只能由公司级事实形成，价格、成交量或市场结构不得形成 R2。
+只在出现实质公司 Evidence、公司 Thesis、公司确认或反证迁移时，才通过 Collector State Gateway 的 `COMPANY` Channel 持久化 `investment_state_batch_v1`。写前必须用 `get_state_snapshot` 完整读取同一标的的最新 COMPANY 状态与 Evidence keys；无实质新增不写。只有 `append_state_batch` 返回 `PERSISTED` 或 `IDEMPOTENT_REPLAY`、receipt 正常且写后 snapshot 回读确认，才算持久化成功。公司确认 R2 只能由公司级事实形成，价格、成交量或市场结构不得形成 R2。
 
 `zhushihao/quantpro-collector#1` 仅是行情原始事实，`#2` 仅是持仓助手市场状态账本；
 本任务对二者只读且不写。不得以本地文件、旧报告、聊天记忆或 QuantPro #28/#30 代替
