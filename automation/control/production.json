@@ -55,7 +55,7 @@
     "central-policy": {
       "prompt_id": "central-policy",
       "path": "automation/prompts/central-policy.md",
-      "production_ref": "16d596d20b608401d7acf7c4e4e55773d073ceb9",
+      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/central-policy/authority-narrative-fresh-delta.md"
@@ -66,7 +66,7 @@
     "ai-financing-rates": {
       "prompt_id": "ai-financing-rates",
       "path": "automation/prompts/ai-financing-rates.md",
-      "production_ref": "16d596d20b608401d7acf7c4e4e55773d073ceb9",
+      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/ai-financing-rates/causal-discipline.md"
