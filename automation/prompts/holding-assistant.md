@@ -38,7 +38,7 @@ Collector 的行情、LIVE 持仓、Research replica 与市场状态账本绝不
 
 1. `get_control_plane_status`
 2. `get_portfolio_quotes`
-3. 按本轮 `trading_date + semantic_slot` 调用 `get_state_snapshot(... include=["MARKET"])` 读取正式 MARKET checkpoint
+3. 按本轮 `trading_date + semantic_slot` 调用 `read_state_snapshot(... include=["MARKET"])` 读取正式 MARKET checkpoint
 
 禁止使用聊天记忆、历史报告、旧 Prompt 静态名单、网页行情或模型直接分页 GitHub Issue 替代本轮 Collector 结果。
 
@@ -67,11 +67,11 @@ Collector 的行情、LIVE 持仓、Research replica 与市场状态账本绝不
 Issue #2 是 append-only 市场状态审计账本。Scheduled Task 不得直接分页 GitHub，也不依赖 GitHub Plugin / Connector、QuantPro RESEARCH 或本地 CLI 读取/写入运行态。State Gateway **唯一生产运输路径**：
 
 1. 从本轮 Collector `live_universe` 提取全部 `ACTIVE` 且非 `MAPPING_ONLY` 标的，使用 canonical symbol（A 股 `CN:xxxxxx`、港股 `HK:xxxxx`）；
-2. 需要读取市场状态时调用 `get_state_snapshot(symbols=<上述 ACTIVE 标的>, include=["MARKET"], trading_date=<YYYY-MM-DD>, scheduled_slot=<semantic_slot>)`；MARKET 返回中的 PREOPEN、previous checkpoint、previous CLOSE、current slot 与冲突状态是唯一正式运行态；
+2. 需要读取市场状态时调用 `read_state_snapshot(symbols=<上述 ACTIVE 标的>, include=["MARKET"], trading_date=<YYYY-MM-DD>, scheduled_slot=<semantic_slot>)`；MARKET 返回中的 PREOPEN、previous checkpoint、previous CLOSE、current slot 与冲突状态是唯一正式运行态；
 3. 组装 checkpoint 后先调用 `validate_state_batch(channel="MARKET", batch=<checkpoint>)`；只有 `VALID` 才可继续；
 4. 调用 `append_state_batch(channel="MARKET", batch=<完全相同 checkpoint>)`；只有 `PERSISTED` 或 `IDEMPOTENT_REPLAY` 才算持久化成功；
 5. 调用 `get_state_write_receipt(channel="MARKET", write_key=<idempotency_key>)` 核对 payload hash、comment id 与结果；`FAILED`、`CONFLICT` 或 `OUTCOME_UNKNOWN` 一律 fail-closed；
-6. 写后再次调用 `get_state_snapshot` 回读同一 slot，确认 comment id / checkpoint 内容一致；
+6. 写后再次调用 `read_state_snapshot` 回读同一 slot，确认 comment id / checkpoint 内容一致；
 7. 禁止 GitHub Plugin / Connector 写入；禁止 QuantPro RESEARCH 运输；禁止 `run_process`、`run_shell`、`gh`、任意 HTTP writer、repo/issue/token 参数或其他 fallback。
 
 Collector MARKET Profile 服务端固定 repo=`zhushihao/quantpro-collector`、Issue=`#2`、producer/source identity，并负责完整分页、exact schema、D1 receipt、幂等、previous checkpoint / preopen 链校验、append 与写后回读。State Gateway 工具缺失、授权/协议错误、receipt 冲突或回读失败时按 BLOCKER 处理；任何失败都不得修改 Automation。
@@ -192,7 +192,7 @@ Recovery 必须明确是“10:10 补建盘前框架”，不能声称重建了 0
 - 超跌反弹与独立超额的区别。
 
 每个盘中时点都通过 Collector State Gateway `MARKET` Channel 持久化检查点，即使无用户通知。
-严格 Fresh-Delta 只能相对本轮 `get_state_snapshot(... include=["MARKET"])` 读取结果中的
+严格 Fresh-Delta 只能相对本轮 `read_state_snapshot(... include=["MARKET"])` 读取结果中的
 `previous_checkpoint` 计算；无上一检查点时写“无可比上一 checkpoint，
 不得声称严格 Fresh-Delta”。单个交易日只能称“单日显著相对超额”，不得称
 “持续独立超额”。
