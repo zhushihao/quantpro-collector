@@ -1,33 +1,40 @@
-# QuantPro Scheduled Tasks 版本治理与发布清单
+# QuantPro Automation v3：发布期编译的静态精简 Prompt
 
-本目录是 QuantPro ChatGPT Scheduled Tasks 的 Git 版本治理与发布审计真源。Scheduled Task 运行时使用其自身保存的完整 Prompt 快照，不再每轮从 Web/GitHub/Collector 动态加载 Prompt。
+Git保存唯一可编辑来源和实际安装版本；Automation保存完整静态执行快照；Collector只提供运行态事实、Research Job和State Gateway。**不在任务运行时下载Prompt/Guidance，不让Collector分发配置。**
 
-- `control/production.json`：当前生产注册表，按 Scheduled Task 的固定 `REGISTRY_KEY` 记录 Prompt 路径、exact `production_ref`、`WRITE_SCOPE` 与 Guidance 路径。
-- `prompts/*.md`：唯一可执行的业务 Prompt。
-- `../automation_guidance/` / `../research_guidance/`：发布时与业务 Prompt 合并进 Scheduled Task 的完整 Prompt 快照；不得在运行时动态读取。
+## 文件与合同
+- `build-config.json`：6个既有任务身份、模式、权限、Guidance清单和完整产物预算。
+- `prompts/*.md`：业务正文；`fragments/*.md`：共享执行/来源/状态/表达规则；`modes/*.md`：持仓盘中与盘前收盘各自执行流程。仅发布期组合，最终产物没有include或待解析变量。
+- `../automation_guidance`、`../research_guidance`：同一exact SHA的研究经验补充；不得覆盖权限。字段级服务端实现不重复塞进模型指令，模型自己的channel授权和lease终态责任必须保留。
+- `build_prompts.py`：标准库确定性编译；UTF-8、LF、一个终止换行；校验完整长度（不是源文件长度）。预算持仓5500、产业4500、公司/政策/融资3500字符。超限报错，不自动截断。
+- `promote.py`：公开raw exact-SHA校验与候选产物准备。**PREPARED不是已部署**；只有实际保存全文和受保护设置回读通过后，`--apply`才更新`control/production.json`。
+- `verify_deployment.py`：对实际Automation响应逐字节全文比较，检查title/schedule/is_enabled/default_timezone/timing_mode/notifications_enabled/email_enabled完全不变。不能拿更新请求或模型回显hash充当服务回读。
+- `_build/`仅本地发布产物，不进Git。控制面只记录实际每registry的production_ref、compiled_prompt_sha256、compiled_prompt_chars、contract_version、源hash与VERIFIED状态。混合版本时top-level content_ref=null，以每项为准。
 
-## 运行时合同
+## 执行发布
+先从Automation服务读取原设置，保存`_build/before.json`（真实对象数组或含jawbones的JSON；可含全文供原样回滚）。只更新已有任务prompt字段，绝不改时间/启停/通知，不新增生产任务。
 
-1. Scheduled Task 本身保存完整业务 Prompt + 对应 Guidance；运行时不依赖公开 Web/GitHub/Collector 来加载配置。
-2. Git `production.json` 仅用于审计“当前正式版本应来自哪个 exact ref”，不属于运行时必需链路。
-3. Collector 提供业务数据、LIVE facts、Research replica / Research Job 协议与 State Gateway；不得承载或分发 Automation Prompt。holding-assistant 的 MARKET 状态与产业/公司的 INDUSTRY/COMPANY 状态统一由 QuantPro Collector State Gateway 运输；QuantPro RESEARCH 不再属于 Scheduled Task 的生产状态运输链。
-4. Web 只用于业务 Prompt 明确要求的最新外部事实扫描；不得承担 Prompt/Guidance 控制面或账本运行态读取。
-5. GitHub Issue #2/#3 只作为审计落点；Scheduled Task 不直接分页或写 GitHub，也不依赖 GitHub Plugin / Connector、QuantPro RESEARCH、`gh` 或 shell 完成运行态持久化。Issue #2/#3 唯一生产运输路径为 QuantPro Collector State Gateway 的固定 Channel/Profile；调用方不得控制 repo/issue/URL/token/producer/dimension。
-6. 所有生产 Prompt 都必须明确：任何 BLOCKER 只能结束本轮，绝对禁止任务修改自己的 title/schedule/enabled/notifications/email 配置。
+```powershell
+# 开发预检：此产物标为WORKTREE_PREVIEW，不得冒充公开exact发布
+python -B automation/build_prompts.py --source local --ref <当前40位SHA>
+python -B -m unittest discover automation -p "test_*.py"
+# 审核后commit/push得到候选内容SHA；生产控制此时仍指向旧版本
+python -B automation/build_prompts.py --source git --ref <候选SHA> --out automation/_build/git
+python -B automation/promote.py --ref <候选SHA> --out automation/_build/public
+```
 
-## 变更流程
+比较Git和public两份manifest中的完整prompt hash及源hash；均一致才采用`public/update-payloads.json`内的prompt-only更新对象，通过获准的Automation工具逐一发布。将**工具实际返回/重新读取的保存对象**写入`_build/after.json`，不是把候选内容复制为“实际结果”。
 
-1. 修改 `automation/prompts/<prompt>.md` 和/或 Guidance；
-2. commit + push，得到候选内容 SHA；
-3. 运行 `python automation/promote.py --ref <40位候选SHA>`；该门禁必须从公开 raw exact-ref 通道实际读到所有将被引用的 Prompt/Guidance，并校验 Prompt 头部合同；
-4. 只有第 3 步 `PROMOTION_GATE=PASS` 后，才允许运行 `python automation/promote.py --ref <40位候选SHA> --apply` 写入 `production.json`；
-5. 单独 commit + push control 变更，并再次从公开 raw 读取 `main/automation/control/production.json` 与其中 exact refs 验证；
-6. 将 exact ref 下的业务 Prompt 与对应 Guidance 合并成完整文本，显式覆盖到目标 Scheduled Task；holding-assistant 两个任务共享同一业务 Prompt，但分别固定 `TASK_MODE=INTRADAY` 与 `TASK_MODE=PREOPEN_CLOSE`；
-7. 覆盖后回读 Automation：title/schedule/enabled/notifications 不变，Prompt 不含动态 control/bundle 加载逻辑，并保留 Collector/Web/GitHub 的职责边界。
+```powershell
+python -B automation/verify_deployment.py --build-dir automation/_build/public --before automation/_build/before.json --after automation/_build/after.json --receipt automation/_build/readback-receipt.json
+python -B automation/promote.py --ref <候选SHA> --apply --before automation/_build/before.json --after automation/_build/after.json
+```
 
-这样 main 上尚未切生产的新 Prompt 不会被 Scheduled Task 自动采用，同时 Scheduled Task 也不会因为 Web/connector schema/cache 波动而无法加载自己的业务配置。
-同一业务 Prompt 可以被多个 registry key 复用；例如持仓助手的盘中任务与盘前+收盘任务共享同一个 mode-aware Prompt，但拥有不同调度与独立 Bootstrap key。盘前+收盘任务允许增加 10:10 PREOPEN Recovery，Recovery 的账本 semantic slot 仍为 09:10。
+随后单独commit/push已验证control及不含秘密的审计回执。内容SHA与控制面提交SHA允许不同，避免编译头部SHA/hash自引用。程序不直接调用Automation私有API、不接收token、不自动部署Worker。公开读取失败不改生产指针；候选缺文件/头部错误/未知模板/旧接口/长度超标，或回读正文/设置漂移均拒绝应用。
 
-`WRITE_SCOPE` 约束生产业务写权限。状态账本统一通过 QuantPro Collector State Gateway：`MARKET_LEDGER_APPEND_ONLY` 仅允许 `MARKET` Channel 固定写 Issue #2；`RESEARCH_JOB_AND_INDUSTRY_LEDGER` 在 Research Job 正式协议之外仅允许 `INDUSTRY` Channel 固定写 #3 的 `industry_trend/INDUSTRY`；`COMPANY_LEDGER_APPEND_ONLY` 仅允许 `COMPANY` Channel 固定写 #3 的 `company_validation/COMPANY`。Scheduled Task 不得使用 QuantPro RESEARCH、GitHub Connector、`gh`、shell 或任意 HTTP writer 作为状态账本 fallback。
+## 部分发布与回滚
+`--keys <registry...>`可只准备/验证实际切换的任务；其他项production_ref保持原值，不能宣称六项已全切。更新返回不明时先读服务对象，不盲目再次提交。任何失败不自动关闭任务。
+回滚优先用保存的原始prompt做prompt-only恢复，再读回全文/原设置；或者使用上一份已验证manifest与其exact版本编译器恢复。v2旧版本以当时发布记录中的完整静态快照/源及Guidance恢复，不用v3规则假造旧hash。回滚需正常授权和留痕，不绕过安全拦截。
 
-禁止在本目录存放 token、secret、账户、订单、持仓数量或其他敏感信息。
+## 审核与测试边界
+`semantic-preservation.md`记录本次旧→新业务规则落点。测试覆盖六项预算、确定性、身份权限/模式、非法路径/缺指导、超限、全文漂移、受保护设置变化、未经回读不得改指针、部分发布。关键词断言只是回归网，不能替代人工语义审核；本次不写假Evidence，不把编译测试冒充交易日自然运行验收。

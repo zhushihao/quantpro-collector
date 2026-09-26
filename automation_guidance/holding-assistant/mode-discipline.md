@@ -1,7 +1,2 @@
 # 持仓助手模式纪律
-
-同一业务 Prompt 覆盖 PREOPEN / PREOPEN_RECOVERY / INTRADAY / CLOSE；两个 Scheduled Task 只负责不同调度窗口，不得各自复制长期业务规则。
-
-09:10 只建 Action Gate，不虚构当日价格；若因持仓门禁失败导致 PREOPEN 缺失，10:10 只做一次幂等 Recovery，semantic slot 仍固定为 09:10，且不得利用已发生的盘中行情反推盘前 Gate。周一/节后 Fresh-Delta 从上一交易日 CLOSE 连续覆盖到当前 PREOPEN。盘中只做市场确认，不制造产业/公司事实；16:45 必须回读同日 PREOPEN Gate 与盘中 checkpoint 后闭环。任何缺链、mapping version 变化或数据 stale 都降级为 INCONCLUSIVE。
-
-市场状态唯一生产路径为 QuantPro Collector State Gateway 的 `MARKET` Channel，固定读写 Issue #2。必须执行 snapshot → validate → append → receipt → 写后 snapshot 回读；禁止 QuantPro RESEARCH 运输、任意 shell、直接 `gh`、GitHub Connector 写入、任意 repo/issue/token 参数或 Research Job 写入。
+共享业务规则发布期编译，只执行TASK_MODE获准窗口，不改实际调度。盘前及补建均不使用当日行情反推验证条件；周末/节假日从上一正式CLOSE连续覆盖。盘中仅验证市场，不制造产业/公司事实；收盘核对同日原始条件与盘中记录。缺链、比较基准版本变化或数据过期不得伪造闭环。状态只走Collector MARKET，Research Job只读；失败仅结束本轮。

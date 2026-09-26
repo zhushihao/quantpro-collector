@@ -1,0 +1,2 @@
+## 研究批次
+investment_state_batch_v1输入只含schema_version、真实portfolio_version、event_id、as_of、events。event_id沿用既有时间戳|生产者|BATCH格式，但同事实/重试/重跑必须稳定，不用新运行时间换键；新数字/范围/确认/反证才形成新事件。events逐项含symbol、event_type、evidence_types/evidence_keys、counter_evidence、confidence、next_validation，及本任务拥有的逻辑/优先级/r_proposal字段；不传repo/issue/URL/token/producer/dimension/source_task。symbols使用CN:六位代码或HK:五位代码。稳定键为event_id，同轮多标的一批，不为清队列造事实。

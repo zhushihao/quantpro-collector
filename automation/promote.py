@@ -1,143 +1,104 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""Atomically promote QuantPro Scheduled Task content to an exact Git ref.
+"""Prepare exact-ref static prompts; apply control ONLY after actual readback.
 
-The control file is the public production pointer.  A candidate ref is never
-written into it until every referenced Prompt/Guidance object is readable from
-raw.githubusercontent.com and Prompt header contracts match the registry.
+Preparation is not deployment. This CLI never calls the Automation service.
+Use prompt-only payloads from the public build, capture the service responses,
+then supply --before/--after to verify and record the installed version.
 """
 from __future__ import annotations
 
 import argparse
+import copy
 import json
-import os
-import re
-import tempfile
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
-from typing import Callable
+import urllib.request
 
-REPO = "zhushihao/quantpro-collector"
-RAW_BASE = f"https://raw.githubusercontent.com/{REPO}"
-ROOT = Path(__file__).resolve().parents[1]
-CONTROL = ROOT / "automation" / "control" / "production.json"
-SHA40 = re.compile(r"^[0-9a-f]{40}$")
+from build_prompts import BuildError, CONTRACT, ROOT, atomic_json, compile_all, emit, raw_loader
+from verify_deployment import verify
 
-
-class PromotionError(RuntimeError):
-    pass
+CONTROL = ROOT / "automation/control/production.json"
+PromotionError = BuildError
 
 
 def _read_control(path: Path = CONTROL) -> dict:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("status") != "PRODUCTION":
-        raise PromotionError("control is not a PRODUCTION object")
-    registry = data.get("registry")
-    if not isinstance(registry, dict) or not registry:
-        raise PromotionError("control.registry is missing or empty")
-    return data
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or value.get("status") != "PRODUCTION" or not value.get("registry"):
+        raise PromotionError("invalid production audit control")
+    return value
 
 
-def _fetch_raw(
-    ref: str,
-    relpath: str,
-    *,
-    attempts: int = 6,
-    delay_seconds: float = 5.0,
-    timeout_seconds: int = 20,
-    opener: Callable[..., object] = urllib.request.urlopen,
-) -> str:
-    url = f"{RAW_BASE}/{ref}/{relpath}"
-    last: Exception | None = None
-    for index in range(attempts):
-        try:
-            with opener(url, timeout=timeout_seconds) as response:  # type: ignore[attr-defined]
-                status = getattr(response, "status", 200)
-                body = response.read()  # type: ignore[attr-defined]
-                if status != 200 or not body:
-                    raise PromotionError(f"raw object unavailable status={status}: {relpath}")
-                return body.decode("utf-8")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, PromotionError) as error:
-            last = error
-            if index + 1 < attempts:
-                time.sleep(delay_seconds)
-    raise PromotionError(f"raw exact-ref unavailable after {attempts} attempts: {relpath}: {last}")
+def validate_candidate(control: dict, ref: str, *, opener=urllib.request.urlopen, keys: list[str] | None = None) -> tuple[dict, dict[str, str]]:
+    manifest, prompts = compile_all(ref, raw_loader(ref, opener=opener), keys=keys, provenance="PUBLIC_RAW_EXACT")
+    for key, entry in manifest["registry"].items():
+        old = control["registry"].get(key)
+        if not isinstance(old, dict):
+            raise PromotionError(f"{key}: not an existing production task")
+        for field in ("prompt_id", "write_scope", "mode"):
+            if old.get(field) != entry.get(field):
+                raise PromotionError(f"{key}: production ownership/mode changed: {field}")
+        if old.get("automation_id", entry["automation_id"]) != entry["automation_id"]:
+            raise PromotionError(f"{key}: production task id changed")
+    return manifest, prompts
 
 
-def validate_candidate(control: dict, ref: str, *, opener=urllib.request.urlopen) -> None:
-    if not SHA40.fullmatch(ref):
-        raise PromotionError("candidate ref must be a 40-character lowercase SHA")
-    registry = control["registry"]
-    for key, entry in registry.items():
-        if not isinstance(entry, dict):
-            raise PromotionError(f"registry entry is not an object: {key}")
-        prompt_id = entry.get("prompt_id")
-        path = entry.get("path")
-        scope = entry.get("write_scope")
-        if not all(isinstance(value, str) and value for value in (prompt_id, path, scope)):
-            raise PromotionError(f"registry entry missing prompt contract fields: {key}")
-        prompt = _fetch_raw(ref, path, opener=opener)
-        head = "\n".join(prompt.splitlines()[:10])
-        required = (
-            f"PROMPT_ID={prompt_id}",
-            "STATUS=PRODUCTION",
-            f"WRITE_SCOPE={scope}",
-        )
-        for token in required:
-            if token not in head:
-                raise PromotionError(f"prompt header mismatch for {key}: missing {token}")
-        guidance = entry.get("automation_guidance", []) + entry.get("research_guidance", [])
-        if not isinstance(guidance, list) or not all(isinstance(path, str) and path for path in guidance):
-            raise PromotionError(f"invalid guidance list: {key}")
-        for guidance_path in guidance:
-            if not _fetch_raw(ref, guidance_path, opener=opener).strip():
-                raise PromotionError(f"empty guidance: {key}: {guidance_path}")
-
-
-def _atomic_write(path: Path, payload: dict) -> None:
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(rendered)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_name, path)
-    except Exception:
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
-
-
-def promote(ref: str, *, apply: bool, control_path: Path = CONTROL, opener=urllib.request.urlopen) -> dict:
+def promote(ref: str, *, apply: bool, control_path: Path = CONTROL,
+            opener=urllib.request.urlopen, keys: list[str] | None = None,
+            before: object = None, after: object = None, out: Path | None = None) -> dict:
+    if apply and (before is None or after is None):
+        raise PromotionError("--apply requires actual Automation before and after snapshots")
+    original_bytes = control_path.read_bytes()
     control = _read_control(control_path)
-    validate_candidate(control, ref, opener=opener)
-    updated = json.loads(json.dumps(control))
-    updated["content_ref"] = ref
-    for entry in updated["registry"].values():
-        entry["production_ref"] = ref
-    if apply:
-        _atomic_write(control_path, updated)
-    return updated
+    manifest, prompts = validate_candidate(control, ref, opener=opener, keys=keys)
+    if out is not None:
+        emit(out, manifest, prompts)
+    result = {"status": "PREPARED", "manifest": manifest, "control_changed": False}
+    if not apply:
+        return result
+    receipt = verify(manifest, prompts, before, after)
+    updated = copy.deepcopy(control)
+    updated["schema_version"] = "quantpro-automation-control-v3"
+    for key, candidate in manifest["registry"].items():
+        entry = updated["registry"][key]
+        for field in ("path", "production_ref", "automation_id", "automation_guidance", "research_guidance", "compiled_prompt_sha256", "compiled_prompt_chars", "max_chars"):
+            entry[field] = candidate[field]
+        entry["contract_version"] = CONTRACT
+        entry["deployment_status"] = "VERIFIED"
+        entry["source_sha256"] = candidate["source_sha256"]
+    refs = {entry["production_ref"] for entry in updated["registry"].values()}
+    updated["content_ref"] = next(iter(refs)) if len(refs) == 1 else None
+    updated["last_verified_release_ref"] = ref
+    # Guard against another release moving the control while raw verification ran.
+    if control_path.read_bytes() != original_bytes:
+        raise PromotionError("production control changed during verification; reread before applying")
+    if out is not None:
+        atomic_json(out / "deployment-receipt.json", receipt)
+    atomic_json(control_path, updated)
+    return {"status": "VERIFIED", "manifest": manifest, "receipt": receipt, "control_changed": True}
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--ref", required=True, help="already-pushed exact 40-char content SHA")
-    parser.add_argument("--apply", action="store_true", help="write production.json after validation")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ref", required=True)
+    parser.add_argument("--keys", nargs="+")
+    parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--before", type=Path)
+    parser.add_argument("--after", type=Path)
+    parser.add_argument("--out", type=Path, default=ROOT / "automation/_build/public")
+    parser.add_argument("--control", type=Path, default=CONTROL)
     args = parser.parse_args(argv)
     try:
-        promote(args.ref, apply=args.apply)
-    except (PromotionError, OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
-        print(f"PROMOTION_GATE=FAIL error={type(error).__name__}: {error}")
+        before = json.loads(args.before.read_text(encoding="utf-8")) if args.before else None
+        after = json.loads(args.after.read_text(encoding="utf-8")) if args.after else None
+        result = promote(args.ref, apply=args.apply, keys=args.keys, control_path=args.control,
+                         before=before, after=after, out=args.out)
+        print(json.dumps({"PROMOTION_GATE": "PASS", "deployment_status": result["status"],
+                          "ref": args.ref, "control_changed": result["control_changed"],
+                          "registry": {key: {field: entry[field] for field in ("compiled_prompt_chars", "compiled_prompt_sha256")}
+                                       for key, entry in result["manifest"]["registry"].items()}}, ensure_ascii=False))
+        return 0
+    except (BuildError, OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"PROMOTION_GATE=FAIL {type(exc).__name__}: {exc}")
         return 1
-    print(f"PROMOTION_GATE=PASS ref={args.ref} apply={'YES' if args.apply else 'NO'}")
-    return 0
 
 
 if __name__ == "__main__":
