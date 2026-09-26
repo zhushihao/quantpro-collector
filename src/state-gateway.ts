@@ -278,7 +278,7 @@ function marketRecordCanonicalSymbol(record: Record<string, unknown>): string | 
 				? record.instrument_key
 				: null;
 	if (!raw) return null;
-	if (/^(?:CN:\\d{6}|HK:\\d{5})$/.test(raw)) return raw;
+	if (/^(?:CN:\d{6}|HK:\d{5})$/.test(raw)) return raw;
 	const cn = raw.match(/^(\d{6})\.(?:SZ|SH)$/i);
 	if (cn) return `CN:${cn[1]}`;
 	const hk = raw.match(/^(\d{1,5})\.HK$/i);

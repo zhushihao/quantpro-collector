@@ -108,6 +108,8 @@ interface Env {
 	RESEARCH_OBJECTS?: R2Bucket;
 	/** RESEARCH 私有 transport credential；ingest 与 receipts 共用，不与 market/research OAuth scopes 混用。 */
 	RESEARCH_REPLICA_INGEST_TOKEN?: string;
+	/** 非敏感部署标识；由发布命令注入，用于生产版本核验。 */
+	DEPLOYED_GIT_SHA?: string;
 	CF_VERSION_METADATA?: {
 		id: string;
 		tag: string;
@@ -948,13 +950,13 @@ export function createServer(
 				"读取固定生产状态账本：MARKET 固定 Issue #2，INDUSTRY/COMPANY/CLOSE 固定 Issue #3。调用方不能指定外部目标。需要 state:read scope。",
 			inputSchema: z.object({
 				symbols: z
-					.array(z.string().regex(/^(?:CN:\\d{6}|HK:\\d{5})$/))
+					.array(z.string().regex(/^(?:CN:\d{6}|HK:\d{5})$/))
 					.min(1)
 					.max(512),
 				include: z.array(STATE_CHANNEL_SCHEMA).min(1).max(4),
 				trading_date: z
 					.string()
-					.regex(/^\\d{4}-\\d{2}-\\d{2}$/)
+					.regex(/^\d{4}-\d{2}-\d{2}$/)
 					.optional(),
 				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA.optional(),
 				history_limit: z.number().int().min(0).max(20).optional(),
@@ -1157,7 +1159,8 @@ export function createServer(
 					token: env?.GITHUB_TOKEN,
 					effectiveScopes: researchScopes,
 					principalVerified: Boolean(researchPrincipal && researchIssuer),
-					deployedGitSha: env?.CF_VERSION_METADATA?.tag ?? null,
+					deployedGitSha:
+						env?.DEPLOYED_GIT_SHA?.trim() || env?.CF_VERSION_METADATA?.tag || null,
 					cloudflareVersionId: env?.CF_VERSION_METADATA?.id ?? null,
 					cloudflareVersionTimestamp: env?.CF_VERSION_METADATA?.timestamp ?? null,
 					serviceVersion: "1.2.0",
