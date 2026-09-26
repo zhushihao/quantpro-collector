@@ -71,6 +71,7 @@ test("OAuth discovery advertises market, research and State Gateway scopes with 
 		/const SUPPORTED_SCOPES: readonly string\[\] = \[\n\tMARKET_READ_SCOPE,\n\tRESEARCH_CLAIM_SCOPE,\n\tRESEARCH_SUBMIT_SCOPE,\n\tSTATE_READ_SCOPE,\n\tSTATE_WRITE_SCOPE,\n\tOFFLINE_ACCESS_SCOPE,\n\]/,
 	);
 	assert.match(oauth, /scopes_supported: \[\.\.\.RESOURCE_SUPPORTED_SCOPES\]/);
+	assert.match(oauth, /scope="\$\{RESOURCE_SUPPORTED_SCOPES\.join\(" "\)\}"/);
 	assert.match(
 		oauth,
 		/const RESOURCE_SUPPORTED_SCOPES: readonly string\[\] = \[\n\tMARKET_READ_SCOPE,\n\tRESEARCH_CLAIM_SCOPE,\n\tRESEARCH_SUBMIT_SCOPE,\n\tSTATE_READ_SCOPE,\n\tSTATE_WRITE_SCOPE,\n\]/,

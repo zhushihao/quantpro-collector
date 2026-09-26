@@ -180,7 +180,7 @@ function oauthChallenge(request: Request, error = "invalid_token", status = 401)
 	const challenge = [
 		"Bearer",
 		`resource_metadata="${resourceMetadataUrl(request)}"`,
-		`scope="${MARKET_READ_SCOPE}"`,
+		`scope="${RESOURCE_SUPPORTED_SCOPES.join(" ")}"`,
 		`error="${error}"`,
 	].join(" ");
 	return new Response(JSON.stringify({ error }), {
