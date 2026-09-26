@@ -156,6 +156,10 @@ test("State Gateway MCP exposes five narrow tools without caller-controlled exte
 			"batch",
 			"channel",
 		]);
+		const snapshotSchema = JSON.stringify(tools.get_state_snapshot.inputSchema);
+		assert.match(snapshotSchema, /CN:\[0-9\]\{6\}/);
+		assert.match(snapshotSchema, /HK:\[0-9\]\{5\}/);
+		assert.doesNotMatch(snapshotSchema, /\\\\d/);
 		assert.equal(tools.append_state_batch.annotations.readOnlyHint, false);
 		assert.equal(tools.append_state_batch.annotations.destructiveHint, false);
 		assert.equal(tools.append_state_batch.annotations.idempotentHint, true);

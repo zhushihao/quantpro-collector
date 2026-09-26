@@ -950,13 +950,13 @@ export function createServer(
 				"读取固定生产状态账本：MARKET 固定 Issue #2，INDUSTRY/COMPANY/CLOSE 固定 Issue #3。调用方不能指定外部目标。需要 state:read scope。",
 			inputSchema: z.object({
 				symbols: z
-					.array(z.string().regex(/^(?:CN:\d{6}|HK:\d{5})$/))
+					.array(z.string().regex(/^(?:CN:[0-9]{6}|HK:[0-9]{5})$/))
 					.min(1)
 					.max(512),
 				include: z.array(STATE_CHANNEL_SCHEMA).min(1).max(4),
 				trading_date: z
 					.string()
-					.regex(/^\d{4}-\d{2}-\d{2}$/)
+					.regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)
 					.optional(),
 				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA.optional(),
 				history_limit: z.number().int().min(0).max(20).optional(),
