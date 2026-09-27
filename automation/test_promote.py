@@ -188,6 +188,22 @@ class CompilerTests(unittest.TestCase):
             self.assertNotIn("STATE_CHANNEL=", prompts[key])
             self.assertNotIn("append_state_batch", prompts[key])
             self.assertIn("WRITE_SCOPE=READ_ONLY", prompts[key])
+    def test_all_profiles_have_two_phase_run_audit_without_business_scope_expansion(self):
+        _, prompts = self.compile()
+        for key, prompt in prompts.items():
+            with self.subTest(key=key):
+                self.assertIn("record_automation_run", prompt)
+                self.assertIn("phase=STARTED", prompt)
+                self.assertIn("phase=FINAL", prompt)
+                self.assertIn("SILENT", prompt)
+                self.assertIn("BLOCKED", prompt)
+                self.assertIn("FAILED", prompt)
+                self.assertIn("正常 SILENT 只有在 FINAL 审计成功后才真正静默", prompt)
+        for key in ("central-policy", "ai-financing-rates"):
+            self.assertNotIn("append_state_batch", prompts[key])
+            self.assertIn("WRITE_SCOPE=READ_ONLY", prompts[key])
+            self.assertIn("即使 WRITE_SCOPE=READ_ONLY 也只允许此例外", prompts[key])
+
     def test_holding_premarket_wire_enum_not_workflow_label(self):
         _, prompts = self.compile()
         for key in ("holding-assistant-preclose", "holding-assistant-intraday"):

@@ -6,7 +6,7 @@ Git保存唯一可编辑来源和实际安装版本；Automation保存完整静�
 - `build-config.json`：6个既有任务身份、模式、权限、Guidance清单和完整产物预算。
 - `prompts/*.md`：业务正文；`fragments/*.md`：共享执行/来源/状态/表达规则；`modes/*.md`：持仓盘中与盘前收盘各自执行流程。仅发布期组合，最终产物没有include或待解析变量。
 - `../automation_guidance`、`../research_guidance`：同一exact SHA的研究经验补充；不得覆盖权限。字段级服务端实现不重复塞进模型指令，模型自己的channel授权和lease终态责任必须保留。
-- `build_prompts.py`：标准库确定性编译；UTF-8、LF、一个终止换行；校验完整长度（不是源文件长度）。预算持仓5500、产业4500、公司/政策/融资3500字符。超限报错，不自动截断。
+- `build_prompts.py`：标准库确定性编译；UTF-8、LF、一个终止换行；校验完整长度（不是源文件长度）。预算持仓6500、产业5600、公司4700、政策/融资4200字符。超限报错，不自动截断。
 - `promote.py`：公开raw exact-SHA校验与候选产物准备。**PREPARED不是已部署**；只有实际保存全文和受保护设置回读通过后，`--apply`才更新`control/production.json`。
 - `verify_deployment.py`：对实际Automation响应逐字节全文比较，检查title/schedule/is_enabled/default_timezone/timing_mode/notifications_enabled/email_enabled完全不变。不能拿更新请求或模型回显hash充当服务回读。
 - `_build/`仅本地发布产物，不进Git。控制面只记录实际每registry的production_ref、compiled_prompt_sha256、compiled_prompt_chars、contract_version、源hash与VERIFIED状态。混合版本时top-level content_ref=null，以每项为准。

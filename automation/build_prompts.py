@@ -35,18 +35,22 @@ AUTOMATION_IDS = {
 }
 CONTRACT = "automation-v3"
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
-COMMON = ["automation/fragments/common-safety.md", "automation/fragments/fresh-delta.md"]
+COMMON = [
+    "automation/fragments/common-safety.md",
+    "automation/fragments/run-audit.md",
+    "automation/fragments/fresh-delta.md",
+]
 OUTPUT = "automation/fragments/output-style.md"
 STATE = "automation/fragments/state-gateway.md"
 INVESTMENT = "automation/fragments/investment-input.md"
 # Deliberate release contract: changing permissions/modes/budgets requires review.
 CONTRACTS = {
-    "holding-assistant-intraday": ("holding-assistant", "MARKET_LEDGER_APPEND_ONLY", "INTRADAY", "MARKET", 5500),
-    "holding-assistant-preclose": ("holding-assistant", "MARKET_LEDGER_APPEND_ONLY", "PREOPEN_CLOSE", "MARKET", 5500),
-    "industry-research": ("industry-research", "RESEARCH_JOB_AND_INDUSTRY_LEDGER", None, "INDUSTRY", 4500),
-    "company-facts": ("company-facts", "COMPANY_LEDGER_APPEND_ONLY", None, "COMPANY", 3500),
-    "central-policy": ("central-policy", "READ_ONLY", None, None, 3500),
-    "ai-financing-rates": ("ai-financing-rates", "READ_ONLY", None, None, 3500),
+    "holding-assistant-intraday": ("holding-assistant", "MARKET_LEDGER_APPEND_ONLY", "INTRADAY", "MARKET", 6500),
+    "holding-assistant-preclose": ("holding-assistant", "MARKET_LEDGER_APPEND_ONLY", "PREOPEN_CLOSE", "MARKET", 6500),
+    "industry-research": ("industry-research", "RESEARCH_JOB_AND_INDUSTRY_LEDGER", None, "INDUSTRY", 5600),
+    "company-facts": ("company-facts", "COMPANY_LEDGER_APPEND_ONLY", None, "COMPANY", 4700),
+    "central-policy": ("central-policy", "READ_ONLY", None, None, 4200),
+    "ai-financing-rates": ("ai-financing-rates", "READ_ONLY", None, None, 4200),
 }
 GUIDANCE = {
     "holding-assistant": (["automation_guidance/holding-assistant/mode-discipline.md"], []),
