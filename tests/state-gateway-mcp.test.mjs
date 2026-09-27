@@ -149,9 +149,11 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 		const names = [
 			"append_state_batch",
 			"get_gateway_status",
+			"get_automation_run_history",
 			"get_state_snapshot",
 			"read_state_snapshot",
 			"read_state_snapshot_v2",
+			"record_automation_run",
 			"get_state_write_receipt",
 			"validate_state_batch",
 		];
@@ -188,6 +190,10 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			assert.equal(snapshot.properties.symbols.items.pattern, undefined);
 			assert.equal(snapshot.properties.trading_date.pattern, undefined);
 		}
+		assert.equal(tools.record_automation_run.annotations.readOnlyHint, false);
+		assert.equal(tools.record_automation_run.annotations.idempotentHint, true);
+		assert.equal(tools.get_automation_run_history.annotations.readOnlyHint, true);
+		assert.equal(tools.get_automation_run_history.annotations.openWorldHint, false);
 		assert.equal(tools.append_state_batch.annotations.readOnlyHint, false);
 		assert.equal(tools.append_state_batch.annotations.destructiveHint, false);
 		assert.equal(tools.append_state_batch.annotations.idempotentHint, true);

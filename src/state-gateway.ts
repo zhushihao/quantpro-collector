@@ -684,6 +684,8 @@ export async function getGatewayStatus(input: {
 			"append_state_batch",
 			"get_state_write_receipt",
 			"get_gateway_status",
+			"record_automation_run",
+			"get_automation_run_history",
 			"get_market_checkpoints",
 			"append_market_checkpoint",
 		],

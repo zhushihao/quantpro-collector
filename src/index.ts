@@ -65,6 +65,13 @@ import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import { ResearchReadBackendError, withResearchReadRetry } from "./research-read-retry.ts";
 import {
+	AUTOMATION_RUN_EVENT_INPUT_SCHEMA,
+	AUTOMATION_RUN_HISTORY_INPUT_SCHEMA,
+	AutomationRunLedgerError,
+	getAutomationRunHistory,
+	recordAutomationRunEvent,
+} from "./automation-run-ledger.ts";
+import {
 	getMarketCheckpoints,
 	MARKET_CHECKPOINT_INPUT_SCHEMA,
 	MARKET_LEDGER_SLOT_SCHEMA,
@@ -1229,6 +1236,110 @@ export function createServer(
 				};
 			} catch (error) {
 				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
+	const automationRunErrorResponse = (error: unknown) => {
+		const safe =
+			error instanceof AutomationRunLedgerError
+				? {
+						status: error.code,
+						retryable: error.retryable,
+						request_id: error.requestId,
+						message: error.message,
+					}
+				: {
+						status: "AUTOMATION_RUN_UNAVAILABLE",
+						retryable: true,
+						request_id: crypto.randomUUID().replaceAll("-", ""),
+						message: "automation run audit operation failed",
+					};
+		return {
+			isError: true as const,
+			content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
+		};
+	};
+
+	server.registerTool(
+		"record_automation_run",
+		{
+			description:
+				"记录 ChatGPT Automation 一次运行的 STARTED 或 FINAL 审计事件。仅写 Collector D1 运行审计，不写投资状态账本；同 task_name + run_id + phase 幂等。FINAL 状态仅允许 COMPLETED/SILENT/BLOCKED/FAILED。授权以 state:write 为准。",
+			inputSchema: AUTOMATION_RUN_EVENT_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async (event) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "record_automation_run");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA) {
+				return automationRunErrorResponse(
+					new AutomationRunLedgerError(
+						"AUTOMATION_RUN_UNAVAILABLE",
+						"automation run audit storage is not configured",
+						{ retryable: true },
+					),
+				);
+			}
+			try {
+				const result = await recordAutomationRunEvent({
+					db: env.RESEARCH_REPLICA,
+					event,
+					collectorBuildSha:
+						env.DEPLOYED_GIT_SHA?.trim() || env.CF_VERSION_METADATA?.tag || null,
+					cloudflareVersionId: env.CF_VERSION_METADATA?.id ?? null,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return automationRunErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_automation_run_history",
+		{
+			description:
+				"查询 Collector Automation 运行审计，可按 task_name / since 读取最近运行；STARTED 无 FINAL 会显示 IN_PROGRESS，正常静默显示 SILENT，便于判断任务是否真正执行完成。授权以 state:read 为准。",
+			inputSchema: AUTOMATION_RUN_HISTORY_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async ({ task_name, since, limit }) => {
+			const denied = requireStateScope(STATE_READ_SCOPE, "get_automation_run_history");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA) {
+				return automationRunErrorResponse(
+					new AutomationRunLedgerError(
+						"AUTOMATION_RUN_UNAVAILABLE",
+						"automation run audit storage is not configured",
+						{ retryable: true },
+					),
+				);
+			}
+			try {
+				const result = await getAutomationRunHistory({
+					db: env.RESEARCH_REPLICA,
+					taskName: task_name,
+					since,
+					limit,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return automationRunErrorResponse(error);
 			}
 		},
 	);
