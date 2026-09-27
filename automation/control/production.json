@@ -2,12 +2,12 @@
   "schema_version": "quantpro-automation-control-v3",
   "status": "PRODUCTION",
   "repository": "zhushihao/quantpro-collector",
-  "content_ref": null,
+  "content_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
   "registry": {
     "holding-assistant-intraday": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
       "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "INTRADAY",
       "automation_guidance": [
@@ -16,25 +16,26 @@
       "research_guidance": [],
       "schedule": "工作日 09:50 / 10:50 / 11:50 / 13:50 / 14:50",
       "automation_id": "6aaa7ffb73c48191abbb0666b6147816",
-      "compiled_prompt_sha256": "0ce227fa317f901ea94c62689207f1823914cb298c1d918cdf2e644ad5a778bd",
-      "compiled_prompt_chars": 4461,
-      "max_chars": 5500,
+      "compiled_prompt_sha256": "baaf1e582ff2e12ab0fa261719db27df100669e9f8c0e2e37d3f5402b99c4770",
+      "compiled_prompt_chars": 5420,
+      "max_chars": 6500,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/holding-assistant.md": "84dc3f292a2a38de61f9789341a47d85bc7fcc68b55ce76d6b62a916231dd30d",
-        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
-        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/state-gateway.md": "27b8cfa88d96251900b4ba5063484ec04a6bc7b2bce4e2f9aa74d3d220461ed7",
-        "automation/modes/holding-intraday.md": "05412be02d4480f12c3b984e652b4e52bc81af1cf304f1467e027393134ba7e3",
-        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
-        "automation_guidance/holding-assistant/mode-discipline.md": "97016da0313e9adccc4d0d851a52ce3f95976272ba341d82146652f1717346d0"
+        "automation/prompts/holding-assistant.md": "8249c5b80ddfc6908ee70b7df7c80d457cbe06e5bdf1b359427024787ecd17e6",
+        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
+        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
+        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
+        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
+        "automation/modes/holding-intraday.md": "fe9fac34e0b4931b61bbd808ca9cd9d08d650ca63751780bbbcfe92af82cdc98",
+        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
+        "automation_guidance/holding-assistant/mode-discipline.md": "85523a4eddb8309f5ebf758cc7a07754ab850ca028a18c58ad1ffd77e97cf0e5"
       }
     },
     "holding-assistant-preclose": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
       "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "PREOPEN_CLOSE",
       "automation_guidance": [
@@ -43,25 +44,26 @@
       "research_guidance": [],
       "schedule": "工作日 09:10 / 10:10 Recovery / 16:45",
       "automation_id": "6aaa80041c74819191a7d6eb5d3568d8",
-      "compiled_prompt_sha256": "6e9d96a02b9515e546261e405a14453126bac94863bc92f73fef09b0fde54c01",
-      "compiled_prompt_chars": 4948,
-      "max_chars": 5500,
+      "compiled_prompt_sha256": "48515af33d4c3663be537b5027347d18acb05bce55cec56cda4d368b16aa29f9",
+      "compiled_prompt_chars": 5907,
+      "max_chars": 6500,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/holding-assistant.md": "84dc3f292a2a38de61f9789341a47d85bc7fcc68b55ce76d6b62a916231dd30d",
-        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
-        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/state-gateway.md": "27b8cfa88d96251900b4ba5063484ec04a6bc7b2bce4e2f9aa74d3d220461ed7",
-        "automation/modes/holding-preclose.md": "e4db1bc667d54a2e9b641e8f9680d1d4bd7aa997b768dba1cf842780dfe57890",
-        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
-        "automation_guidance/holding-assistant/mode-discipline.md": "97016da0313e9adccc4d0d851a52ce3f95976272ba341d82146652f1717346d0"
+        "automation/prompts/holding-assistant.md": "8249c5b80ddfc6908ee70b7df7c80d457cbe06e5bdf1b359427024787ecd17e6",
+        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
+        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
+        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
+        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
+        "automation/modes/holding-preclose.md": "1e1a6a14901d1b1e1124600b7a0561d396e157ef703f335ff4bda47e311a97ec",
+        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
+        "automation_guidance/holding-assistant/mode-discipline.md": "85523a4eddb8309f5ebf758cc7a07754ab850ca028a18c58ad1ffd77e97cf0e5"
       }
     },
     "industry-research": {
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
-      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
       "write_scope": "RESEARCH_JOB_AND_INDUSTRY_LEDGER",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
@@ -71,26 +73,27 @@
       ],
       "schedule": "每小时 :25",
       "automation_id": "6a8471af3b688191b076a7bb50bf956f",
-      "compiled_prompt_sha256": "53af2e5aa66b9fa741b9d79ce76f1e96f7db99860ead1bf44334db8fe24df065",
-      "compiled_prompt_chars": 4486,
-      "max_chars": 4500,
+      "compiled_prompt_sha256": "16214c93392871a2ba2fb68f2310b857dc0985ca615a2912e5d89a3122358d9f",
+      "compiled_prompt_chars": 5447,
+      "max_chars": 5600,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/industry-research.md": "11e5f921a18a76dc11fa66cb6b19ec54bf6d705c35cfd9acca1d2e4b34ee1a4a",
-        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
-        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/state-gateway.md": "27b8cfa88d96251900b4ba5063484ec04a6bc7b2bce4e2f9aa74d3d220461ed7",
-        "automation/fragments/investment-input.md": "bee249bae74d639b7974fe8881a16d2f673c53d5bdaadee1531332a281784e9f",
-        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
-        "automation_guidance/industry-research/system-bom-fresh-delta.md": "0d880e171738ac703e0414c83f922ff00e3f9b2b8ca9035fa05cf52d0638df93",
-        "research_guidance/industry-research/fresh-delta-event-time.md": "317c5302d9ae6899e979d58245d329edd5f6de78e81a11a6a511df4cd6cc3154"
+        "automation/prompts/industry-research.md": "1c7dae263e080ce9bf0f51d627f0539e6bd562f935918bd3ba0ffcf2f66cf060",
+        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
+        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
+        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
+        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
+        "automation/fragments/investment-input.md": "3f1227dd0429bf4e8531043bee120603334af7da87c871d40c46e2f348a3d661",
+        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
+        "automation_guidance/industry-research/system-bom-fresh-delta.md": "6605e1660db666918ebdab7ef79ead465e601c21ddb97b1c6237ec3b9e94dfa9",
+        "research_guidance/industry-research/fresh-delta-event-time.md": "cb0128afc5f1201746f86504afd966cc8c9c5fea0ac26bcb8f40dceacb9dd058"
       }
     },
     "company-facts": {
       "prompt_id": "company-facts",
       "path": "automation/prompts/company-facts.md",
-      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
       "write_scope": "COMPANY_LEDGER_APPEND_ONLY",
       "automation_guidance": [
         "automation_guidance/company-facts/capital-action-milestones.md"
@@ -98,25 +101,26 @@
       "research_guidance": [],
       "schedule": "每小时",
       "automation_id": "6a86bfae3a2481919afae415eca00b60",
-      "compiled_prompt_sha256": "1525384fcefbb61b7628ec9fdaf8e9bede31b8d358921a67bee820c3d4924ca9",
-      "compiled_prompt_chars": 3457,
-      "max_chars": 3500,
+      "compiled_prompt_sha256": "616e5ead833dd85104451d3e6d261f062356c58567e6aa11ec651b3028c20e9e",
+      "compiled_prompt_chars": 4422,
+      "max_chars": 4700,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/company-facts.md": "c1907b4b7e9eece6e02c47341dd47cf34db2073501498bfeca9a15f02a7c2098",
-        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
-        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/state-gateway.md": "27b8cfa88d96251900b4ba5063484ec04a6bc7b2bce4e2f9aa74d3d220461ed7",
-        "automation/fragments/investment-input.md": "bee249bae74d639b7974fe8881a16d2f673c53d5bdaadee1531332a281784e9f",
-        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
-        "automation_guidance/company-facts/capital-action-milestones.md": "de245fd224e7cf7bd18b9705abb53454c2e16fc613e9cf77f3740d2a9b974b71"
+        "automation/prompts/company-facts.md": "b977bff85e31c154df390641481a0809c68f3c33e8709cc06cef0ddfa94c014d",
+        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
+        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
+        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
+        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
+        "automation/fragments/investment-input.md": "3f1227dd0429bf4e8531043bee120603334af7da87c871d40c46e2f348a3d661",
+        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
+        "automation_guidance/company-facts/capital-action-milestones.md": "871c0c6c26f392fea7fad7eb10dbd9b3df7b0f748987925a0e0603794a62f6e7"
       }
     },
     "central-policy": {
       "prompt_id": "central-policy",
       "path": "automation/prompts/central-policy.md",
-      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/central-policy/authority-narrative-fresh-delta.md"
@@ -124,23 +128,24 @@
       "research_guidance": [],
       "schedule": "每小时",
       "automation_id": "6a8d2a943bf48191880c11a5dd7abbcd",
-      "compiled_prompt_sha256": "e1b5c1f68d1b2927ccc5dec773be0e41341271e3874d8bd97ddb6bec26e02cc6",
-      "compiled_prompt_chars": 2534,
-      "max_chars": 3500,
+      "compiled_prompt_sha256": "0041dca9580ee55ed9162a4b41f72c136f73949e19b40ece9e327fedda8f735b",
+      "compiled_prompt_chars": 3106,
+      "max_chars": 4200,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/central-policy.md": "c1d55009e8b30bd171756759263c480e7e9ddc5ddee489e543e5e5eb0c8d51a8",
-        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
-        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
-        "automation_guidance/central-policy/authority-narrative-fresh-delta.md": "db9a8693ace0260790f07b56a14ae439599a426c4b00ceeec9a7e7a313066a3e"
+        "automation/prompts/central-policy.md": "010b68f66eebc40aeff308f758d40abf6fc3c693a9f0f4812e6f65a06acc590e",
+        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
+        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
+        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
+        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
+        "automation_guidance/central-policy/authority-narrative-fresh-delta.md": "4ebf49f8e0cca3cb61d3e8b8cab4ea80899c8d304eaea1c2d32d12e10f8a064f"
       }
     },
     "ai-financing-rates": {
       "prompt_id": "ai-financing-rates",
       "path": "automation/prompts/ai-financing-rates.md",
-      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/ai-financing-rates/causal-discipline.md"
@@ -148,21 +153,22 @@
       "research_guidance": [],
       "schedule": "每 4 小时",
       "automation_id": "6a8d2238dfbc81918b75404b1c8f8eeb",
-      "compiled_prompt_sha256": "dd9de93c5d7b8d9df60df14774100f609604839613871bd2a5df65f45bc2f4c7",
-      "compiled_prompt_chars": 2478,
-      "max_chars": 3500,
+      "compiled_prompt_sha256": "4a6237b3a9380ea92a3f53969320555e5217f0f9caed7b774f6bec968bc8e004",
+      "compiled_prompt_chars": 3050,
+      "max_chars": 4200,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/ai-financing-rates.md": "b37ee48b39df6366d99b38f0ad67298e382ed823a4ea236d7011da9cffc35543",
-        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
-        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
-        "automation_guidance/ai-financing-rates/causal-discipline.md": "49c3b98a7b12062f06b7616f9a6be1748dd55fc92cd6c72ce9e3805129eb6783"
+        "automation/prompts/ai-financing-rates.md": "7b75360f458816e9c68f5bd62f705d9e3c66d75664c71fa0e94590bf25a2842d",
+        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
+        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
+        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
+        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
+        "automation_guidance/ai-financing-rates/causal-discipline.md": "ca708f587a2400f5fb2b45e2640c47aa748aaebd01389d4685b70e65c21401d3"
       }
     }
   },
-  "last_verified_release_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+  "last_verified_release_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
   "deployment_observations": {
     "issue": 33,
     "status": "DEPLOYED",
