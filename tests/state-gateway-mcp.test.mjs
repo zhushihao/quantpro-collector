@@ -138,6 +138,7 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			"get_gateway_status",
 			"get_state_snapshot",
 			"read_state_snapshot",
+			"read_state_snapshot_v2",
 			"get_state_write_receipt",
 			"validate_state_batch",
 		];
@@ -169,7 +170,7 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			"batch",
 			"channel",
 		]);
-		for (const name of ["get_state_snapshot", "read_state_snapshot"]) {
+		for (const name of ["get_state_snapshot", "read_state_snapshot", "read_state_snapshot_v2"]) {
 			const snapshot = tools[name].inputSchema;
 			assert.equal(snapshot.properties.symbols.items.pattern, undefined);
 			assert.equal(snapshot.properties.trading_date.pattern, undefined);

@@ -660,6 +660,7 @@ export async function getGatewayStatus(input: {
 		registered_tools: [
 			"get_state_snapshot",
 			"read_state_snapshot",
+			"read_state_snapshot_v2",
 			"validate_state_batch",
 			"append_state_batch",
 			"get_state_write_receipt",

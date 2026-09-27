@@ -213,7 +213,7 @@ class CompilerTests(unittest.TestCase):
                 with self.subTest(key=key, needle=needle):
                     self.assertIn(needle, p[key])
         for key in ("company-facts", "industry-research", "holding-assistant-intraday", "holding-assistant-preclose"):
-            for needle in ("validate_state_batch", "append_state_batch", "get_state_write_receipt", "read_state_snapshot", "OUTCOME_UNKNOWN", "禁止覆盖/改键重投/换运输"):
+            for needle in ("validate_state_batch", "append_state_batch", "get_state_write_receipt", "read_state_snapshot_v2", "OUTCOME_UNKNOWN", "禁止覆盖/改键重投/换运输"):
                 self.assertIn(needle, p[key])
 
 

@@ -1,3 +1,3 @@
 ## 状态读写
-先 get_gateway_status；授权只看 state_read_authorized/state_write_authorized，effective_scopes仅诊断，缺裸state:*不算阻断。只用{{STATE_CHANNEL}}。读取优先read_state_snapshot；目录无该别名时用同义get_state_snapshot，symbol/date均由服务端校验；MARKET另传trading_date及语义scheduled_slot。
+先 get_gateway_status；授权只看 state_read_authorized/state_write_authorized，effective_scopes仅诊断，缺裸state:*不算阻断。只用{{STATE_CHANNEL}}。读取优先read_state_snapshot_v2；目录无该新入口时依次尝试read_state_snapshot、同义get_state_snapshot；symbol/date均由服务端校验；MARKET另传trading_date及语义scheduled_slot。
 写前快照去重；state_write_authorized=true才validate_state_batch→append_state_batch。仅PERSISTED/IDEMPOTENT_REPLAY后用get_state_write_receipt并回读一致才成功；FAILED/CONFLICT/OUTCOME_UNKNOWN/回读不一致即停，禁止覆盖/改键重投/换运输或修改/停用Automation。落账不等于通知。

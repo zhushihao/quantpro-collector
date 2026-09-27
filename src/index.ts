@@ -1047,6 +1047,55 @@ export function createServer(
 	);
 
 	server.registerTool(
+		"read_state_snapshot_v2",
+		{
+			description:
+				"读取 QuantPro 固定生产状态账本的新版本只读入口，用于绕开宿主对旧工具名的 schema 缓存。MARKET 固定 Issue #2；INDUSTRY/COMPANY/CLOSE 固定 Issue #3。symbol/date 由 Collector 服务端 fail-closed 校验；授权以 Collector 实际 state_read_authorized 判定为准。",
+			inputSchema: z.object({
+				symbols: z.array(z.string().min(3).max(16)).min(1).max(512),
+				include: z.array(STATE_CHANNEL_SCHEMA).min(1).max(4),
+				trading_date: z.string().min(10).max(10).optional(),
+				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA.optional(),
+				history_limit: z.number().int().min(0).max(20).optional(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async ({ symbols, include, trading_date, scheduled_slot, history_limit }) => {
+			const denied = requireStateScope(STATE_READ_SCOPE, "read_state_snapshot_v2");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "READ",
+						message: "GitHub ledger credential is not configured",
+					}),
+				);
+			}
+			try {
+				const result = await getStateSnapshot({
+					token: env.GITHUB_TOKEN,
+					symbols,
+					include,
+					tradingDate: trading_date,
+					scheduledSlot: scheduled_slot,
+					historyLimit: history_limit,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
 		"validate_state_batch",
 		{
 			description:
