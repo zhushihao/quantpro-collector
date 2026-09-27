@@ -27,6 +27,29 @@ const AS_OF_SCHEMA = z
 	.max(128)
 	.refine((value) => !Number.isNaN(Date.parse(value)), "as_of must be a valid ISO date-time");
 
+function commandValidationSummary(error: z.ZodError): string {
+	return error.issues
+		.slice(0, 8)
+		.map((issue) => {
+			const path = issue.path.length > 0 ? issue.path.join(".") : "<root>";
+			return `${path}:${issue.code}`;
+		})
+		.join("; ");
+}
+
+function parseCommand<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+	const parsed = schema.safeParse(value);
+	if (!parsed.success) {
+		throw new StateGatewayError({
+			code: "STATE_VALIDATION_FAILED",
+			phase: "VALIDATE",
+			message: `${label} does not match the owned command schema: ${commandValidationSummary(parsed.error)}`,
+			retryable: false,
+		});
+	}
+	return parsed.data;
+}
+
 const COMMON_EVENT_SHAPE = {
 	symbol: z.string().regex(/^(?:CN:\\d{6}|HK:\\d{5})$/),
 	event_type: EVENT_TYPE_SCHEMA,
@@ -136,9 +159,17 @@ function normalizeEvidenceKeys(values: string[]) {
 	return [...new Set(values)].sort();
 }
 
-function commonEvent(
-	event: z.infer<typeof COMPANY_EVENT_COMMAND_SCHEMA>,
-): Record<string, unknown> {
+type CommonOwnedEvent = {
+	symbol: string;
+	event_type: z.infer<typeof EVENT_TYPE_SCHEMA>;
+	evidence_types: Array<(typeof EVIDENCE_TYPES)[number]>;
+	evidence_keys: string[];
+	counter_evidence: string[];
+	confidence: number;
+	next_validation: string | null;
+};
+
+function commonEvent(event: CommonOwnedEvent): Record<string, unknown> {
 	return {
 		symbol: event.symbol,
 		event_type: event.event_type,
@@ -167,7 +198,7 @@ function projectIndustryEvent(
 	event: z.infer<typeof INDUSTRY_EVENT_COMMAND_SCHEMA>,
 ): Record<string, unknown> {
 	return {
-		...commonEvent(event as z.infer<typeof COMPANY_EVENT_COMMAND_SCHEMA>),
+		...commonEvent(event),
 		...(event.research_priority === undefined
 			? {}
 			: { research_priority: event.research_priority }),
@@ -180,7 +211,7 @@ function projectCloseEvent(
 	event: z.infer<typeof CLOSE_EVENT_COMMAND_SCHEMA>,
 ): Record<string, unknown> {
 	return {
-		...commonEvent(event as z.infer<typeof COMPANY_EVENT_COMMAND_SCHEMA>),
+		...commonEvent(event),
 		...(event.effective_r_state === undefined
 			? {}
 			: { effective_r_state: event.effective_r_state }),
@@ -203,15 +234,17 @@ function schemaForChannel(channel: InvestmentCommandChannel) {
 function projectEvents(channel: InvestmentCommandChannel, events: unknown[]) {
 	if (channel === "COMPANY") {
 		return events.map((event) =>
-			projectCompanyEvent(COMPANY_EVENT_COMMAND_SCHEMA.parse(event)),
+			projectCompanyEvent(parseCommand(COMPANY_EVENT_COMMAND_SCHEMA, event, "COMPANY event")),
 		);
 	}
 	if (channel === "INDUSTRY") {
 		return events.map((event) =>
-			projectIndustryEvent(INDUSTRY_EVENT_COMMAND_SCHEMA.parse(event)),
+			projectIndustryEvent(parseCommand(INDUSTRY_EVENT_COMMAND_SCHEMA, event, "INDUSTRY event")),
 		);
 	}
-	return events.map((event) => projectCloseEvent(CLOSE_EVENT_COMMAND_SCHEMA.parse(event)));
+	return events.map((event) =>
+		projectCloseEvent(parseCommand(CLOSE_EVENT_COMMAND_SCHEMA, event, "CLOSE event")),
+	);
 }
 
 export async function buildInvestmentCommandBatch(input: {
@@ -224,10 +257,14 @@ export async function buildInvestmentCommandBatch(input: {
 	payloadSha256: string;
 	runId: string | null;
 }> {
-	const parsed = schemaForChannel(input.channel).parse(input.command) as {
+	const parsed = parseCommand(
+		schemaForChannel(input.channel),
+		input.command,
+		input.channel,
+	) as {
 		as_of: string;
 		events: unknown[];
-		run_id?: string;
+		run_id?: string | null;
 	};
 	const events = projectEvents(input.channel, parsed.events);
 	const normalizedCommand = {
@@ -300,7 +337,11 @@ export async function buildMarketObservationBatch(input: {
 	liveUniverseHash: string;
 	fetchImpl?: typeof fetch;
 }): Promise<{ batch: Record<string, unknown>; runId: string | null }> {
-	const parsed = APPEND_MARKET_OBSERVATION_INPUT_SCHEMA.parse(input.command);
+	const parsed = parseCommand(
+		APPEND_MARKET_OBSERVATION_INPUT_SCHEMA,
+		input.command,
+		"MARKET observation",
+	);
 	const state = await getMarketCheckpoints({
 		token: input.token,
 		tradingDate: parsed.trading_date,
