@@ -1,0 +1,80 @@
+{
+  "issue": 33,
+  "status": "DEPLOYED",
+  "contract_version": "automation-v3",
+  "verified_tasks": 6,
+  "prompt_policy": "Compiled thin static prompts; no runtime Prompt/Guidance fetch.",
+  "timezone_policy": {
+    "schedule_tzid": "Asia/Shanghai",
+    "authority": "VEVENT DTSTART TZID",
+    "default_timezone_metadata_observed": "Australia/Perth",
+    "note": "The Automation service continues to expose legacy default_timezone metadata. All six production VEVENT schedules explicitly pin Asia/Shanghai, which is the accepted execution-time timezone contract."
+  },
+  "registry": {
+    "holding-assistant-intraday": {
+      "automation_id": "6aaa7ffb73c48191abbb0666b6147816",
+      "status": "VERIFIED",
+      "production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "compiled_prompt_sha256": "0ce227fa317f901ea94c62689207f1823914cb298c1d918cdf2e644ad5a778bd",
+      "compiled_prompt_chars": 4461,
+      "enabled": true,
+      "schedule_tzid": "Asia/Shanghai"
+    },
+    "holding-assistant-preclose": {
+      "automation_id": "6aaa80041c74819191a7d6eb5d3568d8",
+      "status": "VERIFIED",
+      "production_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
+      "compiled_prompt_sha256": "6e9d96a02b9515e546261e405a14453126bac94863bc92f73fef09b0fde54c01",
+      "compiled_prompt_chars": 4948,
+      "enabled": true,
+      "schedule_tzid": "Asia/Shanghai"
+    },
+    "industry-research": {
+      "automation_id": "6a8471af3b688191b076a7bb50bf956f",
+      "status": "VERIFIED",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "compiled_prompt_sha256": "53af2e5aa66b9fa741b9d79ce76f1e96f7db99860ead1bf44334db8fe24df065",
+      "compiled_prompt_chars": 4486,
+      "enabled": true,
+      "schedule_tzid": "Asia/Shanghai"
+    },
+    "company-facts": {
+      "automation_id": "6a86bfae3a2481919afae415eca00b60",
+      "status": "VERIFIED",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "compiled_prompt_sha256": "1525384fcefbb61b7628ec9fdaf8e9bede31b8d358921a67bee820c3d4924ca9",
+      "compiled_prompt_chars": 3457,
+      "enabled": true,
+      "schedule_tzid": "Asia/Shanghai"
+    },
+    "central-policy": {
+      "automation_id": "6a8d2a943bf48191880c11a5dd7abbcd",
+      "status": "VERIFIED",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "compiled_prompt_sha256": "e1b5c1f68d1b2927ccc5dec773be0e41341271e3874d8bd97ddb6bec26e02cc6",
+      "compiled_prompt_chars": 2534,
+      "enabled": true,
+      "schedule_tzid": "Asia/Shanghai"
+    },
+    "ai-financing-rates": {
+      "automation_id": "6a8d2238dfbc81918b75404b1c8f8eeb",
+      "status": "VERIFIED",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "compiled_prompt_sha256": "dd9de93c5d7b8d9df60df14774100f609604839613871bd2a5df65f45bc2f4c7",
+      "compiled_prompt_chars": 2478,
+      "enabled": true,
+      "schedule_tzid": "Asia/Shanghai"
+    }
+  },
+  "source_refs": [
+    "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+    "f5ab9b644366b470807a3d89ece7289d5b02b5b4"
+  ],
+  "holding_wire_contract": {
+    "observation_type": "PREMARKET",
+    "fix_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4"
+  },
+  "collector_code_or_deployment_changed": false,
+  "business_ledger_writes": false,
+  "new_automations_created": false
+}

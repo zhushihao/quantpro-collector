@@ -116,45 +116,68 @@
     "central-policy": {
       "prompt_id": "central-policy",
       "path": "automation/prompts/central-policy.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/central-policy/authority-narrative-fresh-delta.md"
       ],
       "research_guidance": [],
-      "schedule": "每小时"
+      "schedule": "每小时",
+      "automation_id": "6a8d2a943bf48191880c11a5dd7abbcd",
+      "compiled_prompt_sha256": "e1b5c1f68d1b2927ccc5dec773be0e41341271e3874d8bd97ddb6bec26e02cc6",
+      "compiled_prompt_chars": 2534,
+      "max_chars": 3500,
+      "contract_version": "automation-v3",
+      "deployment_status": "VERIFIED",
+      "source_sha256": {
+        "automation/prompts/central-policy.md": "c1d55009e8b30bd171756759263c480e7e9ddc5ddee489e543e5e5eb0c8d51a8",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/central-policy/authority-narrative-fresh-delta.md": "db9a8693ace0260790f07b56a14ae439599a426c4b00ceeec9a7e7a313066a3e"
+      }
     },
     "ai-financing-rates": {
       "prompt_id": "ai-financing-rates",
       "path": "automation/prompts/ai-financing-rates.md",
-      "production_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
+      "production_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/ai-financing-rates/causal-discipline.md"
       ],
       "research_guidance": [],
-      "schedule": "每 4 小时"
+      "schedule": "每 4 小时",
+      "automation_id": "6a8d2238dfbc81918b75404b1c8f8eeb",
+      "compiled_prompt_sha256": "dd9de93c5d7b8d9df60df14774100f609604839613871bd2a5df65f45bc2f4c7",
+      "compiled_prompt_chars": 2478,
+      "max_chars": 3500,
+      "contract_version": "automation-v3",
+      "deployment_status": "VERIFIED",
+      "source_sha256": {
+        "automation/prompts/ai-financing-rates.md": "b37ee48b39df6366d99b38f0ad67298e382ed823a4ea236d7011da9cffc35543",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/ai-financing-rates/causal-discipline.md": "49c3b98a7b12062f06b7616f9a6be1748dd55fc92cd6c72ce9e3805129eb6783"
+      }
     }
   },
   "last_verified_release_ref": "f5ab9b644366b470807a3d89ece7289d5b02b5b4",
   "deployment_observations": {
     "issue": 33,
-    "status": "PARTIALLY_DEPLOYED",
-    "audit_path": "automation/audit/issue-33-partial-release.json",
-    "ai-financing-rates": {
-      "status": "CONFIG_DRIFT",
-      "accepted_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
-      "observed_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
-      "observed_prompt_sha256": "dd9de93c5d7b8d9df60df14774100f609604839613871bd2a5df65f45bc2f4c7",
-      "observed_prompt_chars": 2478,
-      "protected_setting": "default_timezone",
-      "expected_timezone": "Asia/Shanghai",
-      "observed_timezone": "Australia/Perth"
-    },
-    "central-policy": {
-      "status": "NOT_UPDATED",
-      "observed_ref": "7b62caecbef5e09ba71d08c3eaa29fed49e40058",
-      "candidate_ref": "87a8f35bfe9df631f1a490f92b6f4d4a03f85088"
+    "status": "DEPLOYED",
+    "audit_path": "automation/audit/issue-33-final-release.json",
+    "verified_tasks": 6,
+    "all_production_tasks_enabled": true,
+    "source_refs": [
+      "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
+      "f5ab9b644366b470807a3d89ece7289d5b02b5b4"
+    ],
+    "timezone_policy": {
+      "schedule_tzid": "Asia/Shanghai",
+      "authority": "VEVENT DTSTART TZID",
+      "default_timezone_metadata_observed": "Australia/Perth",
+      "note": "Production schedules explicitly pin Asia/Shanghai in VEVENT. The Automation service still reports legacy default_timezone metadata; release verification treats the explicit VEVENT TZID as the execution-time timezone contract."
     }
   }
 }
