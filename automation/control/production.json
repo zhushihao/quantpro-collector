@@ -63,7 +63,7 @@
     "industry-research": {
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
-      "production_ref": "5092362ba8e090de3aaaff9c70c23ae5c1041b9d",
+      "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
       "write_scope": "RESEARCH_JOB_AND_INDUSTRY_LEDGER",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
@@ -73,13 +73,13 @@
       ],
       "schedule": "每小时 :45",
       "automation_id": "6a8471af3b688191b076a7bb50bf956f",
-      "compiled_prompt_sha256": "6c812e216a773271ac531de1ee86150a0830d3081d54147f3aa627e56383353d",
-      "compiled_prompt_chars": 5428,
+      "compiled_prompt_sha256": "dfa46f4d92d6c47f0452010c520ce39946f48e14c11f339e56206d6f5934bede",
+      "compiled_prompt_chars": 5587,
       "max_chars": 5600,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/industry-research.md": "2276ee94b1c3ac55fadd807097f5baa6d30d9e1a11c17966914d8a522e611a94",
+        "automation/prompts/industry-research.md": "98c4d8808dc9ec3685ab63729a94573995eb74c42c60455be0a8e42edaa256b0",
         "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
         "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
         "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
@@ -120,7 +120,7 @@
     "central-policy": {
       "prompt_id": "central-policy",
       "path": "automation/prompts/central-policy.md",
-      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+      "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/central-policy/authority-narrative-fresh-delta.md"
@@ -128,24 +128,24 @@
       "research_guidance": [],
       "schedule": "每小时",
       "automation_id": "6ab94a7c724881919729edb2ccc7fb58",
-      "compiled_prompt_sha256": "0041dca9580ee55ed9162a4b41f72c136f73949e19b40ece9e327fedda8f735b",
-      "compiled_prompt_chars": 3106,
+      "compiled_prompt_sha256": "e516c92444d902411a294b7d2c22b5151acae34981ca7b8e8a92e0f58e2e9766",
+      "compiled_prompt_chars": 3258,
       "max_chars": 4200,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/central-policy.md": "010b68f66eebc40aeff308f758d40abf6fc3c693a9f0f4812e6f65a06acc590e",
-        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
-        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
-        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
-        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
-        "automation_guidance/central-policy/authority-narrative-fresh-delta.md": "4ebf49f8e0cca3cb61d3e8b8cab4ea80899c8d304eaea1c2d32d12e10f8a064f"
+        "automation/prompts/central-policy.md": "a4ca0469e3ea1b3a3fc314b3d1abb2aaeb68ec6e7eb597a48950d2597b86199f",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/central-policy/authority-narrative-fresh-delta.md": "db9a8693ace0260790f07b56a14ae439599a426c4b00ceeec9a7e7a313066a3e"
       }
     },
     "ai-financing-rates": {
       "prompt_id": "ai-financing-rates",
       "path": "automation/prompts/ai-financing-rates.md",
-      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+      "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
       "write_scope": "READ_ONLY",
       "automation_guidance": [
         "automation_guidance/ai-financing-rates/causal-discipline.md"
@@ -153,22 +153,22 @@
       "research_guidance": [],
       "schedule": "每 4 小时",
       "automation_id": "6ab94a0c00c88191a1a3b302295723bf",
-      "compiled_prompt_sha256": "4a6237b3a9380ea92a3f53969320555e5217f0f9caed7b774f6bec968bc8e004",
-      "compiled_prompt_chars": 3050,
+      "compiled_prompt_sha256": "2e42899a4d634eb18935f5242ec0a23ae2618e580eb5b930cd4b4dcc98871266",
+      "compiled_prompt_chars": 3206,
       "max_chars": 4200,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/ai-financing-rates.md": "7b75360f458816e9c68f5bd62f705d9e3c66d75664c71fa0e94590bf25a2842d",
-        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
-        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
-        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
-        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
-        "automation_guidance/ai-financing-rates/causal-discipline.md": "ca708f587a2400f5fb2b45e2640c47aa748aaebd01389d4685b70e65c21401d3"
+        "automation/prompts/ai-financing-rates.md": "a3e6a24d92f946483c4bcd2e9c89a5dc157eb3fefb54fa1d558094d40a577a94",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/ai-financing-rates/causal-discipline.md": "49c3b98a7b12062f06b7616f9a6be1748dd55fc92cd6c72ce9e3805129eb6783"
       }
     }
   },
-  "last_verified_release_ref": "5092362ba8e090de3aaaff9c70c23ae5c1041b9d",
+  "last_verified_release_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
   "deployment_observations": {
     "issue": 33,
     "status": "DEPLOYED",

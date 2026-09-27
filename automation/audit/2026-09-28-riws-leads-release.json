@@ -1,0 +1,114 @@
+{
+  "status": "VERIFIED",
+  "release_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
+  "supersedes_candidate_ref": "c9b4f0da8749a314ccfe95a5a6fffb13458b198a",
+  "reason_for_new_exact_ref": "Rebuilt active Automation IDs for ai-financing-rates and central-policy were stale in registry/control; identity-only fix committed before exact-ref compilation.",
+  "identity_migration": {
+    "ai-financing-rates": {
+      "from": "6a8d2238dfbc81918b75404b1c8f8eeb",
+      "to": "6ab94a0c00c88191a1a3b302295723bf"
+    },
+    "central-policy": {
+      "from": "6a8d2a943bf48191880c11a5dd7abbcd",
+      "to": "6ab94a7c724881919729edb2ccc7fb58"
+    }
+  },
+  "tests": {
+    "unittest_total": 36,
+    "result": "OK",
+    "skipped": 1
+  },
+  "git_public_manifest_parity": {
+    "industry-research": {
+      "status": "MATCH",
+      "compiled_prompt_sha256": "dfa46f4d92d6c47f0452010c520ce39946f48e14c11f339e56206d6f5934bede",
+      "compiled_prompt_chars": 5587,
+      "max_chars": 5600,
+      "automation_id": "6a8471af3b688191b076a7bb50bf956f"
+    },
+    "ai-financing-rates": {
+      "status": "MATCH",
+      "compiled_prompt_sha256": "2e42899a4d634eb18935f5242ec0a23ae2618e580eb5b930cd4b4dcc98871266",
+      "compiled_prompt_chars": 3206,
+      "max_chars": 4200,
+      "automation_id": "6ab94a0c00c88191a1a3b302295723bf"
+    },
+    "central-policy": {
+      "status": "MATCH",
+      "compiled_prompt_sha256": "e516c92444d902411a294b7d2c22b5151acae34981ca7b8e8a92e0f58e2e9766",
+      "compiled_prompt_chars": 3258,
+      "max_chars": 4200,
+      "automation_id": "6ab94a7c724881919729edb2ccc7fb58"
+    }
+  },
+  "readback_verification": {
+    "contract_version": "automation-v3",
+    "source_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
+    "status": "VERIFIED",
+    "registry": {
+      "ai-financing-rates": {
+        "automation_id": "6ab94a0c00c88191a1a3b302295723bf",
+        "status": "MATCH",
+        "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
+        "compiled_prompt_sha256": "2e42899a4d634eb18935f5242ec0a23ae2618e580eb5b930cd4b4dcc98871266",
+        "compiled_prompt_chars": 3206,
+        "protected_settings": {
+          "title": "融资与美债",
+          "schedule": "BEGIN:VEVENT\nDTSTART;TZID=Asia/Shanghai:20260825T050452\nRRULE:FREQ=HOURLY;INTERVAL=4\nEND:VEVENT",
+          "is_enabled": true,
+          "default_timezone": "Australia/Perth",
+          "timing_mode": "condition_watch",
+          "notifications_enabled": false,
+          "email_enabled": false
+        },
+        "protected_settings_unchanged": true
+      },
+      "central-policy": {
+        "automation_id": "6ab94a7c724881919729edb2ccc7fb58",
+        "status": "MATCH",
+        "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
+        "compiled_prompt_sha256": "e516c92444d902411a294b7d2c22b5151acae34981ca7b8e8a92e0f58e2e9766",
+        "compiled_prompt_chars": 3258,
+        "protected_settings": {
+          "title": "中央政策信号",
+          "schedule": "BEGIN:VEVENT\nDTSTART;TZID=Asia/Shanghai:20260825T054032\nRRULE:FREQ=HOURLY\nEND:VEVENT",
+          "is_enabled": true,
+          "default_timezone": "Australia/Perth",
+          "timing_mode": "condition_watch",
+          "notifications_enabled": false,
+          "email_enabled": false
+        },
+        "protected_settings_unchanged": true
+      },
+      "industry-research": {
+        "automation_id": "6a8471af3b688191b076a7bb50bf956f",
+        "status": "MATCH",
+        "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
+        "compiled_prompt_sha256": "dfa46f4d92d6c47f0452010c520ce39946f48e14c11f339e56206d6f5934bede",
+        "compiled_prompt_chars": 5587,
+        "protected_settings": {
+          "title": "产业趋势与研究",
+          "schedule": "BEGIN:VEVENT\nDTSTART;TZID=Asia/Shanghai:20260820T164500\nRRULE:FREQ=HOURLY;BYMINUTE=45;BYSECOND=0\nEND:VEVENT",
+          "is_enabled": true,
+          "default_timezone": "Australia/Perth",
+          "timing_mode": "exact_schedule",
+          "notifications_enabled": false,
+          "email_enabled": false
+        },
+        "protected_settings_unchanged": true
+      }
+    }
+  },
+  "capture_method": "Before/after settings and full saved prompts were read from the Automation service; prompt-only updates were issued through the Automation tool. after.json is a local projection of the verified service readback, and verify_deployment.py performed byte-exact prompt comparison plus protected-setting comparison.",
+  "protected_fields": [
+    "title",
+    "schedule",
+    "is_enabled",
+    "default_timezone",
+    "timing_mode",
+    "notifications_enabled",
+    "email_enabled"
+  ],
+  "prompt_only_updates": true,
+  "new_automations_created": false
+}
