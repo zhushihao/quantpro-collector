@@ -30,8 +30,8 @@ AUTOMATION_IDS = {
     "holding-assistant-preclose": "6aaa80041c74819191a7d6eb5d3568d8",
     "industry-research": "6a8471af3b688191b076a7bb50bf956f",
     "company-facts": "6a86bfae3a2481919afae415eca00b60",
-    "central-policy": "6a8d2a943bf48191880c11a5dd7abbcd",
-    "ai-financing-rates": "6a8d2238dfbc81918b75404b1c8f8eeb",
+    "central-policy": "6ab94a7c724881919729edb2ccc7fb58",
+    "ai-financing-rates": "6ab94a0c00c88191a1a3b302295723bf",
 }
 CONTRACT = "automation-v3"
 SHA40 = re.compile(r"[0-9a-f]{40}\Z")
