@@ -423,6 +423,19 @@ async function handleMcp(
 	}
 	if (!token) return oauthChallenge(request);
 
+	// 2026-09-27: static-credential direct path. The internal bridge
+	// credential presented byte-for-byte by an operator-approved direct
+	// client (e.g. ZCode on the research machine) is not an OAuth access
+	// token — unwrapToken would reject it. Pass the request through with the
+	// header intact so the core's static resolvers bind the registered
+	// COLLECTOR_STATIC_CLIENT_PRINCIPAL identity. Client-supplied forwarded
+	// headers remain client-controlled on this path but are allow-listed
+	// inside the core resolver (COLLECTOR_FORWARDABLE_PRINCIPALS).
+	const bridgeSecret = env.COLLECTOR_MCP_CLIENT_TOKEN;
+	if (bridgeSecret && token === bridgeSecret) {
+		return coreWorker.fetch(request, env, ctx);
+	}
+
 	let summary: TokenSummary<OAuthProps> | null = null;
 	try {
 		summary = await env.OAUTH_PROVIDER.unwrapToken<OAuthProps>(token);
@@ -456,7 +469,6 @@ async function handleMcp(
 	}
 	const scopeStamped = new Request(request, { headers });
 
-	const bridgeSecret = env.COLLECTOR_MCP_CLIENT_TOKEN;
 	const forwarded = withAuthorization(
 		scopeStamped,
 		bridgeSecret ? `Bearer ${bridgeSecret}` : null,

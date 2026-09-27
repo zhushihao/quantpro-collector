@@ -243,3 +243,23 @@ test("bridge strips client forwarded headers before stamping and binds principal
 	// DCR client_id 解析器必须已被 stable principal 解析器替代。
 	assert.doesNotMatch(scopes, /function resolveResearchClientId\(/);
 });
+
+// 2026-09-27 静态直连透传源码锁：内部握手凭据逐字节命中时必须原样透传
+// （Authorization 不得剥除），且透传分支必须先于 OAuth unwrapToken——否则
+// 静态 token 会被当作无效 access token 拒成 401，直连身份永远到不了核心。
+test("static-credential direct pass-through precedes OAuth unwrap and keeps Authorization intact", async () => {
+	const oauth = await source("../src/oauth-entry.ts");
+	const handleStart = oauth.indexOf("async function handleMcp");
+	const handleEnd = oauth.indexOf("const defaultHandler", handleStart);
+	const handleMcp = oauth.slice(handleStart, handleEnd);
+
+	const passThrough = handleMcp.indexOf("if (bridgeSecret && token === bridgeSecret)");
+	const unwrapCall = handleMcp.indexOf("OAUTH_PROVIDER.unwrapToken");
+	assert.ok(passThrough >= 0, "static direct pass-through branch missing");
+	assert.ok(unwrapCall > passThrough, "pass-through must run before OAuth unwrapToken call");
+	// 透传必须保留 Authorization（核心 resolver 靠它逐字节匹配），不得走
+	// withAuthorization 剥头路径。
+	const branch = handleMcp.slice(passThrough, handleMcp.indexOf("}", passThrough));
+	assert.match(branch, /coreWorker\.fetch\(request, env, ctx\)/);
+	assert.doesNotMatch(branch, /withAuthorization/);
+});
