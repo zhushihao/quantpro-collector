@@ -1,2 +1,3 @@
-## 研究批次
-investment_state_batch_v1输入只含schema_version、真实portfolio_version、event_id、as_of、events。event_id沿用既有时间戳|生产者|BATCH格式，但同事实/重试/重跑必须稳定，不用新运行时间换键；新数字/范围/确认/反证才形成新事件。events逐项含symbol、event_type、evidence_types/evidence_keys、counter_evidence、confidence、next_validation，及本任务拥有的逻辑/优先级/r_proposal字段；不传repo/issue/URL/token/producer/dimension/source_task。symbols使用CN:六位代码或HK:五位代码。稳定键为event_id，同轮多标的一批，不为清队列造事实。
+## 研究事件输入
+INDUSTRY/COMPANY只提交真实as_of、events及可选run_id，不再构造完整investment_state_batch。events逐项只写本任务拥有的业务字段：symbol、event_type、evidence_types/evidence_keys、counter_evidence、confidence、next_validation，以及本层自己的逻辑/优先级/r_proposal。symbols使用CN:六位代码或HK:五位代码。
+不要传schema_version、portfolio_version、event_id、write_key、producer、dimension、source_task或其他层字段；即使误带，Collector也只投影本入口拥有字段。核心事实、代码、枚举或本层业务关系非法时应如实失败，不靠改键/改字段绕过。无实质新增不写；同轮多个标的保持有界批量，不为清队列造事实。

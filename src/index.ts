@@ -65,9 +65,13 @@ import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import { ResearchReadBackendError, withResearchReadRetry } from "./research-read-retry.ts";
 import {
+	AUTOMATION_RUN_BEGIN_INPUT_SCHEMA,
+	AUTOMATION_RUN_END_INPUT_SCHEMA,
 	AUTOMATION_RUN_EVENT_INPUT_SCHEMA,
 	AUTOMATION_RUN_HISTORY_INPUT_SCHEMA,
 	AutomationRunLedgerError,
+	beginAutomationRun,
+	endAutomationRun,
 	getAutomationRunHistory,
 	recordAutomationRunEvent,
 } from "./automation-run-ledger.ts";
@@ -88,6 +92,14 @@ import {
 	validateStateBatch,
 	type StateGatewayPhase,
 } from "./state-gateway.ts";
+import {
+	APPEND_CLOSE_EVENTS_INPUT_SCHEMA,
+	APPEND_COMPANY_EVENTS_INPUT_SCHEMA,
+	APPEND_INDUSTRY_EVENTS_INPUT_SCHEMA,
+	APPEND_MARKET_OBSERVATION_INPUT_SCHEMA,
+	appendInvestmentCommand,
+	appendMarketObservation,
+} from "./state-commands.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
@@ -606,7 +618,7 @@ export function createServer(
 ) {
 	const server = new McpServer({
 		name: "QuantPro Collector",
-		version: "1.2.0",
+		version: "1.3.0",
 	});
 
 	// 保留测试工具，确认 MCP 基础链路持续正常
@@ -1153,6 +1165,244 @@ export function createServer(
 		},
 	);
 
+
+	const resolveOwnerCommandContext = async () => {
+		if (!env?.PORTFOLIO_UNIVERSE) {
+			throw new StateGatewayError({
+				code: "STATE_UNAVAILABLE",
+				phase: "READ",
+				message: "LIVE universe storage is not configured",
+				retryable: true,
+			});
+		}
+		let universe: StoredLiveUniverse | null;
+		try {
+			universe = await readLiveUniverse(env.PORTFOLIO_UNIVERSE);
+		} catch {
+			throw new StateGatewayError({
+				code: "STATE_UNAVAILABLE",
+				phase: "READ",
+				message: "LIVE universe is unreadable",
+				retryable: true,
+			});
+		}
+		if (!universe) {
+			throw new StateGatewayError({
+				code: "STATE_UNAVAILABLE",
+				phase: "READ",
+				message: "LIVE universe is unavailable",
+				retryable: true,
+			});
+		}
+		return {
+			portfolioVersion: `live:${universe.content_hash}`,
+			liveUniverseHash: universe.content_hash,
+		};
+	};
+
+	const ownerCommandResponse = async (
+		tool: string,
+		runId: string | null | undefined,
+		execute: (requestId: string) => Promise<Record<string, unknown>>,
+	) => {
+		const requestId = crypto.randomUUID().replaceAll("-", "");
+		const startedAt = Date.now();
+		try {
+			const result = await execute(requestId);
+			console.log(
+				JSON.stringify({
+					event: "collector_tool_operation",
+					tool,
+					request_id: requestId,
+					run_id: runId ?? null,
+					status: String(result.status ?? "OK"),
+					duration_ms: Date.now() - startedAt,
+					collector_build_sha:
+						env?.DEPLOYED_GIT_SHA?.trim() || env?.CF_VERSION_METADATA?.tag || null,
+				}),
+			);
+			return {
+				content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+			};
+		} catch (error) {
+			const normalized = normalizeStateGatewayError(error, {
+				phase: "VALIDATE",
+				retryable: false,
+				requestId,
+			});
+			console.warn(
+				JSON.stringify({
+					event: "collector_tool_operation",
+					tool,
+					request_id: normalized.requestId,
+					run_id: runId ?? null,
+					status: normalized.code,
+					phase: normalized.phase,
+					duration_ms: Date.now() - startedAt,
+					collector_build_sha:
+						env?.DEPLOYED_GIT_SHA?.trim() || env?.CF_VERSION_METADATA?.tag || null,
+				}),
+			);
+			return stateGatewayErrorResponse(normalized);
+		}
+	};
+
+	server.registerTool(
+		"append_company_events",
+		{
+			description:
+				"追加 COMPANY 公司事实事件。调用方只提供公司业务字段；其他 owner、系统字段和未知字段不参与落账。Collector 服务端补齐账本元数据并完成校验、幂等、写入与回读。",
+			inputSchema: APPEND_COMPANY_EVENTS_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async (command) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "append_company_events");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
+				);
+			}
+			return ownerCommandResponse("append_company_events", command.run_id, async (requestId) => {
+				const context = await resolveOwnerCommandContext();
+				return (await appendInvestmentCommand({
+					db: env.RESEARCH_REPLICA!,
+					token: env.GITHUB_TOKEN,
+					channel: "COMPANY",
+					command,
+					portfolioVersion: context.portfolioVersion,
+					requestId,
+				})) as unknown as Record<string, unknown>;
+			});
+		},
+	);
+
+	server.registerTool(
+		"append_industry_events",
+		{
+			description:
+				"追加 INDUSTRY 产业事件。调用方只提供产业业务字段；其他 owner、系统字段和未知字段不参与落账。Collector 服务端补齐账本元数据并完成校验、幂等、写入与回读。",
+			inputSchema: APPEND_INDUSTRY_EVENTS_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async (command) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "append_industry_events");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
+				);
+			}
+			return ownerCommandResponse("append_industry_events", command.run_id, async (requestId) => {
+				const context = await resolveOwnerCommandContext();
+				return (await appendInvestmentCommand({
+					db: env.RESEARCH_REPLICA!,
+					token: env.GITHUB_TOKEN,
+					channel: "INDUSTRY",
+					command,
+					portfolioVersion: context.portfolioVersion,
+					requestId,
+				})) as unknown as Record<string, unknown>;
+			});
+		},
+	);
+
+	server.registerTool(
+		"append_close_events",
+		{
+			description:
+				"追加 CLOSE 日终有效状态事件。调用方只提供 CLOSE-owned 业务字段；Collector 保留 COMPANY/INDUSTRY/MARKET 上游关系与 R4 持续确认硬门。",
+			inputSchema: APPEND_CLOSE_EVENTS_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async (command) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "append_close_events");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
+				);
+			}
+			return ownerCommandResponse("append_close_events", command.run_id, async (requestId) => {
+				const context = await resolveOwnerCommandContext();
+				return (await appendInvestmentCommand({
+					db: env.RESEARCH_REPLICA!,
+					token: env.GITHUB_TOKEN,
+					channel: "CLOSE",
+					command,
+					portfolioVersion: context.portfolioVersion,
+					requestId,
+				})) as unknown as Record<string, unknown>;
+			});
+		},
+	);
+
+	server.registerTool(
+		"append_market_observation",
+		{
+			description:
+				"追加 holding-assistant MARKET 观察。调用方提供观察时点、已安装 production_ref 与 records；Collector 从 LIVE universe 和既有 MARKET 链补齐版本、hash、前序引用及固定账本元数据。",
+			inputSchema: APPEND_MARKET_OBSERVATION_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async (command) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "append_market_observation");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
+				);
+			}
+			return ownerCommandResponse("append_market_observation", command.run_id, async (requestId) => {
+				const context = await resolveOwnerCommandContext();
+				return (await appendMarketObservation({
+					db: env.RESEARCH_REPLICA!,
+					token: env.GITHUB_TOKEN,
+					command,
+					portfolioVersion: context.portfolioVersion,
+					liveUniverseHash: context.liveUniverseHash,
+					requestId,
+				})) as unknown as Record<string, unknown>;
+			});
+		},
+	);
+
 	server.registerTool(
 		"validate_state_batch",
 		{
@@ -1260,6 +1510,89 @@ export function createServer(
 			content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
 		};
 	};
+
+
+	server.registerTool(
+		"begin_run",
+		{
+			description:
+				"开始一次生产 Automation 运行审计。Collector 生成 run_id 与服务器时间；invocation_key 仅在宿主提供稳定调用身份时使用。审计仅写独立 D1 运维表。",
+			inputSchema: AUTOMATION_RUN_BEGIN_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async (begin) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "begin_run");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA || !researchPrincipal) {
+				return automationRunErrorResponse(
+					new AutomationRunLedgerError(
+						"AUTOMATION_RUN_UNAVAILABLE",
+						"automation run audit storage or principal is unavailable",
+						{ retryable: true },
+					),
+				);
+			}
+			try {
+				const result = await beginAutomationRun({
+					db: env.RESEARCH_REPLICA,
+					begin,
+					principal: researchPrincipal,
+					collectorBuildSha:
+						env.DEPLOYED_GIT_SHA?.trim() || env.CF_VERSION_METADATA?.tag || null,
+					cloudflareVersionId: env.CF_VERSION_METADATA?.id ?? null,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return automationRunErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"end_run",
+		{
+			description:
+				"结束 begin_run 返回的运行。终态仅 COMPLETED/SILENT/BLOCKED/FAILED；notification_intended 表示准备通知，不宣称客户端实际送达。相同终态可安全重放。",
+			inputSchema: AUTOMATION_RUN_END_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async (end) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "end_run");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA) {
+				return automationRunErrorResponse(
+					new AutomationRunLedgerError(
+						"AUTOMATION_RUN_UNAVAILABLE",
+						"automation run audit storage is not configured",
+						{ retryable: true },
+					),
+				);
+			}
+			try {
+				const result = await endAutomationRun({
+					db: env.RESEARCH_REPLICA,
+					end,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return automationRunErrorResponse(error);
+			}
+		},
+	);
 
 	server.registerTool(
 		"record_automation_run",
@@ -1428,7 +1761,7 @@ export function createServer(
 						env?.DEPLOYED_GIT_SHA?.trim() || env?.CF_VERSION_METADATA?.tag || null,
 					cloudflareVersionId: env?.CF_VERSION_METADATA?.id ?? null,
 					cloudflareVersionTimestamp: env?.CF_VERSION_METADATA?.timestamp ?? null,
-					serviceVersion: "1.2.0",
+					serviceVersion: "1.3.0",
 					db: env?.RESEARCH_REPLICA,
 				});
 				return {

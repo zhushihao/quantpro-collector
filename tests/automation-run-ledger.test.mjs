@@ -3,12 +3,39 @@ import test from "node:test";
 
 import {
 	AutomationRunLedgerError,
+	beginAutomationRun,
+	endAutomationRun,
 	getAutomationRunHistory,
 	recordAutomationRunEvent,
 } from "../src/automation-run-ledger.ts";
 import { createResearchWorkflowDb } from "./helpers/d1-sqlite-shim.mjs";
 
-function started(overrides = {}) {
+function begin(overrides = {}) {
+	return {
+		task: "industry-research",
+		invocation_key: "scheduler:industry-research:2026-09-27T20:00+08",
+		prompt_version: "a".repeat(40),
+		...overrides,
+	};
+}
+
+function end(runId, outcome = "SILENT", overrides = {}) {
+	return {
+		run_id: runId,
+		outcome,
+		fresh_delta_count: outcome === "COMPLETED" ? 1 : 0,
+		notification_intended: outcome === "COMPLETED",
+		reason:
+			outcome === "SILENT"
+				? "正常运行，无达到通知门槛的 Fresh-Delta。"
+				: outcome === "BLOCKED"
+					? "SOURCE_UNAVAILABLE"
+					: null,
+		...overrides,
+	};
+}
+
+function legacyStarted(overrides = {}) {
 	return {
 		task_name: "产业趋势与研究",
 		run_id: "industry-trend:20260927T100000Z",
@@ -22,7 +49,7 @@ function started(overrides = {}) {
 	};
 }
 
-function final(status = "SILENT", overrides = {}) {
+function legacyFinal(status = "SILENT", overrides = {}) {
 	return {
 		task_name: "产业趋势与研究",
 		run_id: "industry-trend:20260927T100000Z",
@@ -43,64 +70,93 @@ function final(status = "SILENT", overrides = {}) {
 	};
 }
 
-test("#36 STARTED + SILENT are queryable as one completed run", async () => {
+test("#37 begin + end stores one SILENT run with server-owned lifecycle", async () => {
 	const db = createResearchWorkflowDb();
-	const start = await recordAutomationRunEvent({
+	const started = await beginAutomationRun({
 		db,
-		event: started(),
+		begin: begin(),
+		principal: "chatgpt-production",
 		collectorBuildSha: "build-a",
 		cloudflareVersionId: "cf-a",
-		now: "2026-09-27T10:00:03Z",
+		now: "2026-09-27T12:00:03Z",
 	});
-	assert.equal(start.status, "RECORDED");
+	assert.equal(started.status, "RECORDED");
+	assert.match(started.run_id, /^run_[0-9a-f]{32}$/);
 
-	const done = await recordAutomationRunEvent({
+	const finished = await endAutomationRun({
 		db,
-		event: final("SILENT"),
-		collectorBuildSha: "build-a",
-		cloudflareVersionId: "cf-a",
-		now: "2026-09-27T10:02:00Z",
+		end: end(started.run_id),
+		now: "2026-09-27T12:02:00Z",
 	});
-	assert.equal(done.status, "RECORDED");
+	assert.equal(finished.status, "RECORDED");
+	assert.equal(finished.outcome, "SILENT");
 
 	const history = await getAutomationRunHistory({
 		db,
-		taskName: "产业趋势与研究",
+		taskName: "industry-research",
 		limit: 5,
 	});
 	assert.equal(history.runs.length, 1);
-	assert.equal(history.runs[0].effective_status, "SILENT");
-	assert.equal(history.runs[0].notification_sent, false);
-	assert.equal(history.runs[0].fresh_delta_count, 0);
-	assert.equal(history.runs[0].final_recorded, true);
-	assert.equal(history.runs[0].collector_build_sha, "build-a");
+	const run = history.runs[0];
+	assert.equal(run.effective_status, "SILENT");
+	assert.equal(run.final_recorded, true);
+	assert.equal(run.notification_sent, null);
+	assert.equal(run.notification_intended, false);
+	assert.equal(run.notification_semantics, "INTENDED_ONLY");
+	assert.equal(run.fresh_delta_semantics, "CALLER_REPORTED");
+	assert.equal(run.result_semantics, "TERMINAL_RECORDED");
+	assert.equal(run.source_contract, "run-v2");
+	assert.equal(run.collector_build_sha, "build-a");
 });
 
-test("#36 same phase replay is idempotent and different payload conflicts", async () => {
+test("#37 stable invocation_key replays the same begin_run", async () => {
 	const db = createResearchWorkflowDb();
-	const event = started();
-	const first = await recordAutomationRunEvent({
+	const first = await beginAutomationRun({
 		db,
-		event,
-		collectorBuildSha: "build-before",
-		cloudflareVersionId: "cf-before",
-		now: "2026-09-27T10:00:03Z",
+		begin: begin(),
+		principal: "chatgpt-production",
+		now: "2026-09-27T12:00:03Z",
 	});
-	const replay = await recordAutomationRunEvent({
+	const replay = await beginAutomationRun({
 		db,
-		event,
-		collectorBuildSha: "build-after",
-		cloudflareVersionId: "cf-after",
-		now: "2026-09-27T10:10:03Z",
+		begin: begin({ prompt_version: "b".repeat(40) }),
+		principal: "chatgpt-production",
+		now: "2026-09-27T12:05:03Z",
+	});
+	assert.equal(first.status, "RECORDED");
+	assert.equal(replay.status, "IDEMPOTENT_REPLAY");
+	assert.equal(replay.run_id, first.run_id);
+});
+
+test("#37 end_run is idempotent for the same terminal payload and conflicts otherwise", async () => {
+	const db = createResearchWorkflowDb();
+	const started = await beginAutomationRun({
+		db,
+		begin: begin({ invocation_key: null }),
+		principal: "chatgpt-production",
+		now: "2026-09-27T12:00:03Z",
+	});
+	const terminal = end(started.run_id, "BLOCKED", {
+		reason: "SOURCE_UNAVAILABLE",
+	});
+	const first = await endAutomationRun({
+		db,
+		end: terminal,
+		now: "2026-09-27T12:01:00Z",
+	});
+	const replay = await endAutomationRun({
+		db,
+		end: terminal,
+		now: "2026-09-27T12:03:00Z",
 	});
 	assert.equal(first.status, "RECORDED");
 	assert.equal(replay.status, "IDEMPOTENT_REPLAY");
 
 	await assert.rejects(
-		recordAutomationRunEvent({
+		endAutomationRun({
 			db,
-			event: started({ safe_summary: "different start payload" }),
-			now: "2026-09-27T10:00:03Z",
+			end: end(started.run_id, "FAILED", { reason: "DIFFERENT" }),
+			now: "2026-09-27T12:04:00Z",
 		}),
 		(error) =>
 			error instanceof AutomationRunLedgerError &&
@@ -109,62 +165,74 @@ test("#36 same phase replay is idempotent and different payload conflicts", asyn
 	);
 });
 
-test("#36 BLOCKED and COMPLETED runs retain bounded final diagnostics", async () => {
+test("#37 unfinished run is observable but not diagnosed as a crash", async () => {
 	const db = createResearchWorkflowDb();
-	for (const [suffix, status] of [
-		["blocked", "BLOCKED"],
-		["completed", "COMPLETED"],
-	]) {
-		const runId = `industry-trend:20260927T11${suffix === "blocked" ? "00" : "30"}00Z`;
-		await recordAutomationRunEvent({
-			db,
-			event: started({ run_id: runId, occurred_at: "2026-09-27T19:00:01+08:00" }),
-		});
-		await recordAutomationRunEvent({
-			db,
-			event: final(status, {
-				run_id: runId,
-				occurred_at: suffix === "blocked" ? "2026-09-27T19:01:00+08:00" : "2026-09-27T19:31:00+08:00",
-				safe_summary:
-					status === "BLOCKED"
-						? "Collector Research 来源健康检查阻断。"
-						: "发现 1 条 Fresh-Delta 并已通知。",
-			}),
-		});
-	}
-
-	const history = await getAutomationRunHistory({
+	await beginAutomationRun({
 		db,
-		taskName: "产业趋势与研究",
-		since: "2026-09-27T18:30:00+08:00",
-		limit: 10,
+		begin: begin(),
+		principal: "chatgpt-production",
+		now: "2026-09-27T12:00:03Z",
 	});
-	assert.deepEqual(
-		new Set(history.runs.map((run) => run.effective_status)),
-		new Set(["BLOCKED", "COMPLETED"]),
-	);
-	const blocked = history.runs.find((run) => run.effective_status === "BLOCKED");
-	assert.equal(blocked.blocker_code, "SOURCE_UNAVAILABLE");
-	const completed = history.runs.find((run) => run.effective_status === "COMPLETED");
-	assert.equal(completed.notification_sent, true);
-	assert.equal(completed.fresh_delta_count, 1);
-});
-
-test("#36 unfinished STARTED run is visible as IN_PROGRESS", async () => {
-	const db = createResearchWorkflowDb();
-	await recordAutomationRunEvent({ db, event: started() });
 	const history = await getAutomationRunHistory({ db, limit: 5 });
 	assert.equal(history.runs[0].effective_status, "IN_PROGRESS");
 	assert.equal(history.runs[0].final_recorded, false);
+	assert.equal(history.runs[0].result_semantics, "RESULT_UNKNOWN");
 	assert.equal(history.runs[0].finished_at, null);
 });
 
-test("#36 phase/status contract fails closed", async () => {
+test("#37 legacy record_automation_run is a thin adapter over the v2 ledger", async () => {
+	const db = createResearchWorkflowDb();
+	const start = await recordAutomationRunEvent({
+		db,
+		event: legacyStarted(),
+		collectorBuildSha: "build-before",
+		cloudflareVersionId: "cf-before",
+		now: "2026-09-27T10:00:03Z",
+	});
+	const replay = await recordAutomationRunEvent({
+		db,
+		event: legacyStarted(),
+		collectorBuildSha: "build-after",
+		cloudflareVersionId: "cf-after",
+		now: "2026-09-27T10:10:03Z",
+	});
+	assert.equal(start.status, "RECORDED");
+	assert.equal(replay.status, "IDEMPOTENT_REPLAY");
+
+	await recordAutomationRunEvent({
+		db,
+		event: legacyFinal("SILENT"),
+		now: "2026-09-27T10:02:00Z",
+	});
+	const history = await getAutomationRunHistory({
+		db,
+		taskName: "产业趋势与研究",
+		limit: 5,
+	});
+	assert.equal(history.runs.length, 1);
+	assert.equal(history.runs[0].effective_status, "SILENT");
+	assert.equal(history.runs[0].notification_sent, false);
+	assert.equal(history.runs[0].notification_intended, null);
+	assert.equal(history.runs[0].notification_semantics, "CALLER_REPORTED_SENT");
+	assert.equal(history.runs[0].source_contract, "legacy-event-v1");
+
+	await assert.rejects(
+		recordAutomationRunEvent({
+			db,
+			event: legacyStarted({ safe_summary: "different legacy payload" }),
+		}),
+		(error) =>
+			error instanceof AutomationRunLedgerError &&
+			error.code === "AUTOMATION_RUN_CONFLICT",
+	);
+});
+
+test("#37 legacy phase/status validation remains fail-closed during migration", async () => {
 	const db = createResearchWorkflowDb();
 	await assert.rejects(
 		recordAutomationRunEvent({
 			db,
-			event: started({ status: "SILENT" }),
+			event: legacyStarted({ status: "SILENT" }),
 		}),
 		(error) =>
 			error instanceof AutomationRunLedgerError &&
@@ -173,7 +241,7 @@ test("#36 phase/status contract fails closed", async () => {
 	await assert.rejects(
 		recordAutomationRunEvent({
 			db,
-			event: final("BLOCKED", { blocker_code: null }),
+			event: legacyFinal("BLOCKED", { blocker_code: null }),
 		}),
 		(error) =>
 			error instanceof AutomationRunLedgerError &&
