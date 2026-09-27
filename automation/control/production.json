@@ -2,7 +2,7 @@
   "schema_version": "quantpro-automation-control-v3",
   "status": "PRODUCTION",
   "repository": "zhushihao/quantpro-collector",
-  "content_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+  "content_ref": null,
   "registry": {
     "holding-assistant-intraday": {
       "prompt_id": "holding-assistant",
@@ -63,7 +63,7 @@
     "industry-research": {
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
-      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+      "production_ref": "5092362ba8e090de3aaaff9c70c23ae5c1041b9d",
       "write_scope": "RESEARCH_JOB_AND_INDUSTRY_LEDGER",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
@@ -71,23 +71,23 @@
       "research_guidance": [
         "research_guidance/industry-research/fresh-delta-event-time.md"
       ],
-      "schedule": "每小时 :25",
+      "schedule": "每小时 :45",
       "automation_id": "6a8471af3b688191b076a7bb50bf956f",
-      "compiled_prompt_sha256": "16214c93392871a2ba2fb68f2310b857dc0985ca615a2912e5d89a3122358d9f",
-      "compiled_prompt_chars": 5447,
+      "compiled_prompt_sha256": "6c812e216a773271ac531de1ee86150a0830d3081d54147f3aa627e56383353d",
+      "compiled_prompt_chars": 5428,
       "max_chars": 5600,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/industry-research.md": "1c7dae263e080ce9bf0f51d627f0539e6bd562f935918bd3ba0ffcf2f66cf060",
-        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
-        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
-        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
-        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
-        "automation/fragments/investment-input.md": "3f1227dd0429bf4e8531043bee120603334af7da87c871d40c46e2f348a3d661",
-        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
-        "automation_guidance/industry-research/system-bom-fresh-delta.md": "6605e1660db666918ebdab7ef79ead465e601c21ddb97b1c6237ec3b9e94dfa9",
-        "research_guidance/industry-research/fresh-delta-event-time.md": "cb0128afc5f1201746f86504afd966cc8c9c5fea0ac26bcb8f40dceacb9dd058"
+        "automation/prompts/industry-research.md": "2276ee94b1c3ac55fadd807097f5baa6d30d9e1a11c17966914d8a522e611a94",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/state-gateway.md": "9e46777971cb5b707fba43269395f2269415059f0e368619fb8479c3f9cc4d11",
+        "automation/fragments/investment-input.md": "816a10c3d8ec60f45dd454d40ad23ca6953bc76a9cd4dd1a7340c5235f27c104",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/industry-research/system-bom-fresh-delta.md": "0d880e171738ac703e0414c83f922ff00e3f9b2b8ca9035fa05cf52d0638df93",
+        "research_guidance/industry-research/fresh-delta-event-time.md": "317c5302d9ae6899e979d58245d329edd5f6de78e81a11a6a511df4cd6cc3154"
       }
     },
     "company-facts": {
@@ -168,7 +168,7 @@
       }
     }
   },
-  "last_verified_release_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+  "last_verified_release_ref": "5092362ba8e090de3aaaff9c70c23ae5c1041b9d",
   "deployment_observations": {
     "issue": 33,
     "status": "DEPLOYED",
