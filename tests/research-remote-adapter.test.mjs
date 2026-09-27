@@ -5,6 +5,7 @@ import test from "node:test";
 const remote = await import("../src/research-remote-adapter.ts");
 const replica = await import("../src/research-replica.ts");
 const outbound = await import("../src/research-outbound-v2.ts");
+const readRetry = await import("../src/research-read-retry.ts");
 
 const encoder = new TextEncoder();
 
@@ -290,6 +291,28 @@ test("C6 remote adapter reads verified Collector-owned object bytes without a lo
 	assert.equal(document.source, "COLLECTOR_REPLICA");
 });
 
+test("#34 remote adapter preserves deterministic D1 classification instead of flattening it to STORE_UNAVAILABLE", async () => {
+	const storage = {
+		db: {
+			prepare() {
+				return {
+					bind() { return this; },
+					async all() { throw new Error("D1_ERROR: no such table: research_records"); },
+				};
+			},
+		},
+		objects: new FakeR2(new Map()),
+	};
+	const adapter = new remote.CollectorResearchRemoteAdapter(storage, { visibility: "PUBLIC" });
+	await assert.rejects(
+		() => adapter.searchDocuments("financing", 10),
+		(error) =>
+			error instanceof readRetry.ResearchReadBackendError &&
+			error.failure_class === "DETERMINISTIC" &&
+			error.diagnostic_code === "DETERMINISTIC_BACKEND_QUERY_OR_CONFIG",
+	);
+});
+
 test("C6 remote adapter is visibility fail-closed and emits only the common safe error model", async () => {
 	const privateBody = new TextEncoder().encode("private body");
 	const row = documentRow({
@@ -486,7 +509,7 @@ test("C8 every candidate object missing is STORE_UNAVAILABLE", async () => {
 	const adapter = new remote.CollectorResearchRemoteAdapter(storage, { visibility: "PUBLIC" });
 	await assert.rejects(
 		() => adapter.getDocument("doc-gone"),
-		(error) => error?.error_code === "STORE_UNAVAILABLE" && error.retryable === true,
+		(error) => error?.error_code === "STORE_UNAVAILABLE" && error.retryable === false,
 	);
 });
 

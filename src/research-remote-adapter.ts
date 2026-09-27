@@ -39,6 +39,7 @@
  */
 import type { ResearchReplicaStorage } from "./research-replica.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
+import { classifyResearchReadBackendError } from "./research-read-retry.ts";
 
 export type ResearchReadVisibility = "PUBLIC" | "PRIVATE";
 
@@ -63,6 +64,13 @@ type RemoteAdapterOptions = {
 
 function fail(code: "NOT_FOUND" | "STORE_UNAVAILABLE" | "INTEGRITY_FAILED" | "UNSUPPORTED_OPERATION"): never {
 	throw new ResearchBoundaryError(code);
+}
+
+function failMissingReplicaObject(): never {
+	throw new ResearchBoundaryError("STORE_UNAVAILABLE", undefined, {
+		retryable: false,
+		safeMessage: "research replica object is unavailable; retry is not advised",
+	});
 }
 
 function boundedLimit(value: number | undefined): number {
@@ -193,7 +201,7 @@ export class CollectorResearchRemoteAdapter {
 			return await operation();
 		} catch (error) {
 			if (error instanceof ResearchBoundaryError) throw error;
-			fail("STORE_UNAVAILABLE");
+			throw classifyResearchReadBackendError(error);
 		}
 	}
 
@@ -333,7 +341,8 @@ export class CollectorResearchRemoteAdapter {
 				source: "COLLECTOR_REPLICA",
 			};
 		}
-		fail(sawServable ? "STORE_UNAVAILABLE" : "UNSUPPORTED_OPERATION");
+		if (sawServable) failMissingReplicaObject();
+		fail("UNSUPPORTED_OPERATION");
 	}
 
 	async searchEvidence(limit?: number): Promise<Array<Record<string, unknown>>> {
@@ -382,7 +391,7 @@ export class CollectorResearchRemoteAdapter {
 		}
 		if (referencedHash !== contentSha256) fail("INTEGRITY_FAILED");
 		const object = await this.guarded(() => this.storage.objects.get(objectKey(contentSha256)));
-		if (!object) fail("STORE_UNAVAILABLE");
+		if (!object) failMissingReplicaObject();
 		const bytes = await this.guarded(() => object.arrayBuffer());
 		if ((await sha256Hex(bytes)) !== contentSha256) fail("INTEGRITY_FAILED");
 		const slice = new Uint8Array(bytes).slice(start, end);

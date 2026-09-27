@@ -354,12 +354,18 @@ export class ResearchBoundaryError extends Error implements ResearchError {
 	readonly retryable: boolean;
 	readonly request_id: string;
 
-	constructor(errorCode: ResearchErrorCode, requestId = crypto.randomUUID().replaceAll("-", "")) {
-		super(SAFE_MESSAGES[errorCode]);
+	constructor(
+		errorCode: ResearchErrorCode,
+		requestId = crypto.randomUUID().replaceAll("-", ""),
+		options: { retryable?: boolean; safeMessage?: string } = {},
+	) {
+		const safeMessage = options.safeMessage ?? SAFE_MESSAGES[errorCode];
+		super(safeMessage);
 		this.name = "ResearchBoundaryError";
 		this.error_code = errorCode;
-		this.safe_message = SAFE_MESSAGES[errorCode];
-		this.retryable = errorCode === "STORE_UNAVAILABLE" || errorCode === "RATE_LIMITED";
+		this.safe_message = safeMessage;
+		this.retryable =
+			options.retryable ?? (errorCode === "STORE_UNAVAILABLE" || errorCode === "RATE_LIMITED");
 		this.request_id = requestId;
 	}
 

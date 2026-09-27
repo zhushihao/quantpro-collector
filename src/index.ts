@@ -63,7 +63,7 @@ import {
 import { ingestResearchReplicaRecord, type ResearchReplicaStorage } from "./research-replica.ts";
 import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
-import { withResearchReadRetry } from "./research-read-retry.ts";
+import { ResearchReadBackendError, withResearchReadRetry } from "./research-read-retry.ts";
 import {
 	getMarketCheckpoints,
 	MARKET_CHECKPOINT_INPUT_SCHEMA,
@@ -788,7 +788,13 @@ export function createServer(
 	// isError + FILTERED 信封 + 服务端结构化日志（request_id + 主体）。
 	const researchAdapter = () => {
 		const storage = env ? researchReplicaStorage(env) : null;
-		if (!storage) throw new ResearchBoundaryError("STORE_UNAVAILABLE");
+		if (!storage) {
+			throw new ResearchReadBackendError(
+				"DETERMINISTIC",
+				"REPLICA_BINDING_UNAVAILABLE",
+				"ConfigurationError",
+			);
+		}
 		return new CollectorResearchRemoteAdapter(storage, { visibility: "PUBLIC" });
 	};
 	const researchWorkflowDb = () => {
@@ -814,8 +820,24 @@ export function createServer(
 			};
 		}
 	};
-	const researchRead = <T>(operation: () => Promise<T>) =>
-		researchDomain(() => withResearchReadRetry(operation));
+	const researchRead = <T>(tool: string, operation: () => Promise<T>) => {
+		const requestId = crypto.randomUUID().replaceAll("-", "");
+		return researchDomain(() =>
+			withResearchReadRetry(operation, {
+				requestId,
+				tool,
+				onFailure: (failure) => {
+					console.warn(
+						JSON.stringify({
+							event: "research_read_failure",
+							timestamp: new Date().toISOString(),
+							...failure,
+						}),
+					);
+				},
+			}),
+		);
+	};
 	const researchWrite = researchDomain;
 	const callerPrincipal = (): Promise<string | null> =>
 		formalResearchOwner(researchIssuer, researchPrincipal);
@@ -1445,7 +1467,7 @@ export function createServer(
 			}),
 		},
 		async ({ query, limit }) =>
-			researchRead(() => researchAdapter().searchDocuments(query, limit)),
+			researchRead("search_documents", () => researchAdapter().searchDocuments(query, limit)),
 	);
 	server.registerTool(
 		"get_document",
@@ -1453,7 +1475,7 @@ export function createServer(
 			description: "读取 Collector replica 中经 SHA-256 校验的 PUBLIC 文档正文。",
 			inputSchema: z.object({ document_id: z.string().min(1) }),
 		},
-		async ({ document_id }) => researchRead(() => researchAdapter().getDocument(document_id)),
+		async ({ document_id }) => researchRead("get_document", () => researchAdapter().getDocument(document_id)),
 	);
 	server.registerTool(
 		"search_evidence",
@@ -1461,7 +1483,7 @@ export function createServer(
 			description: "列出 Collector replica 中的 PUBLIC Evidence。",
 			inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional() }),
 		},
-		async ({ limit }) => researchRead(() => researchAdapter().searchEvidence(limit)),
+		async ({ limit }) => researchRead("search_evidence", () => researchAdapter().searchEvidence(limit)),
 	);
 	server.registerTool(
 		"get_evidence",
@@ -1469,7 +1491,7 @@ export function createServer(
 			description: "读取 Collector replica 中指定的 PUBLIC Evidence。",
 			inputSchema: z.object({ evidence_id: z.string().min(1) }),
 		},
-		async ({ evidence_id }) => researchRead(() => researchAdapter().getEvidence(evidence_id)),
+		async ({ evidence_id }) => researchRead("get_evidence", () => researchAdapter().getEvidence(evidence_id)),
 	);
 	server.registerTool(
 		"get_theme_accumulator",
@@ -1478,7 +1500,7 @@ export function createServer(
 			inputSchema: z.object({ subject_key: z.string().min(1) }),
 		},
 		async ({ subject_key }) =>
-			researchRead(() => researchAdapter().getThemeAccumulator(subject_key)),
+			researchRead("get_theme_accumulator", () => researchAdapter().getThemeAccumulator(subject_key)),
 	);
 	server.registerTool(
 		"get_company_evidence_state",
@@ -1487,7 +1509,7 @@ export function createServer(
 			inputSchema: z.object({ company: z.string().min(1) }),
 		},
 		async ({ company }) =>
-			researchRead(() => researchAdapter().getCompanyEvidenceState(company)),
+			researchRead("get_company_evidence_state", () => researchAdapter().getCompanyEvidenceState(company)),
 	);
 	server.registerTool(
 		"get_coverage_status",
@@ -1495,7 +1517,7 @@ export function createServer(
 			description: "读取 Collector replica 中的 PUBLIC Research Coverage。",
 			inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional() }),
 		},
-		async ({ limit }) => researchRead(() => researchAdapter().getCoverageStatus(limit)),
+		async ({ limit }) => researchRead("get_coverage_status", () => researchAdapter().getCoverageStatus(limit)),
 	);
 	server.registerTool(
 		"get_source_health",
@@ -1506,7 +1528,7 @@ export function createServer(
 				limit: z.number().int().min(1).max(100).optional(),
 			}),
 		},
-		async ({ limit }) => researchRead(() => researchAdapter().getSourceHealth(limit)),
+		async ({ limit }) => researchRead("get_source_health", () => researchAdapter().getSourceHealth(limit)),
 	);
 	server.registerTool(
 		"get_market_signal_state",
@@ -1516,7 +1538,7 @@ export function createServer(
 			inputSchema: z.object({ subject_key: z.string().min(1).max(128) }),
 		},
 		async ({ subject_key }) =>
-			researchRead(() => researchAdapter().getMarketSignalState(subject_key)),
+			researchRead("get_market_signal_state", () => researchAdapter().getMarketSignalState(subject_key)),
 	);
 	server.registerTool(
 		"list_research_jobs",
@@ -1529,7 +1551,7 @@ export function createServer(
 			}),
 		},
 		async ({ limit, claimable_only }) =>
-			researchRead(() =>
+			researchRead("list_research_jobs", () =>
 				researchAdapter().listResearchJobs(limit, { claimableOnly: claimable_only }),
 			),
 	);
@@ -1540,7 +1562,7 @@ export function createServer(
 				"读取 Collector replica 中指定 PUBLIC Research Job 的上下文：job record（含触发证据）+ server_state + 提交历史 proposals。claim_token 永不出现在本面。",
 			inputSchema: z.object({ job_id: z.string().min(1) }),
 		},
-		async ({ job_id }) => researchRead(() => researchAdapter().getResearchJobContext(job_id)),
+		async ({ job_id }) => researchRead("get_research_job_context", () => researchAdapter().getResearchJobContext(job_id)),
 	);
 	server.registerTool(
 		"claim_research_job",
