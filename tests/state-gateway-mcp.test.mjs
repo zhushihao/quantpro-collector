@@ -18,6 +18,7 @@ registerHooks({
 const { createServer } = await import("../src/index.ts");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { createResearchWorkflowDb } = await import("./helpers/d1-sqlite-shim.mjs");
 
 test("#35 validate_state_batch declares VALIDATE/non-retry fallback for unclassified exceptions", async () => {
 	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
@@ -94,6 +95,122 @@ test("legacy production OAuth scopes remain compatible only for verified chatgpt
 		assert.equal(append.isError, true);
 		assert.doesNotMatch(append.content[0].text, /STATE_FORBIDDEN/);
 		assert.match(append.content[0].text, /STATE_UNAVAILABLE|STATE_VALIDATION_FAILED/);
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});
+
+test("#37 stable append_state_batch ABI routes envelope-free payload into owner command core", async () => {
+	const db = createResearchWorkflowDb();
+	const server = createServer(
+		{
+			GITHUB_TOKEN: "fake-token",
+			RESEARCH_REPLICA: db,
+		},
+		"ENABLED",
+		new Set(["market:read", "state:read", "state:write"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "stable-state-abi-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		const result = await client.callTool({
+			name: "append_state_batch",
+			arguments: {
+				channel: "COMPANY",
+				batch: {
+					as_of: "2026-09-27T21:55:00+08:00",
+					events: [
+						{
+							symbol: "CN:605376",
+							event_type: "EVIDENCE_UPDATE",
+							company_thesis: "probe",
+							company_validation: "probe",
+							r_proposal: null,
+							evidence_types: ["C"],
+							evidence_keys: ["probe"],
+							counter_evidence: [],
+							confidence: 0.5,
+							next_validation: "probe",
+							effective_r_state: "R4",
+						},
+					],
+				},
+			},
+		});
+		assert.equal(result.isError, true);
+		const body = JSON.parse(result.content[0].text);
+		assert.equal(body.status, "STATE_UNAVAILABLE");
+		assert.equal(body.phase, "READ");
+		assert.match(body.message, /LIVE universe/);
+		assert.doesNotMatch(body.message, /schema_version/);
+		assert.doesNotMatch(body.message, /effective_r_state/);
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});
+
+test("#37 stable record_automation_run ABI bridges SERVER_AUTO to v2 begin/end", async () => {
+	const db = createResearchWorkflowDb();
+	const server = createServer(
+		{ GITHUB_TOKEN: "fake-token", RESEARCH_REPLICA: db },
+		"ENABLED",
+		new Set(["market:read", "state:read", "state:write"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "stable-audit-abi-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		const started = await client.callTool({
+			name: "record_automation_run",
+			arguments: {
+				task_name: "industry-research",
+				run_id: "SERVER_AUTO",
+				phase: "STARTED",
+				status: "STARTED",
+				occurred_at: "SERVER",
+				prompt_version: "5f023477a8c16612914e8ed3a6d06132a0dd413b",
+			},
+		});
+		assert.equal(started.isError, undefined);
+		const startedBody = JSON.parse(started.content[0].text);
+		assert.equal(startedBody.compat_contract, "run-v2");
+		assert.match(startedBody.run_id, /^run_[0-9a-f]{32}$/);
+
+		const finished = await client.callTool({
+			name: "record_automation_run",
+			arguments: {
+				task_name: "industry-research",
+				run_id: startedBody.run_id,
+				phase: "FINAL",
+				status: "SILENT",
+				occurred_at: "SERVER",
+				notification_sent: false,
+				fresh_delta_count: 0,
+				safe_summary: "normal silent run",
+			},
+		});
+		assert.equal(finished.isError, undefined);
+		const finishedBody = JSON.parse(finished.content[0].text);
+		assert.equal(finishedBody.compat_contract, "run-v2");
+		assert.equal(finishedBody.outcome, "SILENT");
+
+		const history = await client.callTool({
+			name: "get_automation_run_history",
+			arguments: { task_name: "industry-research", limit: 5 },
+		});
+		const historyBody = JSON.parse(history.content[0].text);
+		assert.equal(historyBody.runs.length, 1);
+		assert.equal(historyBody.runs[0].source_contract, "run-v2");
+		assert.equal(historyBody.runs[0].effective_status, "SILENT");
+		assert.equal(historyBody.runs[0].notification_sent, null);
+		assert.equal(historyBody.runs[0].notification_intended, false);
 	} finally {
 		await client.close();
 		await server.server.close();

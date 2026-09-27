@@ -123,6 +123,14 @@ export const APPEND_MARKET_OBSERVATION_INPUT_SCHEMA = z
 
 type InvestmentCommandChannel = Exclude<StateWriteChannel, "MARKET">;
 
+export function isOwnedStateCommandPayload(
+	_valueChannel: StateWriteChannel,
+	value: unknown,
+): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	return !("schema_version" in (value as Record<string, unknown>));
+}
+
 const PRODUCER_BY_CHANNEL: Record<InvestmentCommandChannel, string> = {
 	INDUSTRY: "industry_trend",
 	COMPANY: "company_validation",

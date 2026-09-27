@@ -99,6 +99,7 @@ import {
 	APPEND_MARKET_OBSERVATION_INPUT_SCHEMA,
 	appendInvestmentCommand,
 	appendMarketObservation,
+	isOwnedStateCommandPayload,
 } from "./state-commands.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
@@ -618,7 +619,7 @@ export function createServer(
 ) {
 	const server = new McpServer({
 		name: "QuantPro Collector",
-		version: "1.3.0",
+		version: "1.3.1",
 	});
 
 	// 保留测试工具，确认 MCP 基础链路持续正常
@@ -1453,7 +1454,7 @@ export function createServer(
 		"append_state_batch",
 		{
 			description:
-				"将 exact-schema 状态批次 append-only 持久化到固定 QuantPro 账本。调用方只能选择 MARKET/INDUSTRY/COMPANY/CLOSE，不能选择 repo、issue、URL、credential、producer 或 dimension。服务端执行权限、幂等、关系校验、持久化回执与写后回读。授权以 get_gateway_status.state_write_authorized 为准。",
+				"稳定 State Gateway 写入口。兼容旧 exact-schema batch，也接受 #37 最小业务 payload；当 batch 不含 schema_version 时按 channel 自动走 owner-scoped 新内核，由 Collector 补系统字段、执行幂等、关系校验、持久化回执与写后回读。调用方不能选择 repo、issue、URL、credential、producer 或 dimension。授权以 get_gateway_status.state_write_authorized 为准。",
 			inputSchema: z.object({ channel: STATE_CHANNEL_SCHEMA, batch: z.unknown() }),
 			annotations: {
 				readOnlyHint: false,
@@ -1474,6 +1475,37 @@ export function createServer(
 					}),
 				);
 			}
+
+			if (isOwnedStateCommandPayload(channel, batch)) {
+				const runId =
+					batch && typeof batch === "object" && !Array.isArray(batch)
+						? typeof (batch as Record<string, unknown>).run_id === "string"
+							? String((batch as Record<string, unknown>).run_id)
+							: null
+						: null;
+				return ownerCommandResponse("append_state_batch", runId, async (requestId) => {
+					const context = await resolveOwnerCommandContext();
+					if (channel === "MARKET") {
+						return (await appendMarketObservation({
+							db: env.RESEARCH_REPLICA!,
+							token: env.GITHUB_TOKEN,
+							command: batch,
+							portfolioVersion: context.portfolioVersion,
+							liveUniverseHash: context.liveUniverseHash,
+							requestId,
+						})) as unknown as Record<string, unknown>;
+					}
+					return (await appendInvestmentCommand({
+						db: env.RESEARCH_REPLICA!,
+						token: env.GITHUB_TOKEN,
+						channel,
+						command: batch,
+						portfolioVersion: context.portfolioVersion,
+						requestId,
+					})) as unknown as Record<string, unknown>;
+				});
+			}
+
 			try {
 				const result = await appendStateBatch({
 					db: env.RESEARCH_REPLICA,
@@ -1598,7 +1630,7 @@ export function createServer(
 		"record_automation_run",
 		{
 			description:
-				"记录 ChatGPT Automation 一次运行的 STARTED 或 FINAL 审计事件。仅写 Collector D1 运行审计，不写投资状态账本；同 task_name + run_id + phase 幂等。FINAL 状态仅允许 COMPLETED/SILENT/BLOCKED/FAILED。授权以 state:write 为准。",
+				"稳定 Automation 审计兼容入口。旧 STARTED/FINAL 合同继续可用；#37 新调用可用 run_id=SERVER_AUTO + occurred_at=SERVER 发起 START，由 Collector 生成真实 run_id，FINAL 使用返回 run_id 并由服务器记录时间。仅写 Collector D1，不写投资状态账本。授权以 state:write 为准。",
 			inputSchema: AUTOMATION_RUN_EVENT_INPUT_SCHEMA,
 			annotations: {
 				readOnlyHint: false,
@@ -1620,6 +1652,81 @@ export function createServer(
 				);
 			}
 			try {
+				if (event.run_id === "SERVER_AUTO" && event.phase === "STARTED") {
+					if (!researchPrincipal) {
+						throw new AutomationRunLedgerError(
+							"AUTOMATION_RUN_UNAVAILABLE",
+							"automation run principal is unavailable",
+							{ retryable: true },
+						);
+					}
+					const result = await beginAutomationRun({
+						db: env.RESEARCH_REPLICA,
+						begin: {
+							task: event.task_name,
+							prompt_version: event.prompt_version ?? null,
+						},
+						principal: researchPrincipal,
+						collectorBuildSha:
+							env.DEPLOYED_GIT_SHA?.trim() || env.CF_VERSION_METADATA?.tag || null,
+						cloudflareVersionId: env.CF_VERSION_METADATA?.id ?? null,
+					});
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: JSON.stringify(
+									{
+										...result,
+										phase: "STARTED",
+										event_status: "STARTED",
+										compat_contract: "run-v2",
+									},
+									null,
+									2,
+								),
+							},
+						],
+					};
+				}
+				if (event.run_id.startsWith("run_") && event.phase === "FINAL") {
+					if (event.status === "STARTED") {
+						throw new AutomationRunLedgerError(
+							"AUTOMATION_RUN_VALIDATION_FAILED",
+							"FINAL phase requires a terminal status",
+							{ retryable: false },
+						);
+					}
+					const outcome = event.status;
+					const reason = event.blocker_code ?? event.safe_summary ?? null;
+					const result = await endAutomationRun({
+						db: env.RESEARCH_REPLICA,
+						end: {
+							run_id: event.run_id,
+							outcome,
+							fresh_delta_count: event.fresh_delta_count ?? 0,
+							notification_intended: Boolean(event.notification_sent),
+							reason,
+						},
+					});
+					return {
+						content: [
+							{
+								type: "text" as const,
+								text: JSON.stringify(
+									{
+										...result,
+										phase: "FINAL",
+										event_status: event.status,
+										compat_contract: "run-v2",
+									},
+									null,
+									2,
+								),
+							},
+						],
+					};
+				}
 				const result = await recordAutomationRunEvent({
 					db: env.RESEARCH_REPLICA,
 					event,
@@ -1761,7 +1868,7 @@ export function createServer(
 						env?.DEPLOYED_GIT_SHA?.trim() || env?.CF_VERSION_METADATA?.tag || null,
 					cloudflareVersionId: env?.CF_VERSION_METADATA?.id ?? null,
 					cloudflareVersionTimestamp: env?.CF_VERSION_METADATA?.timestamp ?? null,
-					serviceVersion: "1.3.0",
+					serviceVersion: "1.3.1",
 					db: env?.RESEARCH_REPLICA,
 				});
 				return {
