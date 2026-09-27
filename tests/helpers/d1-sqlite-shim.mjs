@@ -28,7 +28,7 @@ import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 
 const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "migrations");
-const MIGRATION_PREFIXES = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010, "0011"]];
+const MIGRATION_PREFIXES = ["0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011"];
 
 /** The frozen migration chain, concatenated in order. */
 function loadMigrationSql() {
