@@ -144,6 +144,69 @@ test("get_market_checkpoints follows GitHub pagination without exposing it to th
 	assert.equal(state.previous_checkpoint.comment_id, "100");
 });
 
+test("market ledger retries transient GET failures but not authorization failures", async () => {
+	let transientCalls = 0;
+	const state = await getMarketCheckpoints({
+		token: "fake-server-secret",
+		tradingDate: "2026-09-21",
+		scheduledSlot: "10:50",
+		fetchImpl: async () => {
+			transientCalls += 1;
+			if (transientCalls === 1) return jsonResponse({ message: "busy" }, { status: 503 });
+			return jsonResponse([previousClose, preopen, firstIntraday]);
+		},
+	});
+	assert.equal(state.status, "OK");
+	assert.equal(transientCalls, 2);
+
+	let forbiddenCalls = 0;
+	await assert.rejects(
+		getMarketCheckpoints({
+			token: "fake-server-secret",
+			tradingDate: "2026-09-21",
+			scheduledSlot: "10:50",
+			fetchImpl: async () => {
+				forbiddenCalls += 1;
+				return jsonResponse({ message: "forbidden" }, { status: 403 });
+			},
+		}),
+		(error) =>
+			error instanceof MarketLedgerError &&
+			error.code === "MARKET_LEDGER_UNAVAILABLE" &&
+			error.httpStatus === 403,
+	);
+	assert.equal(forbiddenCalls, 1);
+});
+
+test("market ledger never retries a failed POST", async () => {
+	const proposed = payload({
+		date: "2026-09-21",
+		slot: "09:50",
+		previous: "100",
+		preopen: "100",
+		records: [{ instrument_key: "300308.SZ", gate_status: "PENDING" }],
+	});
+	let posts = 0;
+	await assert.rejects(
+		appendMarketCheckpoint({
+			token: "fake-server-secret",
+			checkpoint: proposed,
+			fetchImpl: async (_input, init) => {
+				if (init?.method === "POST") {
+					posts += 1;
+					return jsonResponse({ message: "busy" }, { status: 503 });
+				}
+				return jsonResponse([previousClose, preopen]);
+			},
+		}),
+		(error) =>
+			error instanceof MarketLedgerError &&
+			error.code === "MARKET_LEDGER_UNAVAILABLE" &&
+			error.httpStatus === 503,
+	);
+	assert.equal(posts, 1);
+});
+
 test("append_market_checkpoint returns idempotent replay for identical existing slot", async () => {
 	let writes = 0;
 	const result = await appendMarketCheckpoint({

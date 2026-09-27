@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { fetchStateLedgerReadWithRetry } from "./state-ledger-read-retry.ts";
+
 export const INVESTMENT_LEDGER_REPOSITORY = "zhushihao/quantpro-collector";
 export const INVESTMENT_LEDGER_ISSUE_NUMBER = 3;
 
@@ -370,9 +372,12 @@ async function fetchAllComments(
 				"GitHub issue comment pagination exceeded the safety limit",
 			);
 		}
+		const target = next;
 		let response: Response;
 		try {
-			response = await fetchImpl(next, { method: "GET", headers: githubHeaders(token) });
+			response = await fetchStateLedgerReadWithRetry(() =>
+				fetchImpl(target, { method: "GET", headers: githubHeaders(token) }),
+			);
 		} catch {
 			throw new InvestmentLedgerError(
 				"INVESTMENT_LEDGER_UNAVAILABLE",
@@ -597,10 +602,12 @@ export async function appendInvestmentLedgerBatch(input: {
 
 	let readbackResponse: Response;
 	try {
-		readbackResponse = await fetchImpl(commentUrl(createdId), {
-			method: "GET",
-			headers: githubHeaders(input.token),
-		});
+		readbackResponse = await fetchStateLedgerReadWithRetry(() =>
+			fetchImpl(commentUrl(createdId), {
+				method: "GET",
+				headers: githubHeaders(input.token),
+			}),
+		);
 	} catch {
 		throw new InvestmentLedgerError(
 			"INVESTMENT_LEDGER_READBACK_FAILED",

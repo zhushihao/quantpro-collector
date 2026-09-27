@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { fetchStateLedgerReadWithRetry } from "./state-ledger-read-retry.ts";
+
 export const MARKET_LEDGER_REPOSITORY = "zhushihao/quantpro-collector";
 export const MARKET_LEDGER_ISSUE_NUMBER = 2;
 export const MARKET_LEDGER_SLOTS = [
@@ -189,12 +191,15 @@ async function fetchComments(
 				"GitHub issue comment pagination exceeded the safety limit",
 			);
 		}
+		const target = next;
 		let response: Response;
 		try {
-			response = await fetchImpl(next, {
-				method: "GET",
-				headers: githubHeaders(token),
-			});
+			response = await fetchStateLedgerReadWithRetry(() =>
+				fetchImpl(target, {
+					method: "GET",
+					headers: githubHeaders(token),
+				}),
+			);
 		} catch {
 			throw new MarketLedgerError(
 				"MARKET_LEDGER_UNAVAILABLE",
@@ -647,10 +652,12 @@ export async function appendMarketCheckpoint(input: {
 
 	let readbackResponse: Response;
 	try {
-		readbackResponse = await fetchImpl(commentUrl(createdId), {
-			method: "GET",
-			headers: githubHeaders(input.token),
-		});
+		readbackResponse = await fetchStateLedgerReadWithRetry(() =>
+			fetchImpl(commentUrl(createdId), {
+				method: "GET",
+				headers: githubHeaders(input.token),
+			}),
+		);
 	} catch {
 		throw new MarketLedgerError(
 			"CHECKPOINT_READBACK_FAILED",

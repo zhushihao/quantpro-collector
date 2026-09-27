@@ -189,6 +189,82 @@ test("append is idempotent on identical event_id and conflicts on changed conten
 	);
 });
 
+test("investment ledger retries transient read failures but preserves final domain HTTP status", async () => {
+	let attempts = 0;
+	await assert.rejects(
+		getInvestmentLedgerState({
+			token: "fake-token",
+			role: "company",
+			symbols: ["CN:300308"],
+			fetchImpl: async () => {
+				attempts += 1;
+				return jsonResponse({ message: "busy" }, { status: 503 });
+			},
+		}),
+		(error) =>
+			error instanceof InvestmentLedgerError &&
+			error.code === "INVESTMENT_LEDGER_UNAVAILABLE" &&
+			error.httpStatus === 503,
+	);
+	assert.equal(attempts, 3);
+});
+
+test("investment ledger retries readback GET after a successful POST without repeating the POST", async () => {
+	const input = industryInput();
+	let created = null;
+	let posts = 0;
+	let readbacks = 0;
+	const result = await appendInvestmentLedgerBatch({
+		token: "fake-token",
+		role: "industry",
+		batch: input,
+		fetchImpl: async (target, init) => {
+			const url = String(target);
+			const method = init?.method ?? "GET";
+			if (method === "POST") {
+				posts += 1;
+				const posted = JSON.parse(init.body);
+				const body = JSON.parse(posted.body.match(/\`\`\`json\s*([\s\S]*?)\s*\`\`\`/)[1]);
+				created = comment(199, body);
+				return jsonResponse(created, { status: 201 });
+			}
+			if (url.endsWith("/issues/comments/199")) {
+				readbacks += 1;
+				if (readbacks === 1) return jsonResponse({ message: "busy" }, { status: 503 });
+				return jsonResponse(created);
+			}
+			return jsonResponse([]);
+		},
+	});
+	assert.equal(result.status, "PERSISTED");
+	assert.equal(posts, 1);
+	assert.equal(readbacks, 2);
+});
+
+test("investment ledger never retries a failed POST", async () => {
+	const input = industryInput();
+	let posts = 0;
+	await assert.rejects(
+		appendInvestmentLedgerBatch({
+			token: "fake-token",
+			role: "industry",
+			batch: input,
+			fetchImpl: async (_target, init) => {
+				if (init?.method === "POST") {
+					posts += 1;
+					return jsonResponse({ message: "busy" }, { status: 503 });
+				}
+				return jsonResponse([]);
+			},
+		}),
+		(error) =>
+			error instanceof InvestmentLedgerError &&
+			error.code === "INVESTMENT_LEDGER_UNAVAILABLE" &&
+			error.httpStatus === 503,
+	);
+	assert.equal(posts, 1);
+});
+
 test("role schema fails closed on cross-dimension fields and forbidden R state", async () => {
 	await assert.rejects(
 		appendInvestmentLedgerBatch({
