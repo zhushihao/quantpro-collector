@@ -226,7 +226,7 @@ class CompilerTests(unittest.TestCase):
         checks = {
             "holding-assistant-preclose": ["MAPPING_ONLY", "全部 ACTIVE", "官方确认全部", "混合市场", "get_market_signal_state", "固定比较基准", "action_gate_id", "original_condition", "幂等键不变", "严禁用10:10", "INCONCLUSIVE", "previous_checkpoint", "universe_transition"],
             "holding-assistant-intraday": ["previous_checkpoint", "午休", "两类独立证据", "持续独立超额", "不临时换基准"],
-            "industry-research": ["每轮最多1个", "historical_backfill=false", "lease_generation", "expected_generation", "get_research_job_context", "submit ACCEPTED", "defer成功", "recheck_at", "findings[].evidence_ids", "5,500", "48,000", "event_first_known_time", "不构成公司确认"],
+            "industry-research": ["每轮最多1个", "historical_backfill=false", "lease_generation", "expected_generation", "get_research_job_context", "submit ACCEPTED", "defer成功", "recheck_at", "findings[].evidence_ids", "5,500", "48,000", "event_first_known_time", "不构成公司确认", "最近6小时", "NEW_CONTENT", "search_documents=[]", "DISCOVERY_INCOMPLETE", "candidates=N"],
             "company-facts": ["50%/80%/95%/100%", "最低承诺", "停滞后恢复", "不单独升级", "尚未官方确认", "订单可撤销", "company_validation"],
             "central-policy": ["权威叙事", "30–90", "正式政策工具", "地方试点", "不对政策排名", "不证明政策原因"],
             "ai-financing-rates": ["替代解释", "10Y/30Y", "不足以单独解释", "财政赤字", "期限溢价", "认购", "不自动等于个股买卖信号"],
