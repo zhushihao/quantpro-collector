@@ -728,8 +728,9 @@ export async function recordAutomationRunEvent(input: {
 			};
 		}
 
+		let writeStatus: "RECORDED" | "IDEMPOTENT_REPLAY" = "RECORDED";
 		if (!existing) {
-			await input.db
+			const write = await input.db
 				.prepare(
 					`INSERT OR IGNORE INTO ${TABLE} (
 						task_name, run_id, principal, invocation_key, scheduled_for,
@@ -772,8 +773,9 @@ export async function recordAutomationRunEvent(input: {
 					now,
 				)
 				.run();
+			writeStatus = Number(write.meta?.changes ?? 0) > 0 ? "RECORDED" : "IDEMPOTENT_REPLAY";
 		} else if (event.phase === "STARTED") {
-			await input.db
+			const write = await input.db
 				.prepare(
 					`UPDATE ${TABLE}
 					SET scheduled_for=COALESCE(scheduled_for, ?3),
@@ -801,8 +803,9 @@ export async function recordAutomationRunEvent(input: {
 					now,
 				)
 				.run();
+			writeStatus = Number(write.meta?.changes ?? 0) > 0 ? "RECORDED" : "IDEMPOTENT_REPLAY";
 		} else {
-			await input.db
+			const write = await input.db
 				.prepare(
 					`UPDATE ${TABLE}
 					SET scheduled_for=COALESCE(scheduled_for, ?3),
@@ -838,6 +841,7 @@ export async function recordAutomationRunEvent(input: {
 					now,
 				)
 				.run();
+			writeStatus = Number(write.meta?.changes ?? 0) > 0 ? "RECORDED" : "IDEMPOTENT_REPLAY";
 		}
 
 		existing = await readRun(input.db, event.task_name, event.run_id);
@@ -857,7 +861,7 @@ export async function recordAutomationRunEvent(input: {
 			);
 		}
 		return {
-			status: "RECORDED",
+			status: writeStatus,
 			task_name: event.task_name,
 			run_id: event.run_id,
 			phase: event.phase,
