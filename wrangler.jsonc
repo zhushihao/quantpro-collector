@@ -11,6 +11,9 @@
 	"vars": {
 		"COLLECTOR_MCP_CLIENT_ID": "chatgpt-production",
 		"COLLECTOR_MCP_CLIENT_SCOPES": "market:read research:claim research:submit state:read state:write",
+		"COLLECTOR_FORWARDABLE_PRINCIPALS": "chatgpt-production zcode-research-machine",
+		"COLLECTOR_STATIC_CLIENT_PRINCIPAL": "zcode-research-machine",
+		"COLLECTOR_STATIC_CLIENT_ISSUER": "https://static-direct.quantpro.invalid/",
 	},
 	"kv_namespaces": [
 		{

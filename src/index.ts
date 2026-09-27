@@ -126,6 +126,12 @@ interface Env {
 	COLLECTOR_MCP_CLIENT_ID?: string;
 	/** 空格或逗号分隔的批准 scopes；LIVE overlay 至少要求 market:read。 */
 	COLLECTOR_MCP_CLIENT_SCOPES?: string;
+	/** 静态直连客户端（无 OAuth 桥）登记的正式主体；未配置时保持旧行为（principal=null）。 */
+	COLLECTOR_STATIC_CLIENT_PRINCIPAL?: string;
+	/** 静态直连客户端登记的 issuer（origin URL）；仅参与 formal owner 哈希与审计。 */
+	COLLECTOR_STATIC_CLIENT_ISSUER?: string;
+	/** 转发主体头白名单（空格分隔，含桥身份）；未配置时保持旧行为（开放接受）。 */
+	COLLECTOR_FORWARDABLE_PRINCIPALS?: string;
 	RESEARCH_REPLICA?: D1Database;
 	RESEARCH_OBJECTS?: R2Bucket;
 	/** RESEARCH 私有 transport credential；ingest 与 receipts 共用，不与 market/research OAuth scopes 混用。 */
@@ -2819,15 +2825,20 @@ export default {
 			// #19：桥接层从已验证 grant props 盖章的稳定业务主体（chatgpt-production）。
 			// 动态 DCR client_id 不再进入授权路径；该头只在内部 bridge credential
 			// 逐字节匹配时被接受，客户端自带的同名头已在桥内剥除。
+			// 2026-09-27：转发主体走白名单（COLLECTOR_FORWARDABLE_PRINCIPALS），
+			// 无头的静态直连客户端取登记身份（COLLECTOR_STATIC_CLIENT_PRINCIPAL）。
 			const researchPrincipal = resolveResearchPrincipal(
 				ctx.requestInfo?.headers.get("Authorization") ?? null,
 				ctx.requestInfo?.headers.get(FORWARDED_PRINCIPAL_HEADER) ?? null,
 				env.COLLECTOR_MCP_CLIENT_TOKEN,
+				env.COLLECTOR_FORWARDABLE_PRINCIPALS,
+				env.COLLECTOR_STATIC_CLIENT_PRINCIPAL,
 			);
 			const researchIssuer = resolveResearchIssuer(
 				ctx.requestInfo?.headers.get("Authorization") ?? null,
 				ctx.requestInfo?.headers.get(FORWARDED_ISSUER_HEADER) ?? null,
 				env.COLLECTOR_MCP_CLIENT_TOKEN,
+				env.COLLECTOR_STATIC_CLIENT_ISSUER,
 			);
 			return createServer(
 				env,

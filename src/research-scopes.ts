@@ -19,6 +19,16 @@
  *   - Without the header (static-credential path): effective scopes =
  *     configured set.
  *
+ * Principal / issuer resolution (2026-09-27 static-direct identities):
+ *   - A presented principal header must be registered in
+ *     `COLLECTOR_FORWARDABLE_PRINCIPALS` once that allow-list is configured;
+ *     unconfigured deployments keep the legacy open behavior so the OAuth
+ *     bridge path is unaffected until the operator opts in.
+ *   - Without any principal header, a registered static direct client
+ *     (`COLLECTOR_STATIC_CLIENT_PRINCIPAL` + `COLLECTOR_STATIC_CLIENT_ISSUER`)
+ *     receives its configured durable identity. Unconfigured deployments keep
+ *     the legacy `null` (no principal, no formal operation).
+ *
  * This module is pure: no IO, no logging, no token values echoed anywhere.
  */
 
@@ -76,6 +86,32 @@ function parseScopeList(value: string | null | undefined): Set<string> {
 	);
 }
 
+/** Well-formed principal token shape, shared by forwarded and static identities. */
+const PRINCIPAL_PATTERN = /^[A-Za-z0-9._:-]{1,256}$/;
+
+/** Parse a space/comma separated principal allow-list into a set (order-insensitive). */
+function parsePrincipalList(value: string | null | undefined): Set<string> {
+	return new Set(
+		(value ?? "")
+			.split(/[\s,]+/)
+			.map((principal) => principal.trim())
+			.filter(Boolean),
+	);
+}
+
+/** Origin-only issuer normalization shared by forwarded and static identities. */
+function normalizeIssuerOrigin(value: string): string | null {
+	if (value.length > 512) return null;
+	try {
+		const issuer = new URL(value);
+		if (issuer.protocol !== "https:" && issuer.protocol !== "http:") return null;
+		if (issuer.pathname !== "/" || issuer.search || issuer.hash) return null;
+		return issuer.origin;
+	} catch {
+		return null;
+	}
+}
+
 export function resolveResearchScopes(
 	authorizationHeader: string | null | undefined,
 	forwardedScopesHeader: string | null | undefined,
@@ -102,42 +138,56 @@ export function resolveResearchScopes(
 }
 
 /**
- * The stable principal is trusted only on the authenticated bridge path: the
- * bridge replaces the Authorization header with the internal credential and
- * stamps this header from the *validated* OAuth grant props — never from a
- * client-controlled value.  A static-credential holder gets `null` here (no
- * principal, no formal write).
+ * Stable principal resolution (2026-09-27 revision).
+ *
+ * Bridge path: the bridge replaces the Authorization header with the internal
+ * credential and stamps the principal header from the *validated* OAuth grant
+ * props. Once `forwardablePrincipals` is configured, a presented principal is
+ * accepted only if it is registered there — previously any static-credential
+ * holder could forge an arbitrary principal (audit impersonation), which this
+ * allow-list closes. Unconfigured deployments keep the legacy open behavior.
+ *
+ * Static-credential direct path: a client that presents no principal header
+ * receives the registered static identity (`staticPrincipal`), giving an
+ * operator-approved direct client (e.g. ZCode on the research machine) a
+ * durable, non-ChatGPT principal for the formal gate. Unconfigured deployments
+ * keep the legacy `null` (no principal, no formal operation).
  */
 export function resolveResearchPrincipal(
 	authorizationHeader: string | null | undefined,
 	forwardedPrincipal: string | null | undefined,
 	configuredToken: string | null | undefined,
+	forwardablePrincipals?: string | null,
+	staticPrincipal?: string | null,
 ): string | null {
 	if (!configuredToken || authorizationHeader !== `Bearer ${configuredToken}`) return null;
-	if (typeof forwardedPrincipal !== "string" || !/^[A-Za-z0-9._:-]{1,256}$/.test(forwardedPrincipal)) return null;
-	return forwardedPrincipal;
+	if (forwardedPrincipal != null) {
+		// A principal header was presented: it must be well-formed AND registered.
+		if (typeof forwardedPrincipal !== "string" || !PRINCIPAL_PATTERN.test(forwardedPrincipal)) return null;
+		const allow = parsePrincipalList(forwardablePrincipals);
+		if (allow.size === 0) return forwardedPrincipal;
+		return allow.has(forwardedPrincipal) ? forwardedPrincipal : null;
+	}
+	return staticPrincipal && PRINCIPAL_PATTERN.test(staticPrincipal) ? staticPrincipal : null;
 }
 
 /**
- * The issuer is not taken from an MCP body or a client header.  The OAuth
- * bridge replaces this header after token validation, while the core still
- * requires its bridge credential before accepting it.
+ * Issuer resolution (2026-09-27 revision). Same trust split as the principal:
+ * forwarded values stay bridge-only, while a static direct client without any
+ * issuer header receives its registered static issuer. A malformed forwarded
+ * value still fails closed (no static fallback).
  */
 export function resolveResearchIssuer(
 	authorizationHeader: string | null | undefined,
 	forwardedIssuer: string | null | undefined,
 	configuredToken: string | null | undefined,
+	staticIssuer?: string | null,
 ): string | null {
 	if (!configuredToken || authorizationHeader !== `Bearer ${configuredToken}`) return null;
-	if (typeof forwardedIssuer !== "string" || forwardedIssuer.length > 512) return null;
-	try {
-		const issuer = new URL(forwardedIssuer);
-		if (issuer.protocol !== "https:" && issuer.protocol !== "http:") return null;
-		if (issuer.pathname !== "/" || issuer.search || issuer.hash) return null;
-		return issuer.origin;
-	} catch {
-		return null;
+	if (forwardedIssuer != null) {
+		return typeof forwardedIssuer === "string" ? normalizeIssuerOrigin(forwardedIssuer) : null;
 	}
+	return staticIssuer ? normalizeIssuerOrigin(staticIssuer) : null;
 }
 
 /**
