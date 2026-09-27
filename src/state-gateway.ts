@@ -237,7 +237,25 @@ export async function validateStateBatch(
 				message: `market batch does not match exact schema: ${validationSummary(parsed.error)}`,
 			});
 		}
-		validateCheckpointRelations(parsed.data);
+		try {
+			validateCheckpointRelations(parsed.data);
+		} catch (error) {
+			if (error instanceof MarketLedgerError) {
+				throw new StateGatewayError({
+					code:
+						error.code === "CHECKPOINT_CHAIN_MISMATCH"
+							? "STATE_CHAIN_MISMATCH"
+							: error.code === "CHECKPOINT_CONFLICT"
+								? "STATE_CONFLICT"
+								: "STATE_VALIDATION_FAILED",
+					phase: "VALIDATE",
+					message: error.message,
+					retryable: false,
+					httpStatus: error.httpStatus,
+				});
+			}
+			throw error;
+		}
 		if (
 			parsed.data.prompt_id !== "holding-assistant" ||
 			parsed.data.producer !== "holding-assistant" ||
@@ -275,7 +293,23 @@ export async function validateStateBatch(
 			message: `investment batch does not match exact schema: ${validationSummary(parsed.error)}`,
 		});
 	}
-	validateRoleSemantics(role, parsed.data);
+	try {
+		validateRoleSemantics(role, parsed.data);
+	} catch (error) {
+		if (error instanceof InvestmentLedgerError) {
+			throw new StateGatewayError({
+				code:
+					error.code === "INVESTMENT_LEDGER_EVENT_ID_CONFLICT"
+						? "STATE_CONFLICT"
+						: "STATE_VALIDATION_FAILED",
+				phase: "VALIDATE",
+				message: error.message,
+				retryable: false,
+				httpStatus: error.httpStatus,
+			});
+		}
+		throw error;
+	}
 	return {
 		status: "VALID",
 		channel,
