@@ -127,7 +127,7 @@ test("#37 owner command persists once and replays across server metadata drift",
 				created_at: "2026-09-27T12:10:00Z",
 				html_url:
 					"https://github.com/zhushihao/quantpro-collector/issues/3#issuecomment-9901",
-				body: ````json\n${JSON.stringify(payload, null, 2)}\n````,
+				body: "```json\\n" + JSON.stringify(payload, null, 2) + "\\n```",
 			};
 			return jsonResponse(created, { status: 201 });
 		}
