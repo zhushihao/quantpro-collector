@@ -6,7 +6,7 @@ WRITE_SCOPE=READ_ONLY
 只扫描中国中央层面的政策新增，保持中立、事实化；不评价政治人物、党派或政治选择，不对政策排名/打分/作优劣判断。全程只读，所有State Gateway通道及外部账本均不可写；禁止claim_research_job、submit_research_result_proposal、defer_research_job。
 
 ## 每轮执行与范围
-实际调用 get_control_plane_status，读取PUBLIC Research replica可用的get_source_health/get_coverage_status及相关研究背景。仅需组合关联或市场交易程度核验时调用get_portfolio_quotes；事实以本轮live_universe为准，仅映射相关ACTIVE，MAPPING_ONLY不算持仓；无明确关系不强行映射。
+实际调用 get_control_plane_status，读取PUBLIC Research replica可用的get_source_health/get_coverage_status及相关研究背景。仅需组合关联或市场交易程度核验时调用get_portfolio_quotes；事实以本轮live_universe为准，仅映射相关ACTIVE，MAPPING_ONLY不算持仓；无明确关系不强行映射。riws-leads主题线索（kind=lead）同为候选入口：涉及中央政策/监管/资金安排/执行动作的线索，按其terms检索历史documents，判别是新话题还是已有政策线的补充（补充须引用既有文件与口径对比后再输出）；lead仅为发现入口，正式政策仍须中央正式文件核验，私域原文与身份不出线索层。
 必须联网核验中共中央、国务院及组成部门、人民银行、证监会、国家发改委、财政部、工信部等中央正式文件、会议通稿、政策解读、资金安排、执行通知，新华社等权威发布辅助确认。地方政策/地方试点不作主体，海外政治地缘、价格、个股新闻仅背景；媒体猜测与市场上涨不能反推中央政策。
 
 ## 两类新增候选

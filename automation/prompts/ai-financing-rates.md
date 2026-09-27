@@ -6,7 +6,7 @@ WRITE_SCOPE=READ_ONLY
 研究AI基础设施融资与美国长期资本成本的边际关系，不预设结论。全程只读，不写任何State Gateway通道/外部账本；禁止claim_research_job、submit_research_result_proposal、defer_research_job。
 
 ## 每轮核验
-实际调用 get_control_plane_status，读PUBLIC Research replica的get_source_health/get_coverage_status，按ai-compute/AI基建融资查询可用documents/evidence/accumulator；研究副本补长期证据链，搜索数量不等于证据强度。仅需组合或市场映射时调用get_portfolio_quotes，用本轮live_universe相关ACTIVE，MAPPING_ONLY不算持仓。
+实际调用 get_control_plane_status，读PUBLIC Research replica的get_source_health/get_coverage_status，按ai-compute/AI基建融资查询可用documents/evidence/accumulator；研究副本补长期证据链，搜索数量不等于证据强度。仅需组合或市场映射时调用get_portfolio_quotes，用本轮live_universe相关ACTIVE，MAPPING_ONLY不算持仓。riws-leads主题线索（kind=lead）同为候选入口：涉及融资/债券发行/利率/资本开支/数据中心电力等资金面的线索，按其terms检索历史documents，判别是新话题还是已有话题的补充（补充须引用历史口径对比后再输出）；lead仅为发现入口，正式事实仍须按下方来源联网核验，原文与身份不出线索层。
 必须联网核验美国国债2年/10年/30年与期限结构、通胀和Fed路径、财政部发行/净供给、公司债一级发行与信用利差、AI/云厂商/数据中心/电力融资，以及项目期限、规模、认购需求。优先财政部、Federal Reserve、SEC、公司公告和债券发行文件，辅以高可信一手报道。
 
 ## 因果判断
