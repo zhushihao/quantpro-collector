@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { registerHooks } from "node:module";
 import path from "node:path";
 import test from "node:test";
@@ -17,6 +18,18 @@ registerHooks({
 const { createServer } = await import("../src/index.ts");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+
+test("#35 validate_state_batch declares VALIDATE/non-retry fallback for unclassified exceptions", async () => {
+	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+	const start = source.indexOf('"validate_state_batch"');
+	const end = source.indexOf('"append_state_batch"', start + 1);
+	assert.ok(start >= 0 && end > start);
+	const section = source.slice(start, end);
+	assert.match(section, /tool: "validate_state_batch"/);
+	assert.match(section, /phase: "VALIDATE"/);
+	assert.match(section, /retryable: false/);
+	assert.match(source, /event: "state_gateway_unclassified_error"/);
+});
 
 test("legacy production OAuth scopes remain compatible only for verified chatgpt-production", async () => {
 	const server = createServer(

@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { appendStateBatch, StateGatewayError, validateStateBatch } from "../src/state-gateway.ts";
+import {
+	appendStateBatch,
+	normalizeStateGatewayError,
+	StateGatewayError,
+	validateStateBatch,
+} from "../src/state-gateway.ts";
 import { getStateWriteReceipt, getStateWriteReceiptSummary } from "../src/state-receipts.ts";
 
 class FakeD1 {
@@ -165,6 +170,20 @@ function jsonResponse(body, { status = 200, headers = {} } = {}) {
 		headers: { "Content-Type": "application/json", ...headers },
 	});
 }
+
+test("#35 unclassified validate failures normalize to VALIDATE and are not retryable", () => {
+	const normalized = normalizeStateGatewayError(new Error("opaque runtime detail must not leak"), {
+		phase: "VALIDATE",
+		retryable: false,
+		requestId: "req-state-validate-unknown",
+	});
+	assert.equal(normalized.code, "STATE_UNAVAILABLE");
+	assert.equal(normalized.phase, "VALIDATE");
+	assert.equal(normalized.retryable, false);
+	assert.equal(normalized.requestId, "req-state-validate-unknown");
+	assert.equal(normalized.message, "state gateway operation failed");
+	assert.equal(normalized.message.includes("opaque runtime detail"), false);
+});
 
 test("validate_state_batch fixes channel semantics and never accepts caller-owned routing keys", async () => {
 	const valid = await validateStateBatch("INDUSTRY", industryBatch());

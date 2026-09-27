@@ -67,6 +67,25 @@ export class StateGatewayError extends Error {
 	}
 }
 
+export function normalizeStateGatewayError(
+	error: unknown,
+	fallback: {
+		phase: StateGatewayPhase;
+		retryable?: boolean;
+		requestId?: string;
+		message?: string;
+	},
+): StateGatewayError {
+	if (error instanceof StateGatewayError) return error;
+	return new StateGatewayError({
+		code: "STATE_UNAVAILABLE",
+		phase: fallback.phase,
+		message: fallback.message ?? "state gateway operation failed",
+		retryable: fallback.retryable ?? false,
+		requestId: fallback.requestId,
+	});
+}
+
 function canonicalize(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(canonicalize);
 	if (value && typeof value === "object") {

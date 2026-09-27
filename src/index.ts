@@ -75,9 +75,11 @@ import {
 	getGatewayStatus,
 	getStateSnapshot,
 	getStateWriteReceipt,
+	normalizeStateGatewayError,
 	STATE_CHANNEL_SCHEMA,
 	StateGatewayError,
 	validateStateBatch,
+	type StateGatewayPhase,
 } from "./state-gateway.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
@@ -888,24 +890,51 @@ export function createServer(
 		};
 	};
 
-	const stateGatewayErrorResponse = (error: unknown) => {
-		const safe =
-			error instanceof StateGatewayError
-				? {
-						status: error.code,
-						phase: error.phase,
-						retryable: error.retryable,
-						request_id: error.requestId,
-						message: error.message,
-						...(error.httpStatus == null ? {} : { http_status: error.httpStatus }),
-					}
-				: {
-						status: "STATE_UNAVAILABLE",
-						phase: "READ",
-						retryable: true,
-						request_id: crypto.randomUUID().replaceAll("-", ""),
-						message: "state gateway operation failed",
-					};
+	const stateGatewayErrorResponse = (
+		error: unknown,
+		context: {
+			tool?: string;
+			phase?: StateGatewayPhase;
+			retryable?: boolean;
+		} = {},
+	) => {
+		const wasUnclassified = !(error instanceof StateGatewayError);
+		const normalized = normalizeStateGatewayError(error, {
+			phase: context.phase ?? "READ",
+			retryable: context.retryable ?? true,
+		});
+		if (wasUnclassified) {
+			const candidateName =
+				typeof error === "object" && error !== null && "name" in error
+					? String((error as { name?: unknown }).name ?? "")
+					: "";
+			const sourceErrorName = new Set([
+				"Error",
+				"TypeError",
+				"RangeError",
+				"DOMException",
+			]).has(candidateName)
+				? candidateName
+				: "Error";
+			console.warn(
+				JSON.stringify({
+					event: "state_gateway_unclassified_error",
+					timestamp: new Date().toISOString(),
+					tool: context.tool ?? "state_gateway",
+					phase: normalized.phase,
+					request_id: normalized.requestId,
+					source_error_name: sourceErrorName,
+				}),
+			);
+		}
+		const safe = {
+			status: normalized.code,
+			phase: normalized.phase,
+			retryable: normalized.retryable,
+			request_id: normalized.requestId,
+			message: normalized.message,
+			...(normalized.httpStatus == null ? {} : { http_status: normalized.httpStatus }),
+		};
 		return {
 			isError: true as const,
 			content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
@@ -1154,7 +1183,11 @@ export function createServer(
 					],
 				};
 			} catch (error) {
-				return stateGatewayErrorResponse(error);
+				return stateGatewayErrorResponse(error, {
+					tool: "validate_state_batch",
+					phase: "VALIDATE",
+					retryable: false,
+				});
 			}
 		},
 	);
