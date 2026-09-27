@@ -229,7 +229,7 @@ def compile_all(ref: str, loader: Loader, *, keys: list[str] | None = None, prov
                 raise BuildError(f"{key}: unresolved template in {path}")
             pieces.append(text.rstrip("\n"))
         prompt = "\n".join(metadata) + "\n\n" + "\n\n".join(pieces) + "\n"
-        for obsolete in ("get_state_snapshot", "get_market_checkpoints", "append_market_checkpoint", "get_automation_control_bundle", "raw.githubusercontent.com"):
+        for obsolete in ("get_market_checkpoints", "append_market_checkpoint", "get_automation_control_bundle", "raw.githubusercontent.com"):
             if obsolete in prompt:
                 raise BuildError(f"{key}: obsolete/runtime-loading reference: {obsolete}")
         if len(prompt) > entry["max_chars"]:

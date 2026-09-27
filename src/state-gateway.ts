@@ -629,6 +629,8 @@ export async function getGatewayStatus(input: {
 	token: string | null | undefined;
 	effectiveScopes: ReadonlySet<string>;
 	principalVerified: boolean;
+	stateReadAuthorized: boolean;
+	stateWriteAuthorized: boolean;
 	deployedGitSha?: string | null;
 	cloudflareVersionId?: string | null;
 	cloudflareVersionTimestamp?: string | null;
@@ -673,6 +675,8 @@ export async function getGatewayStatus(input: {
 		],
 		effective_scopes: [...input.effectiveScopes].sort(),
 		principal_verified: input.principalVerified,
+		state_read_authorized: input.stateReadAuthorized,
+		state_write_authorized: input.stateWriteAuthorized,
 		github_ledger_configured: Boolean(token),
 		...receiptSummary,
 		issue2_readable: issue2Readable,

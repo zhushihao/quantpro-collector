@@ -1,4 +1,3 @@
 ## 状态读写
-只用获准的{{STATE_CHANNEL}}。先read_state_snapshot(symbols=相关标的,include=["{{STATE_CHANNEL}}"],history_limit=10)，按最新有效事件/evidence keys/历史去重继承，跨持仓版本先核身份；MARKET另传trading_date及语义scheduled_slot。
-满足入账条件才validate_state_batch(channel="{{STATE_CHANNEL}}",batch=候选)，VALID后append_state_batch传同channel、完全相同batch。仅PERSISTED/IDEMPOTENT_REPLAY后查询get_state_write_receipt(channel="{{STATE_CHANNEL}}",write_key=稳定键)，核对状态/hash/comment id，再同参数read_state_snapshot回读内容一致才算落账。
-同键异内容、缺回执、FAILED/CONFLICT/OUTCOME_UNKNOWN或回读不一致不算成功，禁止覆盖/改键重投/换运输。重试原样重放；事实按内容去重，不按事件名。落账不等于通知。
+先 get_gateway_status；授权只看 state_read_authorized/state_write_authorized，effective_scopes仅诊断，缺裸state:*不算阻断。只用{{STATE_CHANNEL}}。读取优先read_state_snapshot；目录无该别名时用同义get_state_snapshot，symbol/date均由服务端校验；MARKET另传trading_date及语义scheduled_slot。
+写前快照去重；state_write_authorized=true才validate_state_batch→append_state_batch。仅PERSISTED/IDEMPOTENT_REPLAY后用get_state_write_receipt并回读一致才成功；FAILED/CONFLICT/OUTCOME_UNKNOWN/回读不一致即停，禁止覆盖/改键重投/换运输或修改/停用Automation。落账不等于通知。

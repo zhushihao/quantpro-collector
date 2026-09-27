@@ -168,7 +168,7 @@ class CompilerTests(unittest.TestCase):
         with self.assertRaisesRegex(b.BuildError, "complete prompt"):
             self.compile(data)
     def test_obsolete_api_is_not_silently_carried_forward(self):
-        for token in ("get_state_snapshot", "get_market_checkpoints", "append_market_checkpoint", "get_automation_control_bundle"):
+        for token in ("get_market_checkpoints", "append_market_checkpoint", "get_automation_control_bundle"):
             data = dict(self.data); data[b.OUTPUT] += token
             with self.subTest(token=token), self.assertRaises(b.BuildError):
                 self.compile(data)

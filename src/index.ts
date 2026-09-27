@@ -889,7 +889,7 @@ export function createServer(
 			content: [{ type: "text" as const, text: JSON.stringify(safe, null, 2) }],
 		};
 	};
-	const requireStateScope = (scope: string, tool: string) => {
+	const isStateScopeAuthorized = (scope: string) => {
 		const exact = permitsFormalResearchOperation({
 			principal: researchPrincipal,
 			issuer: researchIssuer,
@@ -910,7 +910,12 @@ export function createServer(
 				scopes: researchScopes,
 				requiredScope: compatibilityScope,
 			});
-		if (exact || compatible) {
+		return { authorized: exact || compatible, exact, compatible, compatibilityScope };
+	};
+
+	const requireStateScope = (scope: string, tool: string) => {
+		const { authorized, exact, compatible, compatibilityScope } = isStateScopeAuthorized(scope);
+		if (authorized) {
 			if (!exact && compatible) {
 				console.log(
 					JSON.stringify({
@@ -947,17 +952,11 @@ export function createServer(
 		"get_state_snapshot",
 		{
 			description:
-				"读取固定生产状态账本：MARKET 固定 Issue #2，INDUSTRY/COMPANY/CLOSE 固定 Issue #3。调用方不能指定外部目标。需要 state:read scope。",
+				"读取固定生产状态账本：MARKET 固定 Issue #2，INDUSTRY/COMPANY/CLOSE 固定 Issue #3。调用方不能指定外部目标。授权以 Collector 实际 state_read_authorized 判定为准；effective_scopes 仅用于诊断。",
 			inputSchema: z.object({
-				symbols: z
-					.array(z.string().regex(/^(?:CN:[0-9]{6}|HK:[0-9]{5})$/))
-					.min(1)
-					.max(512),
+				symbols: z.array(z.string().min(3).max(16)).min(1).max(512),
 				include: z.array(STATE_CHANNEL_SCHEMA).min(1).max(4),
-				trading_date: z
-					.string()
-					.regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/)
-					.optional(),
+				trading_date: z.string().min(10).max(10).optional(),
 				scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA.optional(),
 				history_limit: z.number().int().min(0).max(20).optional(),
 			}),
@@ -1002,7 +1001,7 @@ export function createServer(
 		"read_state_snapshot",
 		{
 			description:
-				"读取 QuantPro 固定生产状态账本的宿主兼容入口。MARKET 固定 Issue #2；INDUSTRY/COMPANY/CLOSE 固定 Issue #3。输入 schema 不使用正则约束，具体 symbol/date 格式由 Collector 服务端 fail-closed 校验；调用方不能指定外部目标。需要 state:read scope。",
+				"读取 QuantPro 固定生产状态账本的宿主兼容别名。MARKET 固定 Issue #2；INDUSTRY/COMPANY/CLOSE 固定 Issue #3。symbol/date 由 Collector 服务端 fail-closed 校验；授权以 Collector 实际 state_read_authorized 判定为准。",
 			inputSchema: z.object({
 				symbols: z.array(z.string().min(3).max(16)).min(1).max(512),
 				include: z.array(STATE_CHANNEL_SCHEMA).min(1).max(4),
@@ -1051,7 +1050,7 @@ export function createServer(
 		"validate_state_batch",
 		{
 			description:
-				"仅校验 State Gateway batch，不产生外部写入；返回 channel、write_key、schema version 与 canonical payload hash。需要 state:read scope。",
+				"仅校验 State Gateway batch，不产生外部写入；返回 channel、write_key、schema version 与 canonical payload hash。授权以 get_gateway_status.state_read_authorized 为准。",
 			inputSchema: z.object({ channel: STATE_CHANNEL_SCHEMA, batch: z.unknown() }),
 			annotations: {
 				readOnlyHint: true,
@@ -1093,7 +1092,7 @@ export function createServer(
 		"append_state_batch",
 		{
 			description:
-				"将 exact-schema 状态批次 append-only 持久化到固定 QuantPro 账本。调用方只能选择 MARKET/INDUSTRY/COMPANY/CLOSE，不能选择 repo、issue、URL、credential、producer 或 dimension。服务端执行权限、幂等、关系校验、持久化回执与写后回读。需要 state:write scope。",
+				"将 exact-schema 状态批次 append-only 持久化到固定 QuantPro 账本。调用方只能选择 MARKET/INDUSTRY/COMPANY/CLOSE，不能选择 repo、issue、URL、credential、producer 或 dimension。服务端执行权限、幂等、关系校验、持久化回执与写后回读。授权以 get_gateway_status.state_write_authorized 为准。",
 			inputSchema: z.object({ channel: STATE_CHANNEL_SCHEMA, batch: z.unknown() }),
 			annotations: {
 				readOnlyHint: false,
@@ -1134,7 +1133,7 @@ export function createServer(
 		"get_state_write_receipt",
 		{
 			description:
-				"读取 State Gateway D1 持久化回执。只接受 channel + write_key，不返回 credential。需要 state:read scope。",
+				"读取 State Gateway D1 持久化回执。只接受 channel + write_key，不返回 credential。授权以 get_gateway_status.state_read_authorized 为准。",
 			inputSchema: z.object({
 				channel: STATE_CHANNEL_SCHEMA,
 				write_key: z.string().min(1).max(512),
@@ -1208,6 +1207,8 @@ export function createServer(
 					token: env?.GITHUB_TOKEN,
 					effectiveScopes: researchScopes,
 					principalVerified: Boolean(researchPrincipal && researchIssuer),
+					stateReadAuthorized: isStateScopeAuthorized(STATE_READ_SCOPE).authorized,
+					stateWriteAuthorized: isStateScopeAuthorized(STATE_WRITE_SCOPE).authorized,
 					deployedGitSha:
 						env?.DEPLOYED_GIT_SHA?.trim() || env?.CF_VERSION_METADATA?.tag || null,
 					cloudflareVersionId: env?.CF_VERSION_METADATA?.id ?? null,

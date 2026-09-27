@@ -59,6 +59,12 @@ test("legacy production OAuth scopes remain compatible only for verified chatgpt
 		assert.equal(validate.isError, undefined);
 		assert.match(validate.content[0].text, /"status": "VALID"/);
 
+		const gatewayStatus = await client.callTool({ name: "get_gateway_status", arguments: {} });
+		assert.equal(gatewayStatus.isError, undefined);
+		const gatewayStatusBody = JSON.parse(gatewayStatus.content[0].text);
+		assert.equal(gatewayStatusBody.state_read_authorized, true);
+		assert.equal(gatewayStatusBody.state_write_authorized, true);
+
 		const append = await client.callTool({
 			name: "append_state_batch",
 			arguments: {
@@ -102,6 +108,12 @@ test("legacy scope compatibility never grants state write to market-read-only ca
 		});
 		assert.equal(append.isError, true);
 		assert.match(append.content[0].text, /STATE_FORBIDDEN/);
+
+		const gatewayStatus = await client.callTool({ name: "get_gateway_status", arguments: {} });
+		assert.equal(gatewayStatus.isError, undefined);
+		const gatewayStatusBody = JSON.parse(gatewayStatus.content[0].text);
+		assert.equal(gatewayStatusBody.state_read_authorized, true);
+		assert.equal(gatewayStatusBody.state_write_authorized, false);
 	} finally {
 		await client.close();
 		await server.server.close();
@@ -157,13 +169,11 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			"batch",
 			"channel",
 		]);
-		const snapshotSchema = JSON.stringify(tools.get_state_snapshot.inputSchema);
-		assert.match(snapshotSchema, /CN:\[0-9\]\{6\}/);
-		assert.match(snapshotSchema, /HK:\[0-9\]\{5\}/);
-		assert.doesNotMatch(snapshotSchema, /\\\\d/);
-		const compatibleSnapshot = tools.read_state_snapshot.inputSchema;
-		assert.equal(compatibleSnapshot.properties.symbols.items.pattern, undefined);
-		assert.equal(compatibleSnapshot.properties.trading_date.pattern, undefined);
+		for (const name of ["get_state_snapshot", "read_state_snapshot"]) {
+			const snapshot = tools[name].inputSchema;
+			assert.equal(snapshot.properties.symbols.items.pattern, undefined);
+			assert.equal(snapshot.properties.trading_date.pattern, undefined);
+		}
 		assert.equal(tools.append_state_batch.annotations.readOnlyHint, false);
 		assert.equal(tools.append_state_batch.annotations.destructiveHint, false);
 		assert.equal(tools.append_state_batch.annotations.idempotentHint, true);
