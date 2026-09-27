@@ -51,7 +51,7 @@ function parseCommand<T>(schema: z.ZodType<T>, value: unknown, label: string): T
 }
 
 const COMMON_EVENT_SHAPE = {
-	symbol: z.string().regex(/^(?:CN:\\d{6}|HK:\\d{5})$/),
+	symbol: z.string().regex(/^(?:CN:\d{6}|HK:\d{5})$/),
 	event_type: EVENT_TYPE_SCHEMA,
 	evidence_types: z.array(EVIDENCE_TYPE_SCHEMA).max(6),
 	evidence_keys: z.array(z.string().min(1).max(512)).max(100),
@@ -112,7 +112,7 @@ export const APPEND_CLOSE_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
 
 export const APPEND_MARKET_OBSERVATION_INPUT_SCHEMA = z
 	.object({
-		trading_date: z.string().regex(/^\\d{4}-\\d{2}-\\d{2}$/),
+		trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 		as_of: AS_OF_SCHEMA,
 		scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
 		production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
