@@ -1690,12 +1690,20 @@ export function createServer(
 					};
 				}
 				if (event.run_id.startsWith("run_") && event.phase === "FINAL") {
+					if (event.status === "STARTED") {
+						throw new AutomationRunLedgerError(
+							"AUTOMATION_RUN_VALIDATION_FAILED",
+							"FINAL phase requires a terminal status",
+							{ retryable: false },
+						);
+					}
+					const outcome = event.status;
 					const reason = event.blocker_code ?? event.safe_summary ?? null;
 					const result = await endAutomationRun({
 						db: env.RESEARCH_REPLICA,
 						end: {
 							run_id: event.run_id,
-							outcome: event.status,
+							outcome,
 							fresh_delta_count: event.fresh_delta_count ?? 0,
 							notification_intended: Boolean(event.notification_sent),
 							reason,
