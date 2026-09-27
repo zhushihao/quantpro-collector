@@ -27,7 +27,7 @@ import {
 	type StateWriteReceipt,
 } from "./state-receipts.ts";
 
-export const STATE_GATEWAY_VERSION = "1.0.0";
+export const STATE_GATEWAY_VERSION = "1.1.0";
 export const STATE_GATEWAY_CONTRACT_VERSION = "state-gateway-v1";
 export const STATE_CHANNEL_SCHEMA = z.enum(STATE_WRITE_CHANNELS);
 
@@ -496,6 +496,10 @@ export async function appendStateBatch(input: {
 	fetchImpl?: typeof fetch;
 	now?: string;
 	requestId?: string;
+	/** Internal owner-scoped commands may supply a stable command identity. */
+	writeKey?: string;
+	/** Hash of the normalized caller-owned business command; excludes server metadata. */
+	payloadSha256?: string;
 }): Promise<{
 	status: "PERSISTED" | "IDEMPOTENT_REPLAY";
 	persisted: true;
@@ -522,11 +526,13 @@ export async function appendStateBatch(input: {
 		throw mapDomainError(error, requestId);
 	}
 
+	const writeKey = input.writeKey ?? validated.write_key;
+	const payloadSha256 = input.payloadSha256 ?? validated.payload_sha256;
 	const reservation = await reserveStateWrite({
 		db: input.db,
-		writeKey: validated.write_key,
+		writeKey,
 		channel: input.channel,
-		payloadSha256: validated.payload_sha256,
+		payloadSha256,
 		requestId,
 		now,
 	});
@@ -547,8 +553,8 @@ export async function appendStateBatch(input: {
 				status: "IDEMPOTENT_REPLAY",
 				persisted: true,
 				channel: input.channel,
-				write_key: validated.write_key,
-				payload_sha256: validated.payload_sha256,
+				write_key: writeKey,
+				payload_sha256: payloadSha256,
 				comment_id: reservation.receipt.comment_id ?? "",
 				url: reservation.receipt.comment_url ?? "",
 				receipt: reservation.receipt,
@@ -581,7 +587,7 @@ export async function appendStateBatch(input: {
 					});
 		const receipt = await finalizeStateWriteReceipt({
 			db: input.db,
-			writeKey: validated.write_key,
+			writeKey,
 			requestId,
 			status: result.status,
 			updatedAt: new Date().toISOString(),
@@ -592,8 +598,8 @@ export async function appendStateBatch(input: {
 			status: result.status,
 			persisted: true,
 			channel: input.channel,
-			write_key: validated.write_key,
-			payload_sha256: validated.payload_sha256,
+			write_key: writeKey,
+			payload_sha256: payloadSha256,
 			comment_id: result.comment_id,
 			url: result.url,
 			receipt,
@@ -602,7 +608,7 @@ export async function appendStateBatch(input: {
 		const mapped = mapDomainError(error, requestId);
 		await finalizeStateWriteReceipt({
 			db: input.db,
-			writeKey: validated.write_key,
+			writeKey,
 			requestId,
 			status:
 				mapped.code === "STATE_CONFLICT"
@@ -682,8 +688,14 @@ export async function getGatewayStatus(input: {
 			"read_state_snapshot_v2",
 			"validate_state_batch",
 			"append_state_batch",
+			"append_company_events",
+			"append_industry_events",
+			"append_close_events",
+			"append_market_observation",
 			"get_state_write_receipt",
 			"get_gateway_status",
+			"begin_run",
+			"end_run",
 			"record_automation_run",
 			"get_automation_run_history",
 			"get_market_checkpoints",
