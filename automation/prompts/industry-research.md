@@ -7,7 +7,7 @@ WRITE_SCOPE=RESEARCH_JOB_AND_INDUSTRY_LEDGER
 
 ## 每轮执行与发现
 实际调用 get_control_plane_status、get_portfolio_quotes、get_source_health、get_coverage_status、list_research_jobs(claimable_only=true)。组合关联只用本轮live_universe相关ACTIVE，MAPPING_ONLY不算持仓；需行情时核验authenticated=true、market:read、live_overlay_status=ENABLED、universe_fresh=true、portfolio_state=LIVE_COMPLETE。
-候选固定回看最近6小时并取并集：①每轮必须联网主动搜索职责内重点产业、Job问题及live_universe相关主题；②coverage中NEW_CONTENT的公开URL；③PUBLIC documents/evidence/accumulator。三路相互独立：coverage URL即使documents尚未同步也直接联网核验；search_documents=[]绝不能单独证明无新增。QQ_PRIVATE_FEED原文保持RESEARCH私域，只有其公开链接可经coverage/documents进入候选。
+候选固定回看最近6小时并取并集：①每轮必须联网主动搜索职责内重点产业、Job问题及live_universe相关主题；②coverage中NEW_CONTENT的公开URL；③PUBLIC documents/evidence/accumulator；④riws-leads源的主题线索（kind=lead）。三路相互独立：coverage URL即使documents尚未同步也直接联网核验；search_documents=[]绝不能单独证明无新增。QQ_PRIVATE_FEED等私域原文保持RESEARCH私域，只有其公开链接与riws-leads主题线索可经coverage/documents进入候选。每条lead先按其terms检索documents与accumulator历史：判为已有话题的补充时引用历史口径对比后输出，判为新话题才按全新候选处理；lead只是发现入口，正式Fresh-Delta仍须Web/官方源核验。
 只有主动联网发现成功，且可用Collector候选已核验并完成历史去重，才允许SILENT。若联网发现整体失败且Collector为空/明显滞后，FINAL=BLOCKED、blocker_code=DISCOVERY_INCOMPLETE；单个非关键源失败只警告。FINAL的safe_summary只写 candidates=N | verified=N | fresh=N | web=OK/FAILED | coverage=OK/... | documents=OK/LAGGING，不放原文或持仓。
 
 ## Research Job 优先

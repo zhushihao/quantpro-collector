@@ -244,7 +244,10 @@ class CompilerTests(unittest.TestCase):
             self.assertIn("get_state_write_receipt", p[key])
             self.assertIn("不得改键重投", p[key])
             self.assertIn("不构造旧完整账本信封", p[key])
-            self.assertNotIn("validate_state_batch", p[key])
+            # #37 owner-scoped内核后，文本含否定性提及（"不要先调validate_state_batch"）——
+            # 断言只禁止肯定性调用指示，不再禁止一切出现。
+            self.assertIn("不要先调validate_state_batch", p[key])
+            self.assertNotIn("先调用validate_state_batch", p[key])
             self.assertNotIn("append_company_events", p[key])
             self.assertNotIn("append_industry_events", p[key])
             self.assertNotIn("append_market_observation", p[key])
