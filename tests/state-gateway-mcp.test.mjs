@@ -148,6 +148,12 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 		const listed = await client.listTools();
 		const names = [
 			"append_state_batch",
+			"append_company_events",
+			"append_industry_events",
+			"append_close_events",
+			"append_market_observation",
+			"begin_run",
+			"end_run",
 			"get_gateway_status",
 			"get_automation_run_history",
 			"get_state_snapshot",
@@ -190,6 +196,46 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			assert.equal(snapshot.properties.symbols.items.pattern, undefined);
 			assert.equal(snapshot.properties.trading_date.pattern, undefined);
 		}
+		for (const name of [
+			"append_company_events",
+			"append_industry_events",
+			"append_close_events",
+			"append_market_observation",
+		]) {
+			assert.equal(tools[name].annotations.readOnlyHint, false);
+			assert.equal(tools[name].annotations.destructiveHint, false);
+			assert.equal(tools[name].annotations.idempotentHint, true);
+			const schema = tools[name].inputSchema;
+			assert.notEqual(schema.additionalProperties, false, `${name} must tolerate extra top-level fields`);
+			if (schema.properties.events?.items) {
+				assert.notEqual(
+					schema.properties.events.items.additionalProperties,
+					false,
+					`${name} event items must tolerate other-owner fields`,
+				);
+			}
+			const serialized = JSON.stringify(schema);
+			for (const serverOwned of [
+				"schema_version",
+				"event_id",
+				"write_key",
+				"producer",
+				"dimension",
+				"source_task",
+				"portfolio_version",
+				"live_universe_hash",
+			]) {
+				if (name === "append_market_observation" && serverOwned === "live_universe_hash") {
+					assert.equal(serialized.includes(`"${serverOwned}"`), false);
+				} else {
+					assert.equal(serialized.includes(`"${serverOwned}"`), false);
+				}
+			}
+		}
+		assert.equal(tools.begin_run.annotations.readOnlyHint, false);
+		assert.equal(tools.begin_run.annotations.idempotentHint, true);
+		assert.equal(tools.end_run.annotations.readOnlyHint, false);
+		assert.equal(tools.end_run.annotations.idempotentHint, true);
 		assert.equal(tools.record_automation_run.annotations.readOnlyHint, false);
 		assert.equal(tools.record_automation_run.annotations.idempotentHint, true);
 		assert.equal(tools.get_automation_run_history.annotations.readOnlyHint, true);
