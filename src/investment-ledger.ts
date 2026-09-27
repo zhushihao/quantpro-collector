@@ -217,8 +217,16 @@ export function validateRoleSemantics(
 			"as_of is not a valid ISO date-time",
 		);
 	}
-	const eventIdPattern = new RegExp(`^\\d{8}T\\d{6}\\+08\\|${config.producer}\\|BATCH$`);
-	if (!eventIdPattern.test(batch.event_id)) {
+	const legacyEventIdPattern = new RegExp(
+		`^\\d{8}T\\d{6}\\+08\\|${config.producer}\\|BATCH$`,
+	);
+	const commandEventIdPattern = new RegExp(
+		`^CMD:[0-9a-f]{64}\\|${config.producer}\\|BATCH$`,
+	);
+	if (
+		!legacyEventIdPattern.test(batch.event_id) &&
+		!commandEventIdPattern.test(batch.event_id)
+	) {
 		throw new InvestmentLedgerError(
 			"INVESTMENT_LEDGER_VALIDATION_FAILED",
 			"event_id does not match the fixed producer contract",
