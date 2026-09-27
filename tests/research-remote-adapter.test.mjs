@@ -994,3 +994,69 @@ test("B15 context exposes proposals but never the claim token", async () => {
 	assert.equal(JSON.stringify(context).includes(leaseRow.claim_token), false);
 	assert.equal(JSON.stringify(context).includes("clt_"), false);
 });
+
+test("Task D: the exported servable predicate is the single definition the list face uses", async () => {
+	const servable = documentVersionRow({
+		documentId: "doc-exported-servable",
+		versionId: "ver-exported-servable",
+		ownContent: encoder.encode("synthetic own bytes"),
+	});
+	const projectionOnly = documentVersionRow({
+		documentId: "doc-exported-projection",
+		versionId: "ver-exported-projection",
+		projectionText: "projection body",
+	});
+	const blocked = documentVersionRow({
+		documentId: "doc-exported-blocked",
+		versionId: "ver-exported-blocked",
+		storedReadable: false,
+	});
+	const adapter = new remote.CollectorResearchRemoteAdapter(
+		storageFrom(servable, projectionOnly, blocked),
+		{ visibility: "PUBLIC" },
+	);
+	const views = await adapter.searchDocuments(undefined, 50);
+	for (const view of views) {
+		const documentId = view.payload.document.document_id;
+		const row = [servable, projectionOnly, blocked].find(
+			(candidate) => candidate.payload.document.document_id === documentId,
+		);
+		assert.equal(
+			view.payload.version.readable,
+			remote.isVersionServable(row.payload),
+			`${documentId} readable must equal the exported servable predicate`,
+		);
+		assert.equal(remote.servableBody(row.payload) !== null, remote.isVersionServable(row.payload));
+	}
+	// A WITHDRAWAL version is never servable, whatever its attachments.
+	const withdrawn = documentVersionRow({
+		documentId: "doc-exported-withdrawal",
+		versionId: "ver-exported-withdrawal",
+		revisionKind: "WITHDRAWAL",
+		ownContent: encoder.encode("synthetic own bytes"),
+	});
+	assert.equal(remote.isVersionServable(withdrawn.payload), false);
+	assert.equal(remote.servableBody(withdrawn.payload), null);
+});
+
+test("Task D: semantic search is refused on the PRIVATE read face before any binding is used", async () => {
+	const part = documentVersionRow({
+		documentId: "doc-semantic-private",
+		versionId: "ver-semantic-private",
+		ownContent: encoder.encode("synthetic own bytes"),
+	});
+	const adapter = new remote.CollectorResearchRemoteAdapter(storageFrom(part), {
+		visibility: "PRIVATE",
+	});
+	await assert.rejects(
+		() =>
+			adapter.searchDocumentsSemantic("synthetic", {
+				limit: 5,
+				deps: {
+					ai: { run: async () => { throw new Error("must not be called"); } },
+					index: { query: async () => ({ matches: [], count: 0 }) },
+				},
+			}),
+		(error) => error?.error_code === "UNSUPPORTED_OPERATION",
+	);
+});

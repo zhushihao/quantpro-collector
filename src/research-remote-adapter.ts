@@ -40,6 +40,11 @@
 import type { ResearchReplicaStorage } from "./research-replica.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import { classifyResearchReadBackendError } from "./research-read-retry.ts";
+import {
+	searchPublicDocumentsSemantic,
+	type SemanticIndexDeps,
+	type SemanticSearchResult,
+} from "./research-semantic-index.ts";
 
 export type ResearchReadVisibility = "PUBLIC" | "PRIVATE";
 
@@ -138,7 +143,14 @@ function isHexSha256(value: unknown): value is string {
  */
 type ServableBody = { bodySource: "own" | "projection"; contentSha256: string };
 
-function servableBody(payload: Record<string, unknown>): ServableBody | null {
+/**
+ * Exported for the Collector PUBLIC semantic index (task D), which must apply
+ * exactly this servability rule when it decides whether a version can be
+ * indexed and when it re-validates a vector candidate.  Keeping one predicate
+ * means `readable=true`, `get_document` and the semantic hit filter can never
+ * disagree.
+ */
+export function servableBody(payload: Record<string, unknown>): ServableBody | null {
 	const version = payload.version as Record<string, unknown> | undefined;
 	if (!version || typeof version !== "object" || version.revision_kind === "WITHDRAWAL") {
 		return null;
@@ -167,9 +179,10 @@ function servableBody(payload: Record<string, unknown>): ServableBody | null {
 /**
  * Shared servable predicate behind both the list face and the detail face:
  * readable = servable (SPEC-C8 §3.2).  Purely derived from the already parsed
- * payload; it never mutates the stored record.
+ * payload; it never mutates the stored record.  Exported for the semantic
+ * index (task D) so both faces share one definition.
  */
-function isVersionServable(payload: Record<string, unknown>): boolean {
+export function isVersionServable(payload: Record<string, unknown>): boolean {
 	return servableBody(payload) !== null;
 }
 
@@ -290,6 +303,25 @@ export class CollectorResearchRemoteAdapter {
 				}
 				return view;
 			});
+	}
+
+	/**
+	 * Task D: semantic search over the Collector PUBLIC vector index.  The
+	 * PUBLIC visibility of this adapter is the only visibility the index
+	 * serves; a PRIVATE adapter instance refuses instead of degrading.
+	 */
+	async searchDocumentsSemantic(
+		query: string,
+		options: { limit?: number; deps: SemanticIndexDeps },
+	): Promise<SemanticSearchResult> {
+		if (this.visibility !== "PUBLIC") fail("UNSUPPORTED_OPERATION");
+		return this.guarded(async () =>
+			searchPublicDocumentsSemantic(
+				this.storage,
+				options.deps,
+				{ query, limit: options.limit },
+			),
+		);
 	}
 
 	async getDocument(documentId: string): Promise<Record<string, unknown>> {

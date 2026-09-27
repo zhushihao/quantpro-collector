@@ -33,6 +33,18 @@
 			"bucket_name": "quantpro-collector-research-replica",
 		},
 	],
+	// Task D: PUBLIC semantic index.  Workers AI `@cf/baai/bge-m3` (1024 dims)
+	// feeds one Vectorize index created as 1024-dim cosine; the index metric is
+	// fixed at creation time and verified by the deployment probe / G3.
+	"ai": {
+		"binding": "AI",
+	},
+	"vectorize": [
+		{
+			"binding": "RESEARCH_PUBLIC_INDEX",
+			"index_name": "research-public-bge-m3-v1",
+		},
+	],
 	"triggers": {
 		// Cloudflare cron weekdays use 1=Sunday; names make the intended weekdays explicit.
 		"crons": [

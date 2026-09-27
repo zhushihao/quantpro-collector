@@ -238,13 +238,45 @@ test("C5 stores path-free metadata, document links, and an immutable recovery jo
 	assert.equal(store.db.batches.length, 1);
 	assert.equal(
 		store.db.batches[0].length,
-		4,
-		"message + current record + body + attachment links",
+		6,
+		"message + current record + body + attachment links + task D semantic pending row + supersede",
 	);
 	assert.equal(store.objects.objects.size, 1, "only the journal is written for metadata");
 	assert.ok(
 		[...store.objects.objects.keys()][0].startsWith("research-replica-journal/v2/outbound_"),
 	);
+	// Task D: the PUBLIC index-pending registration rides in the same
+	// transaction, so no crash window exists between "stored" and "planned".
+	assert.deepEqual(result.semantic_target, {
+		documentId: document.payload.document.document_id,
+		versionId: document.payload.version.version_id,
+	});
+	const semanticStatements = store.db.batches[0].filter((statement) =>
+		statement.sql.includes("research_semantic_index_state"),
+	);
+	assert.equal(semanticStatements.length, 2);
+	assert.match(semanticStatements[0].sql, /INSERT INTO research_semantic_index_state/);
+	assert.equal(semanticStatements[0].params[2], document.payload.version.content_sha256);
+	assert.equal(
+		semanticStatements[1].sql.includes("version_id<>?"),
+		true,
+		"a servable incoming version supersedes the document's other versions",
+	);
+});
+
+test("C5 registers no semantic state for PRIVATE or non-document records", async () => {
+	const store = storage();
+	for (const name of ["metadata_document_version.private.json", "metadata_evidence.json", "metadata_source.public.json"]) {
+		const record = (await fixture(name))[0];
+		const result = await replica.ingestResearchReplicaRecord(store, record, null, "2026-09-13T14:00:00Z");
+		assert.equal(result.semantic_target, null, name);
+	}
+	for (const batch of store.db.batches) {
+		assert.equal(
+			batch.some((statement) => statement.sql.includes("research_semantic_index_state")),
+			false,
+		);
+	}
 });
 
 test("C5 v4 Evidence wins over a delayed legacy envelope with the same logical key", async () => {

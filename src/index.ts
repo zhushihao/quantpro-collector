@@ -62,6 +62,15 @@ import {
 } from "./research-workflow.ts";
 import { ingestResearchReplicaRecord, type ResearchReplicaStorage } from "./research-replica.ts";
 import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
+import {
+	indexSemanticDocument,
+	probeSemanticIndex,
+	readSemanticIndexCoverage,
+	runSemanticIndexBatch,
+	SEMANTIC_QUERY_MAX_LIMIT,
+	SEMANTIC_QUERY_MAX_QUERY_CHARS,
+	type SemanticIndexDeps,
+} from "./research-semantic-index.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import { ResearchReadBackendError, withResearchReadRetry } from "./research-read-retry.ts";
 import {
@@ -134,6 +143,14 @@ interface Env {
 	COLLECTOR_FORWARDABLE_PRINCIPALS?: string;
 	RESEARCH_REPLICA?: D1Database;
 	RESEARCH_OBJECTS?: R2Bucket;
+	/**
+	 * Task D bindings: Workers AI (`@cf/baai/bge-m3`) and the single PUBLIC
+	 * Vectorize index `research-public-bge-m3-v1`.  Absent bindings disable the
+	 * semantic surface with an explicit STORE_UNAVAILABLE; the lexical
+	 * search_documents / get_document read face is unaffected.
+	 */
+	AI?: Ai;
+	RESEARCH_PUBLIC_INDEX?: Vectorize;
 	/** RESEARCH 私有 transport credential；ingest 与 receipts 共用，不与 market/research OAuth scopes 混用。 */
 	RESEARCH_REPLICA_INGEST_TOKEN?: string;
 	/** 非敏感部署标识；由发布命令注入，用于生产版本核验。 */
@@ -2067,6 +2084,32 @@ export function createServer(
 		},
 		async ({ document_id }) => researchRead("get_document", () => researchAdapter().getDocument(document_id)),
 	);
+	// Task D: the only semantic surface.  PUBLIC replica metadata only; a hit is
+	// re-validated against D1/R2 before it is returned, so a stale or private
+	// vector can never be served.  No visibility/source_id input exists here.
+	server.registerTool(
+		"search_documents_semantic",
+		{
+			description:
+				"语义检索 Collector PUBLIC 文档（Workers AI bge-m3 向量索引）。返回 {matches, index_status}：matches 为文档级命中（document_id、version_id、title、score、snippet、source_kind、published_at），index_status 为 READY 或 PARTIAL（索引尚未完全构建）。索引不可用时报安全错误而非空结果；命中仅来自 PUBLIC 当前可读版本，正文请再调用 get_document。",
+			inputSchema: z.object({
+				query: z
+					.string()
+					.trim()
+					.min(1)
+					.max(SEMANTIC_QUERY_MAX_QUERY_CHARS)
+					.describe("自然语言查询，trim 后 1–500 字符"),
+				limit: z.number().int().min(1).max(SEMANTIC_QUERY_MAX_LIMIT).optional(),
+			}),
+		},
+		async ({ query, limit }) =>
+			researchRead("search_documents_semantic", () =>
+				researchAdapter().searchDocumentsSemantic(query, {
+					limit,
+					deps: semanticIndexDeps(env),
+				}),
+			),
+	);
 	server.registerTool(
 		"search_evidence",
 		{
@@ -2314,6 +2357,47 @@ function researchBoundaryResponse(error: unknown, status = 400): Response {
 	return jsonResponse(safe, status);
 }
 
+/**
+ * Task D bindings or an explicit configuration failure.  A missing binding is
+ * reported as a non-retryable STORE_UNAVAILABLE: the semantic tool must never
+ * look like "no matches" when the index is simply not deployed.
+ */
+function semanticIndexDeps(env: Env | undefined): SemanticIndexDeps {
+	if (!env?.AI || !env.RESEARCH_PUBLIC_INDEX) {
+		throw new ResearchBoundaryError("STORE_UNAVAILABLE", undefined, {
+			retryable: false,
+			safeMessage:
+				"semantic index bindings are unavailable; the lexical search surface remains available",
+		});
+	}
+	return { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
+}
+
+/** Background work must never change the ingest receipt. */
+function scheduleBackground(
+	ctx: ExecutionContext | undefined,
+	label: string,
+	operation: () => Promise<unknown>,
+): void {
+	if (typeof ctx?.waitUntil !== "function") return;
+	ctx.waitUntil(
+		(async () => {
+			try {
+				await operation();
+			} catch (error) {
+				console.warn(
+					JSON.stringify({
+						event: "research_semantic_index_background_failure",
+						timestamp: new Date().toISOString(),
+						stage: label,
+						error_code: error instanceof ResearchBoundaryError ? error.error_code : "UNKNOWN",
+					}),
+				);
+			}
+		})(),
+	);
+}
+
 function decodeBase64Chunks(value: unknown): Uint8Array[] {
 	if (!Array.isArray(value)) throw new ResearchBoundaryError("INTEGRITY_FAILED");
 	try {
@@ -2335,7 +2419,11 @@ function decodeBase64Chunks(value: unknown): Uint8Array[] {
  * deliberately unrelated to LIVE/market scopes and remains fail-closed until
  * configured.
  */
-async function handleResearchReplicaIngest(request: Request, env: Env): Promise<Response> {
+async function handleResearchReplicaIngest(
+	request: Request,
+	env: Env,
+	ctx?: ExecutionContext,
+): Promise<Response> {
 	if (request.method !== "POST") {
 		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
 	}
@@ -2382,9 +2470,116 @@ async function handleResearchReplicaIngest(request: Request, env: Env): Promise<
 			transport.object_chunks_base64 === undefined
 				? null
 				: decodeBase64Chunks(transport.object_chunks_base64);
-		return jsonResponse(
-			await ingestResearchReplicaRecord(storage, transport.record, objectChunks),
+		const result = await ingestResearchReplicaRecord(storage, transport.record, objectChunks);
+		// Task D: the pending row was registered inside the ingest transaction,
+		// so this hook is only the fast path - the bounded sweep converges
+		// whatever the background task cannot finish.  The receipt below is
+		// unchanged: embedding never blocks it.
+		if (result.semantic_target && env.AI && env.RESEARCH_PUBLIC_INDEX) {
+			const deps: SemanticIndexDeps = { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
+			const target = result.semantic_target;
+			scheduleBackground(ctx, "ingest_semantic_index", () =>
+				indexSemanticDocument(storage, deps, {
+					documentId: target.documentId,
+					versionId: target.versionId,
+				}),
+			);
+		}
+		// Envelope pinned explicitly: the additive in-process fields
+		// (semantic_target) never widen the frozen four-key transport response.
+		return jsonResponse({
+			status: result.status,
+			message_id: result.message_id,
+			record_type: result.record_type,
+			content_sha256: result.content_sha256,
+		});
+	} catch (error) {
+		return researchBoundaryResponse(
+			error,
+			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
 		);
+	}
+}
+
+/**
+ * Task D operations transport (internal, NOT an MCP tool): one bounded
+ * indexing run and read-only coverage counters.  Same fail-closed credential
+ * as the ingest/receipts transport; no PRIVATE capability is introduced and no
+ * document ids leave this face.
+ */
+async function handleSemanticIndexRun(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "POST") {
+		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
+	}
+	const storage = researchReplicaStorage(env);
+	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
+		return researchBoundaryResponse(new ResearchBoundaryError("STORE_UNAVAILABLE"), 503);
+	}
+	if (!researchReplicaAuthorized(request, env)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	let body: unknown = {};
+	try {
+		const raw = await request.text();
+		body = raw ? JSON.parse(raw) : {};
+	} catch {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	const options = body as Record<string, unknown>;
+	if (Object.keys(options).some((key) => key !== "max_docs" && key !== "max_register")) {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	try {
+		const report = await runSemanticIndexBatch(storage, semanticIndexDeps(env), {
+			maxDocs: options.max_docs as number | undefined,
+			maxRegister: options.max_register as number | undefined,
+		});
+		return jsonResponse(report);
+	} catch (error) {
+		return researchBoundaryResponse(
+			error,
+			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
+		);
+	}
+}
+
+async function handleSemanticIndexStatus(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "GET") {
+		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
+	}
+	const storage = researchReplicaStorage(env);
+	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
+		return researchBoundaryResponse(new ResearchBoundaryError("STORE_UNAVAILABLE"), 503);
+	}
+	if (!researchReplicaAuthorized(request, env)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	try {
+		return jsonResponse(await readSemanticIndexCoverage(storage));
+	} catch (error) {
+		return researchBoundaryResponse(
+			error,
+			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
+		);
+	}
+}
+
+/** Deployment probe (G3): real embedding dimensions plus index metadata. */
+async function handleSemanticIndexProbe(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "POST") {
+		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
+	}
+	if (!env.RESEARCH_REPLICA_INGEST_TOKEN) {
+		return researchBoundaryResponse(new ResearchBoundaryError("STORE_UNAVAILABLE"), 503);
+	}
+	if (!researchReplicaAuthorized(request, env)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	try {
+		return jsonResponse(await probeSemanticIndex(semanticIndexDeps(env)));
 	} catch (error) {
 		return researchBoundaryResponse(
 			error,
@@ -2794,10 +2989,21 @@ export default {
 			return handleGithubAuthPortfolioStatus(request, env);
 		}
 		if (url.pathname === "/internal/research-replica/v2/ingest") {
-			return handleResearchReplicaIngest(request, env);
+			return handleResearchReplicaIngest(request, env, ctx);
 		}
 		if (url.pathname === "/internal/research-replica/v2/receipts") {
 			return handleResearchReplicaReceipts(request, env);
+		}
+		// Task D 运维通道（内部凭据门控，非 MCP 工具）：批次索引、覆盖率只读查询、
+		// 部署探针。语义检索本身只经 MCP `search_documents_semantic`。
+		if (url.pathname === "/internal/research-semantic-index/run") {
+			return handleSemanticIndexRun(request, env);
+		}
+		if (url.pathname === "/internal/research-semantic-index/status") {
+			return handleSemanticIndexStatus(request, env);
+		}
+		if (url.pathname === "/internal/research-semantic-index/probe") {
+			return handleSemanticIndexProbe(request, env);
 		}
 		if (url.pathname === "/api/control-plane-status" && request.method === "GET") {
 			return handleControlPlaneStatus(env);

@@ -10,6 +10,11 @@ import {
 	verifyOutboundV2Record,
 	type OutboundV2Record,
 } from "./research-outbound-v2.ts";
+import {
+	semanticIndexIngestStatements,
+	semanticIndexIngestTarget,
+	type SemanticIndexTarget,
+} from "./research-semantic-index.ts";
 
 export type ResearchReplicaStorage = {
 	db: D1Database;
@@ -21,6 +26,12 @@ export type ReplicaIngestResult = {
 	message_id: string;
 	record_type: string;
 	content_sha256: string | null;
+	/**
+	 * Task D: the PUBLIC document_version that now has an index-pending row.
+	 * In-process only - the internal HTTP envelope stays the frozen four-key
+	 * shape, and embedding never blocks the ingest receipt.
+	 */
+	semantic_target: SemanticIndexTarget | null;
 };
 
 // Keep the Collector below the published R2 Standard free tier while using it
@@ -207,6 +218,9 @@ export async function ingestResearchReplicaRecord(
 				message_id: record.message_id,
 				record_type: record.record_type,
 				content_sha256: contentSha256,
+				// A replay writes nothing: convergence for pre-migration rows is
+				// the compensation sweep's job, never a second logical write here.
+				semantic_target: null,
 			};
 		}
 		await reserveR2Quota(
@@ -283,6 +297,13 @@ export async function ingestResearchReplicaRecord(
 					.bind(record.record_type, key, role, linkedHash, record.visibility),
 			);
 		}
+		// Task D: PUBLIC document versions register their semantic-index pending
+		// row in this same transaction (no crash window between "stored" and
+		// "index pending"), and a servable incoming version invalidates the
+		// document's other versions so superseded vector ids stop being
+		// eligible before any asynchronous delete.  Embedding itself is never
+		// part of the ingest receipt.
+		statements.push(...semanticIndexIngestStatements(storage.db, record, now));
 		const results = await storage.db.batch(statements);
 		const inserted = Number(results[0]?.meta.changes ?? 0) === 1;
 		await storage.db
@@ -296,6 +317,7 @@ export async function ingestResearchReplicaRecord(
 			message_id: record.message_id,
 			record_type: record.record_type,
 			content_sha256: contentSha256,
+			semantic_target: semanticIndexIngestTarget(record),
 		};
 	} catch (error) {
 		if (error instanceof ResearchBoundaryError) throw error;
