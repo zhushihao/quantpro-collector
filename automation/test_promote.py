@@ -188,19 +188,18 @@ class CompilerTests(unittest.TestCase):
             self.assertNotIn("STATE_CHANNEL=", prompts[key])
             self.assertNotIn("append_state_batch", prompts[key])
             self.assertIn("WRITE_SCOPE=READ_ONLY", prompts[key])
-    def test_all_profiles_have_lightweight_run_lifecycle_without_business_scope_expansion(self):
+    def test_all_profiles_have_stable_abi_run_lifecycle_without_business_scope_expansion(self):
         _, prompts = self.compile()
         for key, prompt in prompts.items():
             with self.subTest(key=key):
-                self.assertIn("begin_run", prompt)
-                self.assertIn("end_run", prompt)
+                self.assertIn("record_automation_run", prompt)
+                self.assertIn("run_id=SERVER_AUTO", prompt)
+                self.assertIn("occurred_at=SERVER", prompt)
                 self.assertIn("SILENT", prompt)
                 self.assertIn("BLOCKED", prompt)
                 self.assertIn("FAILED", prompt)
                 self.assertIn("AUDIT_DEGRADED", prompt)
-                self.assertNotIn("record_automation_run", prompt)
-                self.assertNotIn("phase=STARTED", prompt)
-                self.assertNotIn("phase=FINAL", prompt)
+                self.assertIn("不得自行生成随机run_id/时间戳", prompt)
         for key in ("central-policy", "ai-financing-rates"):
             self.assertNotIn("append_state_batch", prompts[key])
             self.assertNotIn("append_company_events", prompts[key])
@@ -211,9 +210,11 @@ class CompilerTests(unittest.TestCase):
     def test_holding_uses_semantic_slot_and_server_owned_wire_fields(self):
         _, prompts = self.compile()
         for key in ("holding-assistant-preclose", "holding-assistant-intraday"):
-            self.assertIn("append_market_observation", prompts[key])
+            self.assertIn("append_state_batch(channel=MARKET)", prompts[key])
             self.assertIn("scheduled_slot", prompts[key])
-            self.assertIn("Collector负责", prompts[key])
+            self.assertIn("Collector", prompts[key])
+            self.assertIn("不要放schema_version", prompts[key])
+            self.assertNotIn("append_market_observation", prompts[key])
             self.assertNotIn("observation_type=PREMARKET", prompts[key])
             self.assertNotIn("observation_type=PREOPEN", prompts[key])
             self.assertNotIn("idempotency_key=holding-assistant", prompts[key])
@@ -235,21 +236,18 @@ class CompilerTests(unittest.TestCase):
             for needle in needles:
                 with self.subTest(key=key, needle=needle):
                     self.assertIn(needle, p[key])
-        expected_write_tool = {
-            "company-facts": "append_company_events",
-            "industry-research": "append_industry_events",
-            "holding-assistant-intraday": "append_market_observation",
-            "holding-assistant-preclose": "append_market_observation",
-        }
-        for key, tool in expected_write_tool.items():
-            self.assertIn(tool, p[key])
+        for key in ("company-facts", "industry-research", "holding-assistant-intraday", "holding-assistant-preclose"):
+            self.assertIn("append_state_batch", p[key])
             self.assertIn("read_state_snapshot_v2", p[key])
             self.assertIn("PERSISTED", p[key])
             self.assertIn("IDEMPOTENT_REPLAY", p[key])
             self.assertIn("get_state_write_receipt", p[key])
             self.assertIn("不得改键重投", p[key])
+            self.assertIn("不构造旧完整账本信封", p[key])
             self.assertNotIn("validate_state_batch", p[key])
-            self.assertNotIn("append_state_batch", p[key])
+            self.assertNotIn("append_company_events", p[key])
+            self.assertNotIn("append_industry_events", p[key])
+            self.assertNotIn("append_market_observation", p[key])
 
 
 class VerificationTests(unittest.TestCase):
