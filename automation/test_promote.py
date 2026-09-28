@@ -95,6 +95,17 @@ class CompilerTests(unittest.TestCase):
                 self.assertTrue(prompt.endswith("\n") and not prompt.endswith("\n\n"))
                 self.assertNotIn("{{", prompt)
                 self.assertNotIn("raw.githubusercontent.com", prompt)
+
+    def test_read_only_research_store_failure_stays_local_to_dependent_leads(self):
+        _, prompts = self.compile()
+        for key in ("central-policy", "ai-financing-rates"):
+            with self.subTest(key=key):
+                prompt = prompts[key]
+                self.assertIn("RESEARCH_DEGRADED", prompt)
+                self.assertIn("NO_NEW_CONTENT", prompt)
+                self.assertIn("INCONCLUSIVE", prompt)
+                self.assertIn("官方", prompt)
+                self.assertIn("整轮BLOCKED", prompt)
     def test_deterministic_and_cross_platform_line_endings(self):
         m1, p1 = self.compile()
         m2, p2 = self.compile({key: "\ufeff" + text.replace("\n", "\r\n") for key, text in self.data.items()})
