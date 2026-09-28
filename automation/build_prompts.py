@@ -229,6 +229,9 @@ def compile_all(ref: str, loader: Loader, *, keys: list[str] | None = None, prov
             text = read(path)
             if path == STATE:
                 text = text.replace("{{STATE_CHANNEL}}", entry["channel"])
+                text = text.replace("{{STATE_APPEND_TOOL}}",
+                                    "append_company_events" if key == "company-facts"
+                                    else "append_state_batch")
             if "{{" in text or "}}" in text:
                 raise BuildError(f"{key}: unresolved template in {path}")
             pieces.append(text.rstrip("\n"))

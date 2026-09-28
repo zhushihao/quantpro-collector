@@ -3,7 +3,8 @@ import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 /**
  * PUBLIC Research replica reads are side-effect free, but D1 already retries
  * some failures internally. Keep the application retry budget small and only
- * spend it on errors that are positively identified as transient.
+ * spend the full budget on known transient errors. Unknown read failures get
+ * one short retry unless a deterministic cause is identified.
  */
 export const RESEARCH_READ_RETRY_DELAYS_MS = [500, 1500] as const;
 
@@ -169,7 +170,7 @@ export function shouldRetryResearchRead(error: unknown): boolean {
 	if (error instanceof ResearchBoundaryError) {
 		return error.error_code === "STORE_UNAVAILABLE" && error.retryable;
 	}
-	return classifyResearchReadBackendError(error).failure_class === "TRANSIENT";
+	return classifyResearchReadBackendError(error).failure_class !== "DETERMINISTIC";
 }
 
 export async function withResearchReadRetry<T>(
@@ -187,8 +188,9 @@ export async function withResearchReadRetry<T>(
 			return await operation();
 		} catch (error) {
 			const retryable = shouldRetryResearchRead(error);
-			const willRetry = retryable && attemptIndex < delaysMs.length;
 			const metadata = failureMetadata(error);
+			const willRetry = retryable && attemptIndex < delaysMs.length &&
+				(metadata.failureClass !== "UNKNOWN" || attemptIndex === 0);
 			options.onFailure?.({
 				request_id: requestId,
 				tool,
@@ -218,9 +220,9 @@ export async function withResearchReadRetry<T>(
 
 			const backend = classifyResearchReadBackendError(error);
 			throw new ResearchBoundaryError("STORE_UNAVAILABLE", requestId, {
-				retryable: backend.failure_class === "TRANSIENT",
+				retryable: backend.failure_class !== "DETERMINISTIC",
 				safeMessage:
-					backend.failure_class === "TRANSIENT"
+					backend.failure_class !== "DETERMINISTIC"
 						? "research read backend unavailable; retry later"
 						: "research read backend failed; retry is not advised",
 			});

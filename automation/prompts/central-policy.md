@@ -8,6 +8,7 @@ WRITE_SCOPE=READ_ONLY
 ## 每轮执行与范围
 实际调用 get_control_plane_status，读取PUBLIC Research replica可用的get_source_health/get_coverage_status及相关研究背景。仅需组合关联或市场交易程度核验时调用get_portfolio_quotes；事实以本轮live_universe为准，仅映射相关ACTIVE，MAPPING_ONLY不算持仓；无明确关系不强行映射。riws-leads主题线索（kind=lead）同为候选入口：涉及中央政策/监管/资金安排/执行动作的线索，按其terms检索历史documents，判别是新话题还是已有政策线的补充（补充须引用既有文件与口径对比后再输出）；lead仅为发现入口，正式政策仍须中央正式文件核验，私域原文与身份不出线索层。
 必须联网核验中共中央、国务院及组成部门、人民银行、证监会、国家发改委、财政部、工信部等中央正式文件、会议通稿、政策解读、资金安排、执行通知，新华社等权威发布辅助确认。地方政策/地方试点不作主体，海外政治地缘、价格、个股新闻仅背景；媒体猜测与市场上涨不能反推中央政策。
+PUBLIC Research历史只读检索返回STORE_UNAVAILABLE时，标记RESEARCH_DEGRADED，继续独立的官方联网发现与核验。riws-leads为NO_NEW_CONTENT时无需历史去重，最终可SILENT/COMPLETED，不因这次检索整轮BLOCKED；有lead且历史是必要判断依据时仅将该lead标为INCONCLUSIVE并延后，其他候选继续。只有官方发现、必要Collector事实源及历史判定路径都无法完成本轮正确判断时，才整轮BLOCKED。
 
 ## 两类新增候选
 正式政策：新文件、新工具、新执行动作、新资金/额度、新监管，或范围/时间/对象/口径实质变化；保留具体适用条件，按政策目标→工具/资金→执行→产业影响→公司传导逐层解释，不跳级。

@@ -257,7 +257,8 @@ class CompilerTests(unittest.TestCase):
                 with self.subTest(key=key, needle=needle):
                     self.assertIn(needle, p[key])
         for key in ("company-facts", "industry-research", "holding-assistant-intraday", "holding-assistant-preclose"):
-            self.assertIn("append_state_batch", p[key])
+            self.assertIn("append_company_events" if key == "company-facts"
+                          else "append_state_batch", p[key])
             self.assertIn("read_state_snapshot_v2", p[key])
             self.assertIn("PERSISTED", p[key])
             self.assertIn("IDEMPOTENT_REPLAY", p[key])
@@ -268,7 +269,8 @@ class CompilerTests(unittest.TestCase):
             # 断言只禁止肯定性调用指示，不再禁止一切出现。
             self.assertIn("不要先调validate_state_batch", p[key])
             self.assertNotIn("先调用validate_state_batch", p[key])
-            self.assertNotIn("append_company_events", p[key])
+            if key != "company-facts":
+                self.assertNotIn("append_company_events", p[key])
             self.assertNotIn("append_industry_events", p[key])
             self.assertNotIn("append_market_observation", p[key])
 

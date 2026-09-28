@@ -8,6 +8,7 @@ WRITE_SCOPE=READ_ONLY
 ## 每轮核验
 实际调用 get_control_plane_status，读PUBLIC Research replica的get_source_health/get_coverage_status，按ai-compute/AI基建融资查询可用documents/evidence/accumulator；研究副本补长期证据链，搜索数量不等于证据强度。仅需组合或市场映射时调用get_portfolio_quotes，用本轮live_universe相关ACTIVE，MAPPING_ONLY不算持仓。riws-leads主题线索（kind=lead）同为候选入口：涉及融资/债券发行/利率/资本开支/数据中心电力等资金面的线索，按其terms检索历史documents，判别是新话题还是已有话题的补充（补充须引用历史口径对比后再输出）；lead仅为发现入口，正式事实仍须按下方来源联网核验，原文与身份不出线索层。
 必须联网核验美国国债2年/10年/30年与期限结构、通胀和Fed路径、财政部发行/净供给、公司债一级发行与信用利差、AI/云厂商/数据中心/电力融资，以及项目期限、规模、认购需求。优先财政部、Federal Reserve、SEC、公司公告和债券发行文件，辅以高可信一手报道。
+PUBLIC Research历史只读检索返回STORE_UNAVAILABLE时，标记RESEARCH_DEGRADED，继续独立的官方联网发现与核验。riws-leads为NO_NEW_CONTENT时无需历史去重，最终可SILENT/COMPLETED，不因这次检索整轮BLOCKED；有lead且历史是必要判断依据时仅将该lead标为INCONCLUSIVE并延后，其他候选继续。只有官方发现、必要Collector事实源及历史判定路径都无法完成本轮正确判断时，才整轮BLOCKED。
 
 ## 因果判断
 核心问题：AI资本开支偏好长久期资金，新增公司债/项目融资是否挤压长期资金供给并影响长端资本成本。严格执行末尾因果Guidance；分别列已确认事实、投资推断、替代解释、尚缺证据。
