@@ -63,6 +63,12 @@ import {
 import { ingestResearchReplicaRecord, type ResearchReplicaStorage } from "./research-replica.ts";
 import { CollectorResearchRemoteAdapter } from "./research-remote-adapter.ts";
 import {
+	RETENTION_CRON,
+	runRetentionSweep,
+	type RetentionDeps,
+	type RetentionRunReport,
+} from "./research-retention.ts";
+import {
 	indexSemanticDocument,
 	probeSemanticIndex,
 	readSemanticIndexCoverage,
@@ -2589,6 +2595,61 @@ async function handleSemanticIndexProbe(request: Request, env: Env): Promise<Res
 }
 
 /**
+ * PUBLIC 文档数据有效期运维通道（内部凭据门控，非 MCP 工具；owner 裁定
+ * 2026-09-29：PUBLIC 副本保留 90 天，source_id='E02-gelonghui-live' 原文快照
+ * 为历史违规存量全部清理）。POST 触发一轮有界、可续跑的 retention 编排；
+ * `?dry_run=1` 只列超期清单与待清除积压、不删任何东西，供首轮清单核对。
+ * 与 ingest/semantic 运维通道共用 RESEARCH transport credential，fail-closed。
+ */
+async function handleRetentionRun(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "POST") {
+		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
+	}
+	const storage = researchReplicaStorage(env);
+	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
+		return researchBoundaryResponse(new ResearchBoundaryError("STORE_UNAVAILABLE"), 503);
+	}
+	if (!researchReplicaAuthorized(request, env)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	const url = new URL(request.url);
+	const dryRunParam = url.searchParams.get("dry_run");
+	const dryRun = dryRunParam === "1" || dryRunParam === "true";
+	if (dryRunParam !== null && !dryRun) {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	let body: unknown = {};
+	try {
+		const raw = await request.text();
+		body = raw ? JSON.parse(raw) : {};
+	} catch {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	const options = body as Record<string, unknown>;
+	if (Object.keys(options).some((key) => key !== "max_mark" && key !== "max_purge")) {
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	const deps: RetentionDeps = { index: env.RESEARCH_PUBLIC_INDEX ?? null };
+	try {
+		const report: RetentionRunReport = await runRetentionSweep(storage, deps, {
+			trigger: "manual",
+			dryRun,
+			maxMark: options.max_mark as number | undefined,
+			maxPurge: options.max_purge as number | undefined,
+		});
+		return jsonResponse(report);
+	} catch (error) {
+		return researchBoundaryResponse(
+			error,
+			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
+		);
+	}
+}
+
+/**
  * §A1 receipts 只读回流端点（内部通道，非 MCP 工具）。与 ingest 共用现有
  * RESEARCH transport credential；未配置 → 503 fail-closed，token 不匹配 →
  * 401 FILTERED。响应为 §5.4 collector-receipts-v1 白名单，claim_token /
@@ -3005,6 +3066,11 @@ export default {
 		if (url.pathname === "/internal/research-semantic-index/probe") {
 			return handleSemanticIndexProbe(request, env);
 		}
+		// PUBLIC 文档数据有效期（retention）运维通道：POST + 内部凭据门控，
+		// `?dry_run=1` 只列清单不删（首轮验证用）。非 MCP 工具。
+		if (url.pathname === "/internal/research-retention/run") {
+			return handleRetentionRun(request, env);
+		}
 		if (url.pathname === "/api/control-plane-status" && request.method === "GET") {
 			return handleControlPlaneStatus(env);
 		}
@@ -3057,6 +3123,32 @@ export default {
 		return handler(request, env, ctx);
 	},
 	async scheduled(controller: ScheduledController, env: Env) {
+		// PUBLIC 文档数据有效期（owner 裁定 2026-09-29）：每日一轮有界
+		// retention 编排（标记 EXPIRED → R2 清除 → D1 行删除 → 向量收尾）。
+		// 失败如实抛出让 cron 调用显式失败，绝不静默。
+		if (controller.cron === RETENTION_CRON) {
+			const context = bridgeContext(`cron:${RETENTION_CRON}`);
+			logBridgeStage(context, "scheduled_enter", { task: "research_retention" });
+			try {
+				const storage = researchReplicaStorage(env);
+				if (!storage) throw new ResearchBoundaryError("STORE_UNAVAILABLE");
+				const deps: RetentionDeps = { index: env.RESEARCH_PUBLIC_INDEX ?? null };
+				const report: RetentionRunReport = await runRetentionSweep(storage, deps, {
+					trigger: "scheduled",
+				});
+				logBridgeStage(context, "scheduled_complete", {
+					task: "research_retention",
+					retention_scanned: report.scanned_documents,
+					retention_marked: report.marked_expired,
+					retention_purged: report.purged_documents,
+					retention_purge_skipped: report.purge_skipped,
+				});
+			} catch (error) {
+				logBridgeFailure(context, error, "scheduled");
+				throw error;
+			}
+			return;
+		}
 		const runId = controller.cron ? `cron:${controller.cron}` : "test:scheduled";
 		const context = bridgeContext(runId);
 		logBridgeStage(context, "scheduled_enter");

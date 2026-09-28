@@ -472,6 +472,16 @@ export function semanticIndexIngestStatements(
 const STATE_COLUMNS =
 	"document_id, version_id, visibility, state, content_sha256, model_id, title_only, truncated, expected_chunks, confirmed_chunks, attempts, last_error_code, retired_at, vector_deleted_at, registered_at, updated_at";
 
+/**
+ * Retention (owner ruling): a document marked EXPIRED in
+ * `research_document_retention` must never be claimed for indexing, even when
+ * a re-ingest un-retired one of its state rows between the mark and the purge.
+ * The expired doc is already invisible to every read face; indexing it would
+ * only burn embeddings for vectors that the purge deletes.
+ */
+const NOT_EXPIRED_BY_RETENTION =
+	"NOT EXISTS (SELECT 1 FROM research_document_retention ret WHERE ret.document_id=research_semantic_index_state.document_id AND ret.status='EXPIRED')";
+
 async function claimPendingRow(
 	storage: SemanticIndexStorage,
 	row: SemanticIndexStateRow,
@@ -897,6 +907,24 @@ async function deleteVectorRange(
 }
 
 /**
+ * Retention reuse point: the same deterministic-id `deleteByIds` mechanism the
+ * retired-row cleanup uses, exposed for the PUBLIC document retention purge,
+ * which deletes the version rows before reclaiming vectors (D1 was already
+ * authoritative, so the eventual Vectorize consistency window cannot expose a
+ * deleted version).  Returns the number of vector ids submitted for deletion.
+ */
+export async function deleteSemanticVersionVectors(
+	index: Vectorize,
+	documentId: string,
+	versionId: string,
+): Promise<number> {
+	const ids = await semanticVectorIds(documentId, versionId, SEMANTIC_MAX_CHUNKS);
+	if (ids.length === 0) return 0;
+	await index.deleteByIds(ids);
+	return ids.length;
+}
+
+/**
  * Bounded rolling audit of READY rows: a version that is no longer the
  * document's servable version (a later version arrived out of order, or the
  * version itself stopped being servable) must be invalidated in D1 before its
@@ -1009,7 +1037,7 @@ export async function runSemanticIndexBatch(
 		const staleBefore = new Date(Date.parse(now) - SEMANTIC_CLAIM_STALE_MS).toISOString();
 		const candidates = await storage.db
 			.prepare(
-				`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND state='PENDING' AND retired_at IS NULL AND (last_error_code IS NULL OR last_error_code<>? OR updated_at<?) ORDER BY updated_at, document_id, version_id LIMIT ?`,
+				`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND state='PENDING' AND retired_at IS NULL AND ${NOT_EXPIRED_BY_RETENTION} AND (last_error_code IS NULL OR last_error_code<>? OR updated_at<?) ORDER BY updated_at, document_id, version_id LIMIT ?`,
 			)
 			.bind(SEMANTIC_IN_PROGRESS_CODE, staleBefore, maxDocs * 3)
 			.all<SemanticIndexStateRow>();
@@ -1042,7 +1070,7 @@ export async function indexSemanticDocument(
 	try {
 		const row = await storage.db
 			.prepare(
-				`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? LIMIT 1`,
+				`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND ${NOT_EXPIRED_BY_RETENTION} LIMIT 1`,
 			)
 			.bind(options.documentId, options.versionId)
 			.first<SemanticIndexStateRow>();
@@ -1103,7 +1131,7 @@ async function validateSemanticHit(
 ): Promise<ValidatedHit | null> {
 	const row = await storage.db
 		.prepare(
-			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? LIMIT 1`,
+			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND ${NOT_EXPIRED_BY_RETENTION} LIMIT 1`,
 		)
 		.bind(meta.document_id, meta.version_id)
 		.first<SemanticIndexStateRow>();

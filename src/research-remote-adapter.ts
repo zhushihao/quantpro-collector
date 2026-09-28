@@ -135,6 +135,17 @@ function isHexSha256(value: unknown): value is string {
 }
 
 /**
+ * Retention (owner ruling 2026-09-29): a document marked EXPIRED in
+ * `research_document_retention` is logically invalidated - it is invisible to
+ * search_documents and get_document from the moment it is marked, before any
+ * R2/D1 byte is deleted, and it stays invisible through the purge window.
+ * PURGED tombstones never hide anything: a re-ingested document starts a fresh
+ * lifecycle.
+ */
+const NOT_EXPIRED_BY_RETENTION =
+	"NOT EXISTS (SELECT 1 FROM research_document_retention ret WHERE ret.document_id=json_extract(research_records.payload_json, '$.document.document_id') AND ret.status='EXPIRED')";
+
+/**
  * The servable body of one document_version payload: its own bytes when the
  * own media_type is whitelisted and its reference hash is well-formed,
  * otherwise its text-extraction projection attachment.  Returns null when the
@@ -278,7 +289,7 @@ export class CollectorResearchRemoteAdapter {
 		// backfill is a production example).  LIMIT belongs to search results,
 		// not to an unrelated arrival-time window.
 		const rows = await this.guarded(async () => {
-			const base = "SELECT record_type, record_key, message_id, visibility, schema_version, payload_json, generated_at, updated_at FROM research_records WHERE record_type='document_version' AND visibility=?";
+			const base = `SELECT record_type, record_key, message_id, visibility, schema_version, payload_json, generated_at, updated_at FROM research_records WHERE record_type='document_version' AND visibility=? AND ${NOT_EXPIRED_BY_RETENTION}`;
 			const statement = needle
 				? this.storage.db
 						.prepare(`${base} AND lower(json_extract(payload_json, '$.document.title')) LIKE ? ORDER BY updated_at DESC LIMIT ?`)
@@ -329,7 +340,7 @@ export class CollectorResearchRemoteAdapter {
 		const rows = await this.guarded(async () => {
 			const result = await this.storage.db
 				.prepare(
-					"SELECT record_type, record_key, message_id, visibility, schema_version, payload_json, generated_at, updated_at FROM research_records WHERE record_type='document_version' AND visibility=? AND json_extract(payload_json, '$.document.document_id')=?",
+					`SELECT record_type, record_key, message_id, visibility, schema_version, payload_json, generated_at, updated_at FROM research_records WHERE record_type='document_version' AND visibility=? AND json_extract(payload_json, '$.document.document_id')=? AND ${NOT_EXPIRED_BY_RETENTION}`,
 				)
 				.bind(this.visibility, documentId)
 				.all<ReplicaRecordRow>();

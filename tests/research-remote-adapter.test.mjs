@@ -23,6 +23,13 @@ function sha256HexOf(bytes) {
 class FakeD1 {
 	constructor(records) {
 		this.records = records;
+		/**
+		 * Retention (owner ruling 2026-09-29): the read faces exclude documents
+		 * marked EXPIRED in research_document_retention.  The real shim-based
+		 * suites prove that SQL against the production schema; this fake mirrors
+		 * the same semantics with an explicit id set (empty by default).
+		 */
+		this.expiredDocumentIds = new Set();
 	}
 
 	documentRows(visibility, documentId) {
@@ -32,6 +39,17 @@ class FakeD1 {
 				row.visibility === visibility &&
 				JSON.parse(row.payload_json).document.document_id === documentId,
 		);
+	}
+
+	excludeRetentionExpired(rows) {
+		return this.expiredDocumentIds.size === 0
+			? rows
+			: rows.filter(
+					(row) =>
+						!this.expiredDocumentIds.has(
+							JSON.parse(row.payload_json).document.document_id,
+						),
+				);
 	}
 
 	prepare(sql) {
@@ -52,10 +70,27 @@ class FakeD1 {
 							String(JSON.parse(row.payload_json).document.title ?? "").toLocaleLowerCase()
 								.includes(String(titleNeedle).replaceAll("%", "").toLocaleLowerCase()),
 						);
+						const filtered = db.excludeRetentionExpired(rows);
+						return { results: typeof limit === "number" ? filtered.slice(0, limit) : filtered };
+					}
+					if (sql.includes("'$.document.document_id')=?")) {
+						// getDocument: params are [visibility, documentId].
+						const [visibility, documentId] = this.params;
+						return { results: db.excludeRetentionExpired(db.documentRows(visibility, documentId)) };
+					}
+					if (sql.includes("research_document_retention")) {
+						// Needle-less searchDocuments with the retention filter:
+						// params are [visibility, limit].
+						const [visibility, limit] = this.params;
+						const rows = db.excludeRetentionExpired(
+							db.records.filter(
+								(row) => row.record_type === "document_version" && row.visibility === visibility,
+							),
+						);
 						return { results: typeof limit === "number" ? rows.slice(0, limit) : rows };
 					}
 					const [visibility, documentId] = this.params;
-					return { results: db.documentRows(visibility, documentId) };
+					return { results: db.excludeRetentionExpired(db.documentRows(visibility, documentId)) };
 				}
 				if (sql.includes("record_type='document_version'")) {
 					const [visibility, limit] = this.params;
@@ -82,7 +117,7 @@ class FakeD1 {
 				}
 				if (sql.includes("json_extract")) {
 					const [visibility, documentId] = this.params;
-					return db.documentRows(visibility, documentId)[0] ?? null;
+					return db.excludeRetentionExpired(db.documentRows(visibility, documentId))[0] ?? null;
 				}
 				if (sql.includes("record_key=?")) {
 					const [recordType, recordKey, visibility] = this.params;
