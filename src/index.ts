@@ -1281,7 +1281,7 @@ export function createServer(
 				readOnlyHint: false,
 				destructiveHint: false,
 				idempotentHint: true,
-				openWorldHint: true,
+				openWorldHint: false,
 			},
 		},
 		async (command) => {
@@ -1320,7 +1320,7 @@ export function createServer(
 				readOnlyHint: false,
 				destructiveHint: false,
 				idempotentHint: true,
-				openWorldHint: true,
+				openWorldHint: false,
 			},
 		},
 		async (command) => {
@@ -1359,7 +1359,7 @@ export function createServer(
 				readOnlyHint: false,
 				destructiveHint: false,
 				idempotentHint: true,
-				openWorldHint: true,
+				openWorldHint: false,
 			},
 		},
 		async (command) => {
@@ -1398,7 +1398,7 @@ export function createServer(
 				readOnlyHint: false,
 				destructiveHint: false,
 				idempotentHint: true,
-				openWorldHint: true,
+				openWorldHint: false,
 			},
 		},
 		async (command) => {
