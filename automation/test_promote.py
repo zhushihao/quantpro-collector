@@ -106,6 +106,15 @@ class CompilerTests(unittest.TestCase):
                 self.assertIn("INCONCLUSIVE", prompt)
                 self.assertIn("官方", prompt)
                 self.assertIn("整轮BLOCKED", prompt)
+
+    def test_company_write_uses_only_the_narrow_command(self):
+        _, prompts = self.compile()
+        company = prompts["company-facts"]
+        self.assertIn("append_company_events", company)
+        self.assertNotIn("append_state_batch", company)
+        for key in ("industry-research", "holding-assistant-intraday",
+                    "holding-assistant-preclose"):
+            self.assertIn("append_state_batch", prompts[key])
     def test_deterministic_and_cross_platform_line_endings(self):
         m1, p1 = self.compile()
         m2, p2 = self.compile({key: "\ufeff" + text.replace("\n", "\r\n") for key, text in self.data.items()})
