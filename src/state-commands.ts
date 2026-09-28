@@ -66,8 +66,7 @@ export const COMPANY_EVENT_COMMAND_SCHEMA = z
 		company_thesis: OPTIONAL_TEXT,
 		company_validation: OPTIONAL_TEXT,
 		r_proposal: z.union([z.literal("R2"), z.null()]).optional(),
-	})
-	.catchall(z.unknown());
+	});
 
 export const INDUSTRY_EVENT_COMMAND_SCHEMA = z
 	.object({
@@ -75,8 +74,7 @@ export const INDUSTRY_EVENT_COMMAND_SCHEMA = z
 		research_priority: z.union([z.enum(["P0", "P1", "P2"]), z.null()]).optional(),
 		industry_thesis: OPTIONAL_TEXT,
 		r_proposal: z.union([z.enum(["R0", "R1"]), z.null()]).optional(),
-	})
-	.catchall(z.unknown());
+	});
 
 export const CLOSE_EVENT_COMMAND_SCHEMA = z
 	.object({
@@ -87,8 +85,7 @@ export const CLOSE_EVENT_COMMAND_SCHEMA = z
 		market_confirmation: OPTIONAL_TEXT,
 		r4_candidate: z.union([z.boolean(), z.null()]).optional(),
 		close_thesis_view: OPTIONAL_TEXT,
-	})
-	.catchall(z.unknown());
+	});
 
 function investmentCommandSchema(eventSchema: z.ZodTypeAny) {
 	return z
@@ -96,8 +93,7 @@ function investmentCommandSchema(eventSchema: z.ZodTypeAny) {
 			as_of: AS_OF_SCHEMA,
 			events: z.array(eventSchema).min(1).max(128),
 			run_id: RUN_ID_SCHEMA,
-		})
-		.catchall(z.unknown());
+		});
 }
 
 export const APPEND_COMPANY_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
@@ -118,8 +114,7 @@ export const APPEND_MARKET_OBSERVATION_INPUT_SCHEMA = z
 		production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
 		records: z.array(z.record(z.string().min(1), z.unknown())).max(512),
 		run_id: RUN_ID_SCHEMA,
-	})
-	.catchall(z.unknown());
+	});
 
 type InvestmentCommandChannel = Exclude<StateWriteChannel, "MARKET">;
 
