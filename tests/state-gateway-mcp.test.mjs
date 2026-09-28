@@ -206,11 +206,13 @@ test("#37 stable record_automation_run ABI bridges SERVER_AUTO to v2 begin/end",
 			arguments: { task_name: "industry-research", limit: 5 },
 		});
 		const historyBody = JSON.parse(history.content[0].text);
-		assert.equal(historyBody.runs.length, 1);
-		assert.equal(historyBody.runs[0].source_contract, "run-v2");
-		assert.equal(historyBody.runs[0].effective_status, "SILENT");
-		assert.equal(historyBody.runs[0].notification_sent, null);
-		assert.equal(historyBody.runs[0].notification_intended, false);
+		// Spec §6.2 merges MISSED_SLOT schedule-derivation rows into the same
+		// list; this run is the newest real row, so locate it by contract.
+		const run = historyBody.runs.find((entry) => entry.source_contract === "run-v2");
+		assert.ok(run, "the fresh run-v2 row must be present");
+		assert.equal(run.effective_status, "SILENT");
+		assert.equal(run.notification_sent, null);
+		assert.equal(run.notification_intended, false);
 	} finally {
 		await client.close();
 		await server.server.close();
@@ -269,6 +271,7 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			"append_industry_events",
 			"append_close_events",
 			"append_market_observation",
+			"submit_run_envelope",
 			"begin_run",
 			"end_run",
 			"get_gateway_status",
@@ -366,6 +369,58 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 		assert.equal(tools.append_state_batch.annotations.destructiveHint, false);
 		assert.equal(tools.append_state_batch.annotations.idempotentHint, true);
 		assert.equal(tools.append_state_batch.annotations.openWorldHint, true);
+		// submit_run_envelope mirrors the narrow-write annotation triple (A8).
+		assert.equal(tools.submit_run_envelope.annotations.readOnlyHint, false);
+		assert.equal(tools.submit_run_envelope.annotations.destructiveHint, false);
+		assert.equal(tools.submit_run_envelope.annotations.idempotentHint, true);
+		assert.equal(tools.submit_run_envelope.annotations.openWorldHint, false);
+		const envelopeSchema = tools.submit_run_envelope.inputSchema;
+		assert.equal(
+			envelopeSchema.additionalProperties,
+			false,
+			"submit_run_envelope must expose a closed host-safe top-level schema",
+		);
+		// Union-member closure (spec §八, review six): the existing event-items
+		// loop sees no `events` at the envelope top level, so the
+		// channel_payload oneOf members must be walked explicitly.
+		const union = envelopeSchema.properties.channel_payload.oneOf;
+		assert.ok(Array.isArray(union) && union.length === 4);
+		for (const member of union) {
+			assert.equal(
+				member.additionalProperties,
+				false,
+				"every channel member must be a closed object schema",
+			);
+			if (member.properties.events?.items) {
+				assert.equal(
+					member.properties.events.items.additionalProperties,
+					false,
+					"investment channel event items must expose a closed host-safe schema",
+				);
+			}
+		}
+		const envelopeSerialized = JSON.stringify(envelopeSchema);
+		for (const serverOwned of [
+			"schema_version",
+			"event_id",
+			"write_key",
+			"producer",
+			"dimension",
+			"source_task",
+			"portfolio_version",
+			"live_universe_hash",
+		]) {
+			assert.equal(
+				envelopeSerialized.includes(`"${serverOwned}"`),
+				false,
+				`submit_run_envelope leaks ${serverOwned}`,
+			);
+		}
+		assert.equal(
+			union.filter((member) => member.properties.events?.items).length,
+			3,
+			"INDUSTRY/COMPANY/CLOSE carry closed event item schemas",
+		);
 	} finally {
 		await client.close();
 		await server.server.close();

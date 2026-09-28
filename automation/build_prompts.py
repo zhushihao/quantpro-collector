@@ -229,18 +229,13 @@ def compile_all(ref: str, loader: Loader, *, keys: list[str] | None = None, prov
             text = read(path)
             if path == STATE:
                 text = text.replace("{{STATE_CHANNEL}}", entry["channel"])
-                append_tool = {
-                    "company-facts": "append_company_events",
-                    "industry-research": "append_industry_events",
-                    "holding-assistant-intraday": "append_market_observation",
-                    "holding-assistant-preclose": "append_market_observation",
-                }[key]
-                text = text.replace("{{STATE_APPEND_TOOL}}", append_tool)
             if "{{" in text or "}}" in text:
                 raise BuildError(f"{key}: unresolved template in {path}")
             pieces.append(text.rstrip("\n"))
         prompt = "\n".join(metadata) + "\n\n" + "\n\n".join(pieces) + "\n"
-        for obsolete in ("get_market_checkpoints", "append_market_checkpoint", "get_automation_control_bundle", "raw.githubusercontent.com"):
+        # Single-envelope contract (2026-09-29): legacy two-phase run
+        # registration tools must never re-enter production prompts.
+        for obsolete in ("begin_run", "end_run", "record_automation_run", "get_market_checkpoints", "append_market_checkpoint", "get_automation_control_bundle", "raw.githubusercontent.com"):
             if obsolete in prompt:
                 raise BuildError(f"{key}: obsolete/runtime-loading reference: {obsolete}")
         if len(prompt) > entry["max_chars"]:

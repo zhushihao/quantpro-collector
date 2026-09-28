@@ -8,6 +8,7 @@ import {
 	getAutomationRunHistory,
 	recordAutomationRunEvent,
 } from "../src/automation-run-ledger.ts";
+import { ensureRunEnvelopeTables } from "../src/automation-schedule.ts";
 import { createResearchWorkflowDb } from "./helpers/d1-sqlite-shim.mjs";
 
 function begin(overrides = {}) {
@@ -95,9 +96,15 @@ test("#37 begin + end stores one SILENT run with server-owned lifecycle", async 
 		db,
 		taskName: "industry-research",
 		limit: 5,
+		// Pin the derivation clock: spec §6.2 merges MISSED_SLOT rows over the
+		// 7-day lookback, so a real-clock query would drown this 09-27 row.
+		now: "2026-09-27T12:03:00Z",
+		since: "2026-09-27T00:00:00Z",
 	});
-	assert.equal(history.runs.length, 1);
-	const run = history.runs[0];
+	// Spec §6.2 merges MISSED_SLOT schedule-derivation rows into the same list;
+	// locate the stored run by contract instead of absolute position.
+	const run = history.runs.find((entry) => entry.source_contract === "run-v2");
+	assert.ok(run, "the stored run-v2 row must be present");
 	assert.equal(run.effective_status, "SILENT");
 	assert.equal(run.final_recorded, true);
 	assert.equal(run.notification_sent, null);
@@ -173,11 +180,18 @@ test("#37 unfinished run is observable but not diagnosed as a crash", async () =
 		principal: "chatgpt-production",
 		now: "2026-09-27T12:00:03Z",
 	});
-	const history = await getAutomationRunHistory({ db, limit: 5 });
-	assert.equal(history.runs[0].effective_status, "IN_PROGRESS");
-	assert.equal(history.runs[0].final_recorded, false);
-	assert.equal(history.runs[0].result_semantics, "RESULT_UNKNOWN");
-	assert.equal(history.runs[0].finished_at, null);
+	const history = await getAutomationRunHistory({
+		db,
+		limit: 5,
+		now: "2026-09-27T12:01:00Z",
+		since: "2026-09-27T00:00:00Z",
+	});
+	const run = history.runs.find((entry) => entry.source_contract === "run-v2");
+	assert.ok(run, "the unfinished run-v2 row must be present");
+	assert.equal(run.effective_status, "IN_PROGRESS");
+	assert.equal(run.final_recorded, false);
+	assert.equal(run.result_semantics, "RESULT_UNKNOWN");
+	assert.equal(run.finished_at, null);
 });
 
 test("#37 legacy record_automation_run is a thin adapter over the v2 ledger", async () => {
@@ -247,4 +261,166 @@ test("#37 legacy phase/status validation remains fail-closed during migration", 
 			error instanceof AutomationRunLedgerError &&
 			error.code === "AUTOMATION_RUN_VALIDATION_FAILED",
 	);
+});
+
+async function insertRunV3Row(db, overrides = {}) {
+	const row = {
+		task_name: "industry-research",
+		run_id: "run_" + "a".repeat(32),
+		envelope_key: "E:INDUSTRY:" + "b".repeat(64),
+		channel: "INDUSTRY",
+		write_key: "CMD:INDUSTRY:" + "c".repeat(64),
+		as_of: null,
+		received_at: "2026-09-27T12:00:00Z",
+		slot: null,
+		slot_date: null,
+		fresh_delta_count: 1,
+		event_count: 3,
+		outcome: "COMPLETED",
+		blocker_code: null,
+		summary: "信封一轮",
+		...overrides,
+	};
+	await db
+		.prepare(
+			`INSERT INTO automation_runs_v3 (
+				task_name, run_id, envelope_key, channel, write_key, as_of,
+				received_at, slot, slot_date, fresh_delta_count, event_count,
+				outcome, blocker_code, summary, prompt_version,
+				collector_build_sha, cloudflare_version_id, created_at, updated_at
+			) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, 'build-x', 'cf-x', ?7, ?7)`,
+		)
+		.bind(
+			row.task_name,
+			row.run_id,
+			row.envelope_key,
+			row.channel,
+			row.write_key,
+			row.as_of,
+			row.received_at,
+			row.slot,
+			row.slot_date,
+			row.fresh_delta_count,
+			row.event_count,
+			row.outcome,
+			row.blocker_code,
+			row.summary,
+		)
+		.run();
+	return row;
+}
+
+test("run-v3 rows merge into get_automation_run_history with server-derived semantics (spec §4.3.3/§5)", async () => {
+	const db = createResearchWorkflowDb();
+	await ensureRunEnvelopeTables(db);
+
+	const fresh = await insertRunV3Row(db, {
+		as_of: "2026-09-27T19:55:00+08:00",
+	});
+	const stale = await insertRunV3Row(db, {
+		run_id: "run_" + "d".repeat(32),
+		envelope_key: "E:INDUSTRY:" + "e".repeat(64),
+		write_key: "CMD:INDUSTRY:" + "f".repeat(64),
+		as_of: "2026-09-25T19:55:00+08:00",
+		received_at: "2026-09-27T12:05:00Z",
+		fresh_delta_count: 0,
+		outcome: "SILENT",
+	});
+	const unknown = await insertRunV3Row(db, {
+		run_id: "run_" + "1".repeat(32),
+		envelope_key: "E:INDUSTRY:" + "2".repeat(64),
+		write_key: null,
+		channel: null,
+		outcome: "UNKNOWN",
+		fresh_delta_count: null,
+		event_count: null,
+		received_at: "2026-09-27T12:10:00Z",
+	});
+
+	const history = await getAutomationRunHistory({
+		db,
+		taskName: "industry-research",
+		limit: 100,
+		now: "2026-09-27T12:11:00Z",
+		since: "2026-09-27T00:00:00Z",
+	});
+	const contracts = new Set(history.runs.map((entry) => entry.source_contract));
+	assert.ok(contracts.has("run-v3"));
+	assert.ok(history.runs.some((entry) => entry.source_contract === "schedule-derivation"));
+
+	// Descending received_at across sources: UNKNOWN (12:10) → SILENT (12:05)
+	// → COMPLETED (12:00) → … then MISSED_SLOT synthetics.
+	const v3Rows = history.runs.filter((entry) => entry.source_contract === "run-v3");
+	assert.deepEqual(
+		v3Rows.map((entry) => entry.run_id),
+		[unknown.run_id, stale.run_id, fresh.run_id],
+	);
+
+	const freshRow = v3Rows.find((entry) => entry.run_id === fresh.run_id);
+	assert.equal(freshRow.effective_status, "COMPLETED");
+	assert.equal(freshRow.final_recorded, true);
+	assert.equal(freshRow.result_semantics, "TERMINAL_RECORDED");
+	assert.equal(freshRow.fresh_delta_semantics, "SERVER_COUNTED");
+	assert.equal(freshRow.notification_required, true);
+	assert.equal(freshRow.notification_semantics, "SERVER_DERIVED_FLOOR");
+	assert.equal(freshRow.delivery, "MODEL_DELIVERY_UNVERIFIED");
+	assert.equal(freshRow.event_count, 3);
+	assert.equal(freshRow.as_of_stale, false);
+	assert.equal(freshRow.timeliness, "FRESH");
+	assert.equal(freshRow.trace_id, fresh.run_id);
+
+	const staleRow = v3Rows.find((entry) => entry.run_id === stale.run_id);
+	assert.equal(staleRow.effective_status, "SILENT");
+	assert.equal(staleRow.notification_required, false);
+	assert.equal(staleRow.as_of_stale, true);
+	assert.equal(staleRow.timeliness, "STALE");
+
+	const unknownRow = v3Rows.find((entry) => entry.run_id === unknown.run_id);
+	assert.equal(unknownRow.effective_status, "UNKNOWN");
+	assert.equal(unknownRow.final_recorded, false);
+	assert.equal(unknownRow.result_semantics, "RESULT_UNKNOWN");
+
+	// MISSED_SLOT synthetic rows carry the derivation shape (spec §6.2).
+	const synthetic = history.runs.find((entry) => entry.source_contract === "schedule-derivation");
+	assert.equal(synthetic.effective_status, "MISSED_SLOT");
+	assert.equal(synthetic.derivation, "SCHEDULE_WINDOW");
+	assert.match(synthetic.window, /^\d{2}:\d{2}\.\.\d{2}:\d{2}$/);
+});
+
+test("run-v2, legacy-event-v1 and run-v3 rows coexist in one merged history (spec §4.3.3)", async () => {
+	const db = createResearchWorkflowDb();
+	await ensureRunEnvelopeTables(db);
+	await beginAutomationRun({
+		db,
+		begin: begin(),
+		principal: "chatgpt-production",
+		now: "2026-09-27T12:00:03Z",
+	});
+	await recordAutomationRunEvent({
+		db,
+		event: legacyStarted({ task_name: "industry-research" }),
+		now: "2026-09-27T10:00:03Z",
+	});
+	await insertRunV3Row(db);
+
+	const history = await getAutomationRunHistory({
+		db,
+		taskName: "industry-research",
+		limit: 100,
+		now: "2026-09-27T12:11:00Z",
+		since: "2026-09-27T00:00:00Z",
+	});
+	const contracts = new Set(history.runs.map((entry) => entry.source_contract));
+	assert.ok(contracts.has("run-v2"));
+	assert.ok(contracts.has("legacy-event-v1"));
+	assert.ok(contracts.has("run-v3"));
+	assert.ok(contracts.has("schedule-derivation"));
+
+	// v2 rows keep their legacy output shape untouched (spec §4.3.3).
+	const v2Row = history.runs.find((entry) => entry.source_contract === "run-v2");
+	assert.equal(v2Row.fresh_delta_semantics, "CALLER_REPORTED");
+	assert.equal(v2Row.notification_semantics, "INTENDED_ONLY");
+	const legacyRow = history.runs.find((entry) => entry.source_contract === "legacy-event-v1");
+	assert.equal(legacyRow.fresh_delta_semantics, "CALLER_REPORTED");
+	assert.equal(legacyRow.notification_semantics, "CALLER_REPORTED_SENT");
 });

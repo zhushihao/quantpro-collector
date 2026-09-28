@@ -116,6 +116,12 @@ import {
 	appendMarketObservation,
 	isOwnedStateCommandPayload,
 } from "./state-commands.ts";
+import {
+	RunEnvelopeError,
+	SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA,
+	processRunEnvelope,
+} from "./run-envelope.ts";
+import { runScheduleReconciliation } from "./automation-schedule.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
@@ -1430,6 +1436,92 @@ export function createServer(
 					requestId,
 				})) as unknown as Record<string, unknown>;
 			});
+		},
+	);
+
+	server.registerTool(
+		"submit_run_envelope",
+		{
+			description:
+				"定时任务单次交件：一次调用同时完成本轮登记与内容落账。提交 task_name + 人话 summary + 可选 channel_payload；无新增时省略 channel_payload（空包=心跳）。Collector 服务端在一个调用内完成：幂等、通道校验、账本写入、运行终态派生、fresh 计数与通知门判定，并全部回执给模型。禁止携带 write_key/producer/schema_version/event_id 等服务器字段。",
+			inputSchema: SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async (envelope) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "submit_run_envelope");
+			if (denied) return denied;
+			if (!env?.GITHUB_TOKEN || !env.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage or ledger credential is not configured",
+					}),
+				);
+			}
+			const requestId = crypto.randomUUID().replaceAll("-", "");
+			const startedAt = Date.now();
+			try {
+				const result = await processRunEnvelope({
+					db: env.RESEARCH_REPLICA,
+					token: env.GITHUB_TOKEN,
+					envelope,
+					resolveOwnerContext: resolveOwnerCommandContext,
+					collectorBuildSha:
+						env.DEPLOYED_GIT_SHA?.trim() || env.CF_VERSION_METADATA?.tag || null,
+					cloudflareVersionId: env.CF_VERSION_METADATA?.id ?? null,
+					requestId,
+				});
+				console.log(
+					JSON.stringify({
+						event: "collector_tool_operation",
+						tool: "submit_run_envelope",
+						request_id: requestId,
+						run_id: result.run_id,
+						status: result.outcome,
+						duration_ms: Date.now() - startedAt,
+						collector_build_sha:
+							env.DEPLOYED_GIT_SHA?.trim() || env.CF_VERSION_METADATA?.tag || null,
+					}),
+				);
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				const normalized = normalizeStateGatewayError(error, {
+					phase: "VALIDATE",
+					retryable: false,
+					requestId,
+				});
+				console.warn(
+					JSON.stringify({
+						event: "collector_tool_operation",
+						tool: "submit_run_envelope",
+						request_id: requestId,
+						run_id: error instanceof RunEnvelopeError ? error.runId : null,
+						status: normalized.code,
+						phase: normalized.phase,
+						duration_ms: Date.now() - startedAt,
+						collector_build_sha:
+							env.DEPLOYED_GIT_SHA?.trim() || env.CF_VERSION_METADATA?.tag || null,
+					}),
+				);
+				const response = stateGatewayErrorResponse(normalized);
+				if (error instanceof RunEnvelopeError) {
+					const body = JSON.parse(response.content[0].text) as Record<string, unknown>;
+					if (error.runId) body.run_id = error.runId;
+					if (error.outcome) body.outcome = error.outcome;
+					if (error.envelopeKey) body.envelope_key = error.envelopeKey;
+					if (error.blockerCode) body.blocker_code = error.blockerCode;
+					response.content[0].text = JSON.stringify(body, null, 2);
+				}
+				return response;
+			}
 		},
 	);
 
@@ -3163,6 +3255,10 @@ export default {
 		} catch (error) {
 			logBridgeFailure(context, error, "scheduled");
 			throw error;
+		} finally {
+			// Spec §6.3: reconciliation must run even when the bridge fails, but
+			// its own failures are warn-only and never override bridge semantics.
+			await runScheduleReconciliation(env, context);
 		}
 	},
 } satisfies ExportedHandler<Env>;

@@ -26,6 +26,8 @@ export type StateWriteReceipt = {
 	last_error_code: string | null;
 	last_error_phase: string | null;
 	last_http_status: number | null;
+	envelope_key: string | null;
+	event_count: number | null;
 };
 
 const TABLE = "state_write_receipts_v1";
@@ -34,27 +36,41 @@ const readyByDb = new WeakMap<object, Promise<void>>();
 function ensureReceiptTable(db: D1Database): Promise<void> {
 	const existing = readyByDb.get(db as object);
 	if (existing) return existing;
-	const ready = db
-		.prepare(
-			`CREATE TABLE IF NOT EXISTS ${TABLE} (
-				write_key TEXT PRIMARY KEY NOT NULL,
-				channel TEXT NOT NULL,
-				payload_sha256 TEXT NOT NULL,
-				status TEXT NOT NULL,
-				comment_id TEXT,
-				comment_url TEXT,
-				attempt_count INTEGER NOT NULL DEFAULT 0,
-				lease_owner TEXT,
-				lease_until TEXT,
-				created_at TEXT NOT NULL,
-				updated_at TEXT NOT NULL,
-				last_error_code TEXT,
-				last_error_phase TEXT,
-				last_http_status INTEGER
-			) WITHOUT ROWID`,
-		)
-		.run()
-		.then(() => undefined);
+	// Envelope correlation columns (spec §3.2): new databases create them with
+	// the table; pre-existing tables get a one-shot tolerant ALTER. SQLite has
+	// no `ADD COLUMN IF NOT EXISTS`, so only duplicate-column errors are
+	// swallowed — anything else keeps failing loudly.
+	const ready = (async () => {
+		await db
+			.prepare(
+				`CREATE TABLE IF NOT EXISTS ${TABLE} (
+					write_key TEXT PRIMARY KEY NOT NULL,
+					channel TEXT NOT NULL,
+					payload_sha256 TEXT NOT NULL,
+					status TEXT NOT NULL,
+					comment_id TEXT,
+					comment_url TEXT,
+					attempt_count INTEGER NOT NULL DEFAULT 0,
+					lease_owner TEXT,
+					lease_until TEXT,
+					created_at TEXT NOT NULL,
+					updated_at TEXT NOT NULL,
+					last_error_code TEXT,
+					last_error_phase TEXT,
+					last_http_status INTEGER,
+					envelope_key TEXT,
+					event_count INTEGER
+				) WITHOUT ROWID`,
+			)
+			.run();
+		for (const column of ["envelope_key TEXT", "event_count INTEGER"]) {
+			try {
+				await db.prepare(`ALTER TABLE ${TABLE} ADD COLUMN ${column}`).run();
+			} catch (error) {
+				if (!/duplicate column name/i.test(String(error))) throw error;
+			}
+		}
+	})();
 	readyByDb.set(db as object, ready);
 	return ready;
 }
@@ -84,6 +100,8 @@ function normalizeReceipt(row: Record<string, unknown> | null): StateWriteReceip
 		last_error_code: row.last_error_code == null ? null : String(row.last_error_code),
 		last_error_phase: row.last_error_phase == null ? null : String(row.last_error_phase),
 		last_http_status: row.last_http_status == null ? null : Number(row.last_http_status),
+		envelope_key: row.envelope_key == null ? null : String(row.envelope_key),
+		event_count: row.event_count == null ? null : Number(row.event_count),
 	};
 }
 
@@ -201,6 +219,9 @@ export async function finalizeStateWriteReceipt(input: {
 	lastErrorCode?: string | null;
 	lastErrorPhase?: string | null;
 	lastHttpStatus?: number | null;
+	/** Envelope correlation columns (spec §3.3); only the envelope path supplies them. */
+	envelopeKey?: string | null;
+	eventCount?: number | null;
 }): Promise<StateWriteReceipt> {
 	await ensureReceiptTable(input.db);
 	await input.db
@@ -214,7 +235,9 @@ export async function finalizeStateWriteReceipt(input: {
 				updated_at=?6,
 				last_error_code=?7,
 				last_error_phase=?8,
-				last_http_status=?9
+				last_http_status=?9,
+				envelope_key=?10,
+				event_count=?11
 			WHERE write_key=?1 AND lease_owner=?2`,
 		)
 		.bind(
@@ -227,6 +250,8 @@ export async function finalizeStateWriteReceipt(input: {
 			input.lastErrorCode ?? null,
 			input.lastErrorPhase ?? null,
 			input.lastHttpStatus ?? null,
+			input.envelopeKey ?? null,
+			input.eventCount ?? null,
 		)
 		.run();
 	const receipt = await getStateWriteReceipt(input.db, input.writeKey);

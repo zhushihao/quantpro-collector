@@ -21,7 +21,7 @@ const EVENT_TYPE_SCHEMA = z.enum([
 ]);
 const OPTIONAL_TEXT = z.union([z.string().max(16000), z.null()]).optional();
 const RUN_ID_SCHEMA = z.string().min(1).max(192).optional();
-const AS_OF_SCHEMA = z
+export const AS_OF_SCHEMA = z
 	.string()
 	.min(1)
 	.max(128)
@@ -278,10 +278,12 @@ export async function buildInvestmentCommandBatch(input: {
 		run_id?: string | null;
 	};
 	const events = projectEvents(input.channel, parsed.events);
+	// Envelope idempotency identity (spec §2.1): as_of stays in the persisted
+	// batch and ledger payload but is excluded from the digest so re-stamping a
+	// timestamp cannot mint a new write identity.
 	const normalizedCommand = {
 		contract: "owned-state-command-v1",
 		channel: input.channel,
-		as_of: parsed.as_of,
 		events,
 	};
 	const digest = await sha256Hex(normalizedCommand);
@@ -309,6 +311,9 @@ export async function appendInvestmentCommand(input: {
 	fetchImpl?: typeof fetch;
 	now?: string;
 	requestId?: string;
+	/** Envelope correlation columns (spec §3.3); only the envelope path supplies them. */
+	envelopeKey?: string | null;
+	eventCount?: number | null;
 }) {
 	const prepared = await buildInvestmentCommandBatch({
 		channel: input.channel,
@@ -325,6 +330,8 @@ export async function appendInvestmentCommand(input: {
 		requestId: input.requestId,
 		writeKey: prepared.writeKey,
 		payloadSha256: prepared.payloadSha256,
+		envelopeKey: input.envelopeKey,
+		eventCount: input.eventCount,
 	});
 	return { ...result, run_id: prepared.runId };
 }
@@ -401,6 +408,9 @@ export async function appendMarketObservation(input: {
 	fetchImpl?: typeof fetch;
 	now?: string;
 	requestId?: string;
+	/** Envelope correlation columns (spec §3.3); only the envelope path supplies them. */
+	envelopeKey?: string | null;
+	eventCount?: number | null;
 }) {
 	const prepared = await buildMarketObservationBatch({
 		token: input.token,
@@ -417,6 +427,8 @@ export async function appendMarketObservation(input: {
 		fetchImpl: input.fetchImpl,
 		now: input.now,
 		requestId: input.requestId,
+		envelopeKey: input.envelopeKey,
+		eventCount: input.eventCount,
 	});
 	return { ...result, run_id: prepared.runId };
 }
