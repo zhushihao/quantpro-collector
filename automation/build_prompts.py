@@ -26,10 +26,10 @@ RAW_BASE = f"https://raw.githubusercontent.com/{REPO}"
 CONFIG = "automation/build-config.json"
 COMPILER = "automation/build_prompts.py"
 AUTOMATION_IDS = {
-    "holding-assistant-intraday": "6aaa7ffb73c48191abbb0666b6147816",
+    "holding-assistant-intraday": "6aba13a9be90819191840692ed697bb1",
     "holding-assistant-preclose": "6aaa80041c74819191a7d6eb5d3568d8",
     "industry-research": "6a8471af3b688191b076a7bb50bf956f",
-    "company-facts": "6a86bfae3a2481919afae415eca00b60",
+    "company-facts": "6aba138166f48191967e6a6124b7a282",
     "central-policy": "6ab94a7c724881919729edb2ccc7fb58",
     "ai-financing-rates": "6ab94a0c00c88191a1a3b302295723bf",
 }
@@ -229,9 +229,13 @@ def compile_all(ref: str, loader: Loader, *, keys: list[str] | None = None, prov
             text = read(path)
             if path == STATE:
                 text = text.replace("{{STATE_CHANNEL}}", entry["channel"])
-                text = text.replace("{{STATE_APPEND_TOOL}}",
-                                    "append_company_events" if key == "company-facts"
-                                    else "append_state_batch")
+                append_tool = {
+                    "company-facts": "append_company_events",
+                    "industry-research": "append_industry_events",
+                    "holding-assistant-intraday": "append_market_observation",
+                    "holding-assistant-preclose": "append_market_observation",
+                }[key]
+                text = text.replace("{{STATE_APPEND_TOOL}}", append_tool)
             if "{{" in text or "}}" in text:
                 raise BuildError(f"{key}: unresolved template in {path}")
             pieces.append(text.rstrip("\n"))
