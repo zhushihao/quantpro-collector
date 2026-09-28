@@ -88,33 +88,41 @@ export const CLOSE_EVENT_COMMAND_SCHEMA = z
 	});
 
 function investmentCommandSchema(eventSchema: z.ZodTypeAny) {
-	return z
-		.object({
-			as_of: AS_OF_SCHEMA,
-			events: z.array(eventSchema).min(1).max(128),
-			run_id: RUN_ID_SCHEMA,
-		});
-}
-
-export const APPEND_COMPANY_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
-	COMPANY_EVENT_COMMAND_SCHEMA,
-);
-export const APPEND_INDUSTRY_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
-	INDUSTRY_EVENT_COMMAND_SCHEMA,
-);
-export const APPEND_CLOSE_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
-	CLOSE_EVENT_COMMAND_SCHEMA,
-);
-
-export const APPEND_MARKET_OBSERVATION_INPUT_SCHEMA = z
-	.object({
-		trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+	return z.object({
 		as_of: AS_OF_SCHEMA,
-		scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
-		production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
-		records: z.array(z.record(z.string().min(1), z.unknown())).max(512),
+		events: z.array(eventSchema).min(1).max(128),
 		run_id: RUN_ID_SCHEMA,
 	});
+}
+
+// Internal parsing stays strip-tolerant so unknown caller fields are accepted
+// and discarded before hashing/persistence. Exported MCP schemas are strict so
+// Scheduled Task host safety sees a bounded write surface.
+const COMPANY_COMMAND_SCHEMA = investmentCommandSchema(COMPANY_EVENT_COMMAND_SCHEMA);
+const INDUSTRY_COMMAND_SCHEMA = investmentCommandSchema(INDUSTRY_EVENT_COMMAND_SCHEMA);
+const CLOSE_COMMAND_SCHEMA = investmentCommandSchema(CLOSE_EVENT_COMMAND_SCHEMA);
+
+export const APPEND_COMPANY_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
+	COMPANY_EVENT_COMMAND_SCHEMA.strict(),
+).strict();
+export const APPEND_INDUSTRY_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
+	INDUSTRY_EVENT_COMMAND_SCHEMA.strict(),
+).strict();
+export const APPEND_CLOSE_EVENTS_INPUT_SCHEMA = investmentCommandSchema(
+	CLOSE_EVENT_COMMAND_SCHEMA.strict(),
+).strict();
+
+const MARKET_OBSERVATION_COMMAND_SCHEMA = z.object({
+	trading_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+	as_of: AS_OF_SCHEMA,
+	scheduled_slot: MARKET_LEDGER_SLOT_SCHEMA,
+	production_ref: z.string().regex(/^[0-9a-f]{40}$/i),
+	records: z.array(z.record(z.string().min(1), z.unknown())).max(512),
+	run_id: RUN_ID_SCHEMA,
+});
+
+export const APPEND_MARKET_OBSERVATION_INPUT_SCHEMA =
+	MARKET_OBSERVATION_COMMAND_SCHEMA.strict();
 
 type InvestmentCommandChannel = Exclude<StateWriteChannel, "MARKET">;
 
@@ -229,9 +237,9 @@ function projectCloseEvent(
 }
 
 function schemaForChannel(channel: InvestmentCommandChannel) {
-	if (channel === "COMPANY") return APPEND_COMPANY_EVENTS_INPUT_SCHEMA;
-	if (channel === "INDUSTRY") return APPEND_INDUSTRY_EVENTS_INPUT_SCHEMA;
-	return APPEND_CLOSE_EVENTS_INPUT_SCHEMA;
+	if (channel === "COMPANY") return COMPANY_COMMAND_SCHEMA;
+	if (channel === "INDUSTRY") return INDUSTRY_COMMAND_SCHEMA;
+	return CLOSE_COMMAND_SCHEMA;
 }
 
 function projectEvents(channel: InvestmentCommandChannel, events: unknown[]) {
@@ -341,7 +349,7 @@ export async function buildMarketObservationBatch(input: {
 	fetchImpl?: typeof fetch;
 }): Promise<{ batch: Record<string, unknown>; runId: string | null }> {
 	const parsed = parseCommand(
-		APPEND_MARKET_OBSERVATION_INPUT_SCHEMA,
+		MARKET_OBSERVATION_COMMAND_SCHEMA,
 		input.command,
 		"MARKET observation",
 	);
