@@ -77,6 +77,23 @@ test("#37 ignored fields and run_id do not change the business write identity", 
 	assert.notEqual(left.batch.portfolio_version, right.batch.portfolio_version);
 });
 
+test("envelope contract: re-stamping as_of does not change the write identity (spec §2.1)", async () => {
+	const left = await buildInvestmentCommandBatch({
+		channel: "COMPANY",
+		command: companyCommand(),
+		portfolioVersion: "live:sha256:portfolio-a",
+	});
+	const right = await buildInvestmentCommandBatch({
+		channel: "COMPANY",
+		command: companyCommand({ as_of: "2026-09-27T23:59:00+08:00" }),
+		portfolioVersion: "live:sha256:portfolio-b",
+	});
+	assert.notEqual(left.batch.as_of, right.batch.as_of, "as_of still persists into the batch");
+	assert.equal(left.writeKey, right.writeKey);
+	assert.equal(left.payloadSha256, right.payloadSha256);
+	assert.equal(left.batch.event_id, right.batch.event_id);
+});
+
 test("#37 core COMPANY input remains strict", async () => {
 	await assert.rejects(
 		buildInvestmentCommandBatch({

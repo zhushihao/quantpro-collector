@@ -22,87 +22,98 @@ class FakeD1 {
 				this.args = args;
 				return this;
 			},
-			async run() {
-				const args = this.args;
-				if (sql.startsWith("CREATE TABLE")) {
-					db.tableExists = true;
-					return { success: true };
-				}
-				if (sql.includes("INSERT OR IGNORE")) {
-					const [writeKey, channel, hash, now] = args;
-					if (!db.rows.has(writeKey)) {
-						db.rows.set(writeKey, {
-							write_key: writeKey,
-							channel,
-							payload_sha256: hash,
-							status: "PENDING",
-							comment_id: null,
-							comment_url: null,
-							attempt_count: 0,
-							lease_owner: null,
-							lease_until: null,
-							created_at: now,
-							updated_at: now,
-							last_error_code: null,
-							last_error_phase: null,
-							last_http_status: null,
-						});
+				async run() {
+					const args = this.args;
+					if (sql.startsWith("CREATE TABLE")) {
+						db.tableExists = true;
+						return { success: true };
 					}
-					return { success: true };
-				}
-				if (sql.includes("SET status='PENDING'")) {
-					const [writeKey, owner, leaseUntil, now, hash, channel] = args;
-					const row = db.rows.get(writeKey);
-					if (
-						row &&
-						row.payload_sha256 === hash &&
-						row.channel === channel &&
-						!["PERSISTED", "IDEMPOTENT_REPLAY", "CONFLICT"].includes(row.status) &&
-						(!row.lease_owner ||
-							!row.lease_until ||
-							row.lease_until < now ||
-							row.lease_owner === owner)
-					) {
-						Object.assign(row, {
-							status: "PENDING",
-							attempt_count: row.attempt_count + 1,
-							lease_owner: owner,
-							lease_until: leaseUntil,
-							updated_at: now,
-						});
+					if (sql.startsWith("ALTER TABLE")) {
+						// Runtime lazy migration (spec §3.2): the fake already carries
+						// the new columns, so both ALTERs are accepted as no-ops.
+						return { success: true };
 					}
-					return { success: true };
-				}
-				if (sql.includes("SET status=?3")) {
-					const [
-						writeKey,
-						owner,
-						status,
-						commentId,
-						commentUrl,
-						updatedAt,
-						errorCode,
-						phase,
-						http,
-					] = args;
-					const row = db.rows.get(writeKey);
-					if (row?.lease_owner === owner) {
-						Object.assign(row, {
+					if (sql.includes("INSERT OR IGNORE")) {
+						const [writeKey, channel, hash, now] = args;
+						if (!db.rows.has(writeKey)) {
+							db.rows.set(writeKey, {
+								write_key: writeKey,
+								channel,
+								payload_sha256: hash,
+								status: "PENDING",
+								comment_id: null,
+								comment_url: null,
+								attempt_count: 0,
+								lease_owner: null,
+								lease_until: null,
+								created_at: now,
+								updated_at: now,
+								last_error_code: null,
+								last_error_phase: null,
+								last_http_status: null,
+								envelope_key: null,
+								event_count: null,
+							});
+						}
+						return { success: true };
+					}
+					if (sql.includes("SET status='PENDING'")) {
+						const [writeKey, owner, leaseUntil, now, hash, channel] = args;
+						const row = db.rows.get(writeKey);
+						if (
+							row &&
+							row.payload_sha256 === hash &&
+							row.channel === channel &&
+							!["PERSISTED", "IDEMPOTENT_REPLAY", "CONFLICT"].includes(row.status) &&
+							(!row.lease_owner ||
+								!row.lease_until ||
+								row.lease_until < now ||
+								row.lease_owner === owner)
+						) {
+							Object.assign(row, {
+								status: "PENDING",
+								attempt_count: row.attempt_count + 1,
+								lease_owner: owner,
+								lease_until: leaseUntil,
+								updated_at: now,
+							});
+						}
+						return { success: true };
+					}
+					if (sql.includes("SET status=?3")) {
+						const [
+							writeKey,
+							owner,
 							status,
-							comment_id: commentId,
-							comment_url: commentUrl,
-							lease_owner: null,
-							lease_until: null,
-							updated_at: updatedAt,
-							last_error_code: errorCode,
-							last_error_phase: phase,
-							last_http_status: http,
-						});
+							commentId,
+							commentUrl,
+							updatedAt,
+							errorCode,
+							phase,
+							http,
+							envelopeKey,
+							eventCount,
+						] = args;
+						const row = db.rows.get(writeKey);
+						if (row?.lease_owner === owner) {
+							Object.assign(row, {
+								status,
+								comment_id: commentId,
+								comment_url: commentUrl,
+								lease_owner: null,
+								lease_until: null,
+								updated_at: updatedAt,
+								last_error_code: errorCode,
+								last_error_phase: phase,
+								last_http_status: http,
+								envelope_key: envelopeKey,
+								event_count: eventCount,
+							});
+						}
+						return { success: true };
 					}
-					return { success: true };
-				}
-				throw new Error(`unsupported fake D1 run SQL: ${sql}`);
-			},
+					throw new Error(`unsupported fake D1 run SQL: ${sql}`);
+				},
 			async first() {
 				if (sql.includes("sqlite_master")) {
 					return db.tableExists ? { name: "state_write_receipts_v1" } : null;
@@ -237,19 +248,43 @@ test("append_state_batch persists once, records receipt and replays without a se
 	assert.equal(postCount, 1);
 
 	const replay = await appendStateBatch({
-		db,
-		token: "fake",
-		channel: "INDUSTRY",
-		batch,
-		fetchImpl: async () => {
-			throw new Error("replay must be satisfied from persisted receipt");
-		},
-		now: "2026-09-26T12:31:00Z",
-		requestId: "request-two",
+			db,
+			token: "fake",
+			channel: "INDUSTRY",
+			batch,
+			fetchImpl: async () => {
+				throw new Error("replay must be satisfied from persisted receipt");
+			},
+			now: "2026-09-26T12:31:00Z",
+			requestId: "request-two",
+		});
+		assert.equal(replay.status, "IDEMPOTENT_REPLAY");
+		assert.equal(postCount, 1);
+
+		// Non-envelope writes leave the correlation columns NULL (spec §3.3).
+		assert.equal(first.receipt.envelope_key, null);
+		assert.equal(first.receipt.event_count, null);
+
+		// Envelope-path finalization fills them (spec §3.3), and the stored
+		// receipt round-trips both columns.
+		const envelopeWrite = await appendStateBatch({
+			db,
+			token: "fake",
+			channel: "INDUSTRY",
+			batch: { ...batch, event_id: "20260926T203100+08|industry_trend|BATCH" },
+			fetchImpl,
+			now: "2026-09-26T12:35:00Z",
+			requestId: "request-envelope",
+			envelopeKey: "E:INDUSTRY:" + "a".repeat(64),
+			eventCount: 1,
+		});
+		assert.equal(envelopeWrite.status, "PERSISTED");
+		assert.equal(envelopeWrite.receipt.envelope_key, "E:INDUSTRY:" + "a".repeat(64));
+		assert.equal(envelopeWrite.receipt.event_count, 1);
+		const reread = await getStateWriteReceipt(db, envelopeWrite.write_key);
+		assert.equal(reread.envelope_key, "E:INDUSTRY:" + "a".repeat(64));
+		assert.equal(reread.event_count, 1);
 	});
-	assert.equal(replay.status, "IDEMPOTENT_REPLAY");
-	assert.equal(postCount, 1);
-});
 
 test("CLOSE profile fails closed without upstream COMPANY R2", async () => {
 	const db = new FakeD1();

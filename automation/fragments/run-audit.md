@@ -1,3 +1,2 @@
-## 运行审计
-生产只依赖稳定工具 record_automation_run，不依赖宿主是否已刷新出 begin_run/end_run。开始时调用一次：task_name=REGISTRY_KEY，run_id=SERVER_AUTO，phase=STARTED，status=STARTED，occurred_at=SERVER，prompt_version=DEPLOYED_FROM_GIT_REF；Collector 返回真正 run_id，整轮复用该值。审计开始失败只记 AUDIT_DEGRADED，继续业务，不把可观测性故障冒充业务阻断。
-结束前若已有真实run_id，再调用一次 record_automation_run：phase=FINAL，status仅COMPLETED/SILENT/BLOCKED/FAILED，occurred_at=SERVER，fresh_delta_count填本轮数量；兼容字段notification_sent在此合同中只表示“准备通知”，不声称实际送达；必要时用safe_summary/blocker_code给脱敏短因。FINAL失败不得覆盖本轮真实业务结果，也不得修改Automation。不得自行生成随机run_id/时间戳，也不得把完整研究正文、持仓、凭据写入审计。
+## 运行交件
+每轮恰好一次调用 submit_run_envelope：task_name=REGISTRY_KEY，summary用一句人话写本轮结论；有新增时带channel_payload，无新增省略channel_payload（空包=心跳，表示本轮跑过、没有可入账的新增）。READ_ONLY任务同样交心跳空包，服务端没有该类任务的入账事实可数。交件失败按common-safety停受影响动作并简报，不改键重投、不换用其他写入工具或旧的双段运行登记入口回退。回执outcome/notification_required由服务端从写入事实派生：notification_required=true只表示“至少这些新增值得通知”，投递仍由你完成，落账不等于已投递；false表示服务端没有看到任何需要通知的入账事实。不把完整研究正文、持仓、凭据写进summary。

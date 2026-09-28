@@ -27,7 +27,7 @@ import {
 	type StateWriteReceipt,
 } from "./state-receipts.ts";
 
-export const STATE_GATEWAY_VERSION = "1.1.0";
+export const STATE_GATEWAY_VERSION = "1.2.0";
 export const STATE_GATEWAY_CONTRACT_VERSION = "state-gateway-v1";
 export const STATE_CHANNEL_SCHEMA = z.enum(STATE_WRITE_CHANNELS);
 
@@ -534,6 +534,9 @@ export async function appendStateBatch(input: {
 	writeKey?: string;
 	/** Hash of the normalized caller-owned business command; excludes server metadata. */
 	payloadSha256?: string;
+	/** Envelope correlation columns (spec §3.3); only the envelope path supplies them. */
+	envelopeKey?: string | null;
+	eventCount?: number | null;
 }): Promise<{
 	status: "PERSISTED" | "IDEMPOTENT_REPLAY";
 	persisted: true;
@@ -620,14 +623,16 @@ export async function appendStateBatch(input: {
 						fetchImpl: input.fetchImpl,
 					});
 		const receipt = await finalizeStateWriteReceipt({
-			db: input.db,
-			writeKey,
-			requestId,
-			status: result.status,
-			updatedAt: new Date().toISOString(),
-			commentId: result.comment_id,
-			commentUrl: result.url,
-		});
+				db: input.db,
+				writeKey,
+				requestId,
+				status: result.status,
+				updatedAt: new Date().toISOString(),
+				commentId: result.comment_id,
+				commentUrl: result.url,
+				envelopeKey: input.envelopeKey,
+				eventCount: input.eventCount,
+			});
 		return {
 			status: result.status,
 			persisted: true,
@@ -655,6 +660,8 @@ export async function appendStateBatch(input: {
 			lastErrorCode: mapped.code,
 			lastErrorPhase: mapped.phase,
 			lastHttpStatus: mapped.httpStatus,
+			envelopeKey: input.envelopeKey,
+			eventCount: input.eventCount,
 		});
 		throw mapped;
 	}
@@ -722,6 +729,7 @@ export async function getGatewayStatus(input: {
 			"read_state_snapshot_v2",
 			"validate_state_batch",
 			"append_state_batch",
+			"submit_run_envelope",
 			"append_company_events",
 			"append_industry_events",
 			"append_close_events",

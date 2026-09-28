@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+import {
+	MISSED_SLOT_LOOKBACK_DAYS,
+	computeTimeliness,
+	deriveMissedSlotsFromRawRows,
+	ensureRunEnvelopeTables,
+	readScheduleRows,
+} from "./automation-schedule.ts";
+
 export const AUTOMATION_RUN_PHASES = ["STARTED", "FINAL"] as const;
 export const AUTOMATION_RUN_STATUSES = [
 	"STARTED",
@@ -878,17 +886,28 @@ export async function recordAutomationRunEvent(input: {
 	}
 }
 
+const HISTORY_READ_CAP = 1000;
+
+function timeKeyMs(value: string | null): number {
+	if (!value) return 0;
+	const ms = Date.parse(value);
+	return Number.isNaN(ms) ? 0 : ms;
+}
+
 export async function getAutomationRunHistory(input: {
 	db: D1Database;
 	taskName?: string;
 	since?: string;
 	limit?: number;
+	/** Server clock seam for deterministic tests; defaults to the real clock. */
+	now?: string;
 	requestId?: string;
 }): Promise<{
 	status: "OK";
 	task_name: string | null;
 	since: string | null;
 	runs: Array<Record<string, unknown>>;
+	truncated?: boolean;
 }> {
 	const requestId = input.requestId ?? crypto.randomUUID().replaceAll("-", "");
 	const taskName = input.taskName?.trim() || null;
@@ -904,6 +923,23 @@ export async function getAutomationRunHistory(input: {
 
 	try {
 		await ensureAutomationRunsTable(input.db);
+		await ensureRunEnvelopeTables(input.db);
+		const nowMs = input.now ? Date.parse(input.now) : Date.now();
+		if (Number.isNaN(nowMs)) {
+			throw new AutomationRunLedgerError(
+				"AUTOMATION_RUN_VALIDATION_FAILED",
+				"server run timestamp is invalid",
+				{ requestId },
+			);
+		}
+		const lookbackMs = MISSED_SLOT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+		const sinceMs = since ? Date.parse(since) : Number.NaN;
+		const derivationStartMs = Number.isNaN(sinceMs)
+			? nowMs - lookbackMs
+			: Math.max(nowMs - lookbackMs, sinceMs);
+
+		// Review F6 query shape: one time-range SELECT per (task, table), then
+		// all windowing/merging in JS.
 		const clauses: string[] = [];
 		const binds: unknown[] = [];
 		if (taskName) {
@@ -917,7 +953,7 @@ export async function getAutomationRunHistory(input: {
 			);
 		}
 		const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
-		binds.push(limit);
+		binds.push(HISTORY_READ_CAP);
 		const result = await input.db
 			.prepare(
 				`SELECT * FROM ${TABLE}${where}
@@ -926,7 +962,35 @@ export async function getAutomationRunHistory(input: {
 			)
 			.bind(...binds)
 			.all<Record<string, unknown>>();
-		const runs = (result.results ?? []).map((raw) => {
+		const v2Raw = result.results ?? [];
+
+		const v3Clauses: string[] = [];
+		const v3Binds: unknown[] = [];
+		if (taskName) {
+			v3Binds.push(taskName);
+			v3Clauses.push(`task_name=?${v3Binds.length}`);
+		}
+		if (since) {
+			v3Binds.push(since);
+			v3Clauses.push(`received_at>=?${v3Binds.length}`);
+		}
+		const v3Where = v3Clauses.length > 0 ? ` WHERE ${v3Clauses.join(" AND ")}` : "";
+		v3Binds.push(HISTORY_READ_CAP);
+		const v3Result = await input.db
+			.prepare(
+				`SELECT * FROM automation_runs_v3${v3Where}
+				ORDER BY received_at DESC
+				LIMIT ?${v3Binds.length}`,
+			)
+			.bind(...v3Binds)
+			.all<Record<string, unknown>>();
+		const v3Raw = v3Result.results ?? [];
+
+		// One schedule read feeds both as_of_stale/timeliness derivation and
+		// MISSED_SLOT windows (spec §2.4/§6.2).
+		const scheduleRows = await readScheduleRows(input.db);
+
+		const v2Runs = v2Raw.map((raw) => {
 			const row = normalizeRow(raw)!;
 			const legacy = row.source_contract === "legacy-event-v1";
 			return {
@@ -961,7 +1025,92 @@ export async function getAutomationRunHistory(input: {
 				source_contract: row.source_contract,
 			};
 		});
-		return { status: "OK", task_name: taskName, since, runs };
+
+		const v3Runs = v3Raw.map((raw) => {
+			const outcome = String(raw.outcome ?? "UNKNOWN") as
+				| "COMPLETED"
+				| "SILENT"
+				| "BLOCKED"
+				| "FAILED"
+				| "UNKNOWN";
+			const asOf = raw.as_of == null ? null : String(raw.as_of);
+			const receivedAt = String(raw.received_at ?? "");
+			const windowMinutes = scheduleRows.find(
+				(schedule) => schedule.task_name === String(raw.task_name ?? "") && schedule.enabled,
+			)?.window_minutes ?? null;
+			const timeliness = asOf
+				? computeTimeliness(asOf, Date.parse(receivedAt), windowMinutes)
+				: null;
+			const freshDeltaCount = raw.fresh_delta_count == null ? null : Number(raw.fresh_delta_count);
+			return {
+				task_name: String(raw.task_name ?? ""),
+				run_id: String(raw.run_id ?? ""),
+				scheduled_for: null,
+				started_at: null,
+				finished_at: null,
+				received_at: receivedAt,
+				effective_status: outcome,
+				final_recorded: outcome !== "UNKNOWN",
+				result_semantics: outcome === "UNKNOWN" ? "RESULT_UNKNOWN" : "TERMINAL_RECORDED",
+				notification_sent: null,
+				notification_intended: null,
+				notification_required: (freshDeltaCount ?? 0) > 0,
+				notification_semantics: "SERVER_DERIVED_FLOOR",
+				delivery: "MODEL_DELIVERY_UNVERIFIED",
+				fresh_delta_count: freshDeltaCount,
+				fresh_delta_semantics: "SERVER_COUNTED",
+				event_count: raw.event_count == null ? null : Number(raw.event_count),
+				blocker_code:
+					outcome === "BLOCKED" || outcome === "FAILED"
+						? raw.blocker_code == null
+							? null
+							: String(raw.blocker_code)
+						: null,
+				trace_id: String(raw.run_id ?? ""),
+				collector_build_sha:
+					raw.collector_build_sha == null ? null : String(raw.collector_build_sha),
+				cloudflare_version_id:
+					raw.cloudflare_version_id == null ? null : String(raw.cloudflare_version_id),
+				prompt_version: null,
+				safe_summary: raw.summary == null ? null : String(raw.summary),
+				as_of: asOf,
+				as_of_stale: asOf ? timeliness === "STALE" : null,
+				timeliness,
+				slot: raw.slot == null ? null : String(raw.slot),
+				slot_date: raw.slot_date == null ? null : String(raw.slot_date),
+				source_contract: "run-v3",
+			};
+		});
+
+		const { missed, truncated } = deriveMissedSlotsFromRawRows({
+			scheduleRows,
+			v3Rows: v3Raw,
+			v2Rows: v2Raw,
+			taskName,
+			derivationStartMs,
+			nowMs,
+		});
+
+		// Merge on each row's own time key BEFORE slicing to the caller limit —
+		// limiting either source first would drop and misorder rows (review F8).
+		const merged: Array<{ key: number; row: Record<string, unknown> }> = [];
+		for (const row of v2Runs) {
+			merged.push({
+				key: timeKeyMs(row.finished_at ?? row.started_at ?? null),
+				row,
+			});
+		}
+		for (const row of v3Runs) {
+			merged.push({ key: timeKeyMs(row.received_at), row });
+		}
+		for (const row of missed) {
+			merged.push({ key: timeKeyMs(row.window_end), row });
+		}
+		merged.sort((left, right) => right.key - left.key);
+		const runs = merged.slice(0, limit).map((entry) => entry.row);
+		return truncated
+			? { status: "OK", task_name: taskName, since, runs, truncated: true }
+			: { status: "OK", task_name: taskName, since, runs };
 	} catch (error) {
 		if (error instanceof AutomationRunLedgerError) throw error;
 		throw new AutomationRunLedgerError(
