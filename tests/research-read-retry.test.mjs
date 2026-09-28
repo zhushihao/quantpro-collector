@@ -119,7 +119,7 @@ test("missing-table and SQL-syntax failures are deterministic and never blindly 
 	}
 });
 
-test("unknown native errors do not retry and diagnostics never serialize the raw message", async () => {
+test("unknown native read error gets one short retry and diagnostics omit raw message", async () => {
 	const rawMarker = "opaque failure with private-looking payload=DO_NOT_LOG";
 	const events = [];
 	let attempts = 0;
@@ -131,7 +131,7 @@ test("unknown native errors do not retry and diagnostics never serialize the raw
 			},
 			{
 				delaysMs: [1, 2],
-				sleep: async () => assert.fail("unknown failure must not sleep"),
+				sleep: async () => {},
 				requestId: "req-unknown",
 				tool: "search_documents",
 				onFailure: (event) => events.push(event),
@@ -139,13 +139,25 @@ test("unknown native errors do not retry and diagnostics never serialize the raw
 		),
 		(error) =>
 			error instanceof ResearchBoundaryError &&
-			error.retryable === false &&
+			error.retryable === true &&
 			error.request_id === "req-unknown",
 	);
-	assert.equal(attempts, 1);
+	assert.equal(attempts, 2);
 	assert.equal(events[0].failure_class, "UNKNOWN");
 	assert.equal(events[0].diagnostic_code, "UNKNOWN_BACKEND_READ_ERROR");
+	assert.deepEqual(events.map((event) => event.will_retry), [true, false]);
 	assert.equal(JSON.stringify(events).includes(rawMarker), false);
+});
+
+test("unknown native read failure can recover on its second attempt", async () => {
+	let attempts = 0;
+	const result = await withResearchReadRetry(async () => {
+		attempts += 1;
+		if (attempts === 1) throw new Error("opaque D1 read failure");
+		return [];
+	}, { delaysMs: [1, 2], sleep: async () => {}, tool: "search_documents" });
+	assert.deepEqual(result, []);
+	assert.equal(attempts, 2);
 });
 
 test("classifier inspects a bounded cause chain for wrapped D1 transient errors", () => {
