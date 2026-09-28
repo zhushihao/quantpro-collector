@@ -7,7 +7,7 @@
     "holding-assistant-intraday": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+      "production_ref": "8dbb111ac1d30d36e6f2010fd54dc855ff2e0d11",
       "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "INTRADAY",
       "automation_guidance": [
@@ -15,27 +15,27 @@
       ],
       "research_guidance": [],
       "schedule": "工作日 09:50 / 10:50 / 11:50 / 13:50 / 14:50",
-      "automation_id": "6aaa7ffb73c48191abbb0666b6147816",
-      "compiled_prompt_sha256": "baaf1e582ff2e12ab0fa261719db27df100669e9f8c0e2e37d3f5402b99c4770",
-      "compiled_prompt_chars": 5420,
+      "automation_id": "6aba13a9be90819191840692ed697bb1",
+      "compiled_prompt_sha256": "703479a1272b08dcc980c0be155a9196c414e32daef9930a8a4fa15a9f6ba41c",
+      "compiled_prompt_chars": 5395,
       "max_chars": 6500,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/holding-assistant.md": "8249c5b80ddfc6908ee70b7df7c80d457cbe06e5bdf1b359427024787ecd17e6",
-        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
-        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
-        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
-        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
-        "automation/modes/holding-intraday.md": "fe9fac34e0b4931b61bbd808ca9cd9d08d650ca63751780bbbcfe92af82cdc98",
-        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
-        "automation_guidance/holding-assistant/mode-discipline.md": "85523a4eddb8309f5ebf758cc7a07754ab850ca028a18c58ad1ffd77e97cf0e5"
+        "automation/prompts/holding-assistant.md": "55738d4003f48f4a99234a3416518445612fc929669495b3cfa99ff8b081fb6a",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/state-gateway.md": "ae25eec79b1914e4cf37606ea44db4b59cdfaa256fb8290e2a81ca3f0e1fdda1",
+        "automation/modes/holding-intraday.md": "05412be02d4480f12c3b984e652b4e52bc81af1cf304f1467e027393134ba7e3",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/holding-assistant/mode-discipline.md": "97016da0313e9adccc4d0d851a52ce3f95976272ba341d82146652f1717346d0"
       }
     },
     "holding-assistant-preclose": {
       "prompt_id": "holding-assistant",
       "path": "automation/prompts/holding-assistant.md",
-      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+      "production_ref": "8dbb111ac1d30d36e6f2010fd54dc855ff2e0d11",
       "write_scope": "MARKET_LEDGER_APPEND_ONLY",
       "mode": "PREOPEN_CLOSE",
       "automation_guidance": [
@@ -44,26 +44,26 @@
       "research_guidance": [],
       "schedule": "工作日 09:10 / 10:10 Recovery / 16:45",
       "automation_id": "6aaa80041c74819191a7d6eb5d3568d8",
-      "compiled_prompt_sha256": "48515af33d4c3663be537b5027347d18acb05bce55cec56cda4d368b16aa29f9",
-      "compiled_prompt_chars": 5907,
+      "compiled_prompt_sha256": "face56c1d5074f4f39ca29c3c0f7871ebd614dd95d0e238f4886d903dfc1c4af",
+      "compiled_prompt_chars": 5882,
       "max_chars": 6500,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/holding-assistant.md": "8249c5b80ddfc6908ee70b7df7c80d457cbe06e5bdf1b359427024787ecd17e6",
-        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
-        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
-        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
-        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
-        "automation/modes/holding-preclose.md": "1e1a6a14901d1b1e1124600b7a0561d396e157ef703f335ff4bda47e311a97ec",
-        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
-        "automation_guidance/holding-assistant/mode-discipline.md": "85523a4eddb8309f5ebf758cc7a07754ab850ca028a18c58ad1ffd77e97cf0e5"
+        "automation/prompts/holding-assistant.md": "55738d4003f48f4a99234a3416518445612fc929669495b3cfa99ff8b081fb6a",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/state-gateway.md": "ae25eec79b1914e4cf37606ea44db4b59cdfaa256fb8290e2a81ca3f0e1fdda1",
+        "automation/modes/holding-preclose.md": "e4db1bc667d54a2e9b641e8f9680d1d4bd7aa997b768dba1cf842780dfe57890",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/holding-assistant/mode-discipline.md": "97016da0313e9adccc4d0d851a52ce3f95976272ba341d82146652f1717346d0"
       }
     },
     "industry-research": {
       "prompt_id": "industry-research",
       "path": "automation/prompts/industry-research.md",
-      "production_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
+      "production_ref": "8dbb111ac1d30d36e6f2010fd54dc855ff2e0d11",
       "write_scope": "RESEARCH_JOB_AND_INDUSTRY_LEDGER",
       "automation_guidance": [
         "automation_guidance/industry-research/system-bom-fresh-delta.md"
@@ -73,8 +73,8 @@
       ],
       "schedule": "每小时 :45",
       "automation_id": "6a8471af3b688191b076a7bb50bf956f",
-      "compiled_prompt_sha256": "dfa46f4d92d6c47f0452010c520ce39946f48e14c11f339e56206d6f5934bede",
-      "compiled_prompt_chars": 5587,
+      "compiled_prompt_sha256": "58990379a3a7c4be63c1890c2729bb1159a58aaca74519baeef4c7c7416f60fa",
+      "compiled_prompt_chars": 5501,
       "max_chars": 5600,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
@@ -83,7 +83,7 @@
         "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
         "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
         "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
-        "automation/fragments/state-gateway.md": "9e46777971cb5b707fba43269395f2269415059f0e368619fb8479c3f9cc4d11",
+        "automation/fragments/state-gateway.md": "ae25eec79b1914e4cf37606ea44db4b59cdfaa256fb8290e2a81ca3f0e1fdda1",
         "automation/fragments/investment-input.md": "816a10c3d8ec60f45dd454d40ad23ca6953bc76a9cd4dd1a7340c5235f27c104",
         "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
         "automation_guidance/industry-research/system-bom-fresh-delta.md": "0d880e171738ac703e0414c83f922ff00e3f9b2b8ca9035fa05cf52d0638df93",
@@ -93,28 +93,28 @@
     "company-facts": {
       "prompt_id": "company-facts",
       "path": "automation/prompts/company-facts.md",
-      "production_ref": "bcb25e681144a19e4447e42c79bba11ed52f5bdf",
+      "production_ref": "bdc69c21d95af9b94cc9eca666aa4e0345e7d795",
       "write_scope": "COMPANY_LEDGER_APPEND_ONLY",
       "automation_guidance": [
         "automation_guidance/company-facts/capital-action-milestones.md"
       ],
       "research_guidance": [],
       "schedule": "每小时",
-      "automation_id": "6a86bfae3a2481919afae415eca00b60",
-      "compiled_prompt_sha256": "616e5ead833dd85104451d3e6d261f062356c58567e6aa11ec651b3028c20e9e",
-      "compiled_prompt_chars": 4422,
+      "automation_id": "6aba138166f48191967e6a6124b7a282",
+      "compiled_prompt_sha256": "5e43ced8d049eade4bda160e54350104f00c1b73e47ce8bf07b9ba5dc1b303b1",
+      "compiled_prompt_chars": 4334,
       "max_chars": 4700,
       "contract_version": "automation-v3",
       "deployment_status": "VERIFIED",
       "source_sha256": {
-        "automation/prompts/company-facts.md": "b977bff85e31c154df390641481a0809c68f3c33e8709cc06cef0ddfa94c014d",
-        "automation/fragments/common-safety.md": "dbb9333ac138697a423fae67ab20b02f9ae9291250ad7a5fd52beb7e1188deec",
-        "automation/fragments/run-audit.md": "d0bf01f61aaca47b9bb3e9680494eb3067d9d3dd3a5b07b7bed978d6fb366c44",
-        "automation/fragments/fresh-delta.md": "dff176c8a467c250256f073d8e5009055995369e984063e31cbed502591bc870",
-        "automation/fragments/state-gateway.md": "7430e84f6f37a59cf03eea89591fec51aad93002fc15982d8094094cbcf0fcba",
-        "automation/fragments/investment-input.md": "3f1227dd0429bf4e8531043bee120603334af7da87c871d40c46e2f348a3d661",
-        "automation/fragments/output-style.md": "a26617b06a45ab0aeb4ceff7542df1bfa76126f0308a1d2fb5088e4ef16581bc",
-        "automation_guidance/company-facts/capital-action-milestones.md": "871c0c6c26f392fea7fad7eb10dbd9b3df7b0f748987925a0e0603794a62f6e7"
+        "automation/prompts/company-facts.md": "c1907b4b7e9eece6e02c47341dd47cf34db2073501498bfeca9a15f02a7c2098",
+        "automation/fragments/common-safety.md": "4bb2b4256564fd2e94d3b14c430c738c537c7e6ac2966fa70c1ea8a39e640070",
+        "automation/fragments/run-audit.md": "ed225d0fb6a180b89e32951533b7e312224ce19c7962ec130abc289f4ce17a0c",
+        "automation/fragments/fresh-delta.md": "cd0f9dac8dc7f9f7edb96c5c1955f5a6876464c3b54506f13d1052d281a438af",
+        "automation/fragments/state-gateway.md": "ae25eec79b1914e4cf37606ea44db4b59cdfaa256fb8290e2a81ca3f0e1fdda1",
+        "automation/fragments/investment-input.md": "816a10c3d8ec60f45dd454d40ad23ca6953bc76a9cd4dd1a7340c5235f27c104",
+        "automation/fragments/output-style.md": "71409ddd5d6fb41e0a56677b160834452f3add3003509cd77db442baa837432c",
+        "automation_guidance/company-facts/capital-action-milestones.md": "de245fd224e7cf7bd18b9705abb53454c2e16fc613e9cf77f3740d2a9b974b71"
       }
     },
     "central-policy": {
@@ -170,20 +170,16 @@
   },
   "last_verified_release_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
   "deployment_observations": {
-    "issue": 33,
-    "status": "DEPLOYED",
-    "audit_path": "automation/audit/issue-33-final-release.json",
+    "issue": 37,
+    "status": "MIXED_VERIFIED",
+    "audit_path": "automation/control/production.json",
     "verified_tasks": 6,
-    "all_production_tasks_enabled": true,
-    "source_refs": [
-      "87a8f35bfe9df631f1a490f92b6f4d4a03f85088",
-      "f5ab9b644366b470807a3d89ece7289d5b02b5b4"
-    ],
+    "note": "2026-09-28 production closeout: active task ids reconciled; holding-assistant and industry-research now use owner-scoped narrow append tools. Per-registry production_ref is authoritative.",
     "timezone_policy": {
       "schedule_tzid": "Asia/Shanghai",
       "authority": "VEVENT DTSTART TZID",
       "default_timezone_metadata_observed": "Australia/Perth",
-      "note": "Production schedules explicitly pin Asia/Shanghai in VEVENT. The Automation service still reports legacy default_timezone metadata; release verification treats the explicit VEVENT TZID as the execution-time timezone contract."
+      "note": "Production schedules explicitly pin Asia/Shanghai in VEVENT."
     }
   }
 }
