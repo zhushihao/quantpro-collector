@@ -322,6 +322,7 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			assert.equal(tools[name].annotations.readOnlyHint, false);
 			assert.equal(tools[name].annotations.destructiveHint, false);
 			assert.equal(tools[name].annotations.idempotentHint, true);
+			assert.equal(tools[name].annotations.openWorldHint, false);
 			const schema = tools[name].inputSchema;
 			assert.notEqual(schema.additionalProperties, false, `${name} must tolerate extra top-level fields`);
 			if (schema.properties.events?.items) {
