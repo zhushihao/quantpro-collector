@@ -5,7 +5,7 @@
 // run-envelope.ts needs AUTOMATION_REGISTRY_KEYS at module-evaluation time for
 // z.enum(...), so any cycle through this module would risk a TDZ failure
 // depending on entry order. Seed rows below carry the registry keys literally
-// and stay identical to migrations/0013_automation_runs_v3.sql (spec §6.1,
+// and stay identical to migrations/0014_automation_runs_v3.sql (spec §6.1,
 // review F3).
 
 export const SCHEDULE_TABLE = "automation_schedule_v1";
