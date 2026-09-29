@@ -2953,6 +2953,94 @@ function semanticIndexDeps(env: Env | undefined): SemanticIndexDeps {
 	return { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
 }
 
+/** Daily semantic indexing trigger (UTC 16:40 — off the backfill peak). */
+export const SEMANTIC_INDEX_CRON = "40 16 * * *";
+const SEMANTIC_CRON_MAX_BATCHES = 20;
+
+/**
+ * The scheduled half of the daily neuron budget: identical admission, guard and
+ * settlement as `handleSemanticIndexRun`, looping batch by batch until the
+ * ledger refuses (daily budget exhausted) or the queue drains.
+ */
+async function runSemanticIndexCron(env: Env, context: BridgeStageContext): Promise<void> {
+	const storage = researchReplicaStorage(env);
+	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
+		logBridgeStage(context, "scheduled_skipped", {
+			task: "research_semantic_index",
+			reason: "replica transport is not configured",
+		});
+		return;
+	}
+	const deps = semanticIndexDeps(env);
+	for (let batch = 0; batch < SEMANTIC_CRON_MAX_BATCHES; batch += 1) {
+		const requestId = crypto.randomUUID().replaceAll("-", "");
+		let admission: {
+			handle: ReturnType<typeof admissionHandle>;
+			budget: ReservationBudget;
+			result: { status: string; reservation_id?: string };
+		};
+		try {
+			admission = await admitHeavyRouteForEnv(env, {
+				route: "http:/internal/research-semantic-index/run",
+				operation_id: `semantic-cron:${batch}:${requestId}`,
+				fingerprint: crypto.randomUUID().replaceAll("-", ""),
+			});
+		} catch (error) {
+			// The daily budget refusing admission is the designed stop, not a fault.
+			logBridgeStage(context, "scheduled_stopped", {
+				task: "research_semantic_index",
+				batch,
+				reason: error instanceof QuotaGuardError ? error.error_code : "admission_fault",
+				detail: error instanceof Error ? error.message.slice(0, 200) : undefined,
+			});
+			return;
+		}
+		try {
+			const handle = admission.handle;
+			if (!handle) throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "admission handle missing");
+			const guardedDeps: SemanticIndexDeps = {
+				ai: createGuardedAi(deps.ai, handle, admission.budget) as typeof deps.ai,
+				index: deps.index,
+			};
+			const report = await runSemanticIndexBatch(
+				{ ...storage, db: createGuardedD1(storage.db, handle, admission.budget) },
+				guardedDeps,
+				{ maxDocs: SEMANTIC_BATCH_MAX_DOCS },
+			);
+			await settleReservation(env.RESEARCH_REPLICA!, {
+				reservation_id: admission.result.reservation_id as string,
+				observed: admission.budget.snapshot(),
+				reason: "semantic_cron_batch",
+			}).catch(() => undefined);
+			logBridgeStage(context, "scheduled_batch_complete", {
+				task: "research_semantic_index",
+				batch,
+				ready: report.ready,
+				pending: report.pending,
+				vectors_upserted: report.vectors_upserted,
+			});
+			if (report.pending === 0) {
+				logBridgeStage(context, "scheduled_complete", {
+					task: "research_semantic_index",
+					batches: batch + 1,
+					reason: "queue drained",
+				});
+				return;
+			}
+		} catch (error) {
+			// Unknown outcome: the reservation stays reserved (fail-closed) and the
+			// operator sees the batch failure in the logs.
+			logBridgeFailure(context, error, `semantic_cron_batch_${batch}`);
+			return;
+		}
+	}
+	logBridgeStage(context, "scheduled_complete", {
+		task: "research_semantic_index",
+		batches: SEMANTIC_CRON_MAX_BATCHES,
+		reason: "batch cap reached",
+	});
+}
+
 /** Background work must never change the ingest receipt. */
 function scheduleBackground(
 	ctx: ExecutionContext | undefined,
@@ -3875,6 +3963,21 @@ export default {
 		return handler(request, env, ctx);
 	},
 	async scheduled(controller: ScheduledController, env: Env) {
+		// Daily semantic indexing (owner approved 2026-09-30): one scheduled run
+		// per UTC day loops the SAME admission path as the HTTP run route — each
+		// batch reserves its own 940-neuron cap, settles against the ledger, and
+		// stops the moment the daily 9,500 budget refuses.  No bypass exists.
+		if (controller.cron === SEMANTIC_INDEX_CRON) {
+			const context = bridgeContext(`cron:${SEMANTIC_INDEX_CRON}`);
+			logBridgeStage(context, "scheduled_enter", { task: "research_semantic_index" });
+			try {
+				await runSemanticIndexCron(env, context);
+			} catch (error) {
+				logBridgeFailure(context, error, "scheduled");
+				throw error;
+			}
+			return;
+		}
 		// PUBLIC 文档数据有效期（owner 裁定 2026-09-29）：每日一轮有界
 		// retention 编排（标记 EXPIRED → R2 清除 → D1 行删除 → 向量收尾）。
 		// 失败如实抛出让 cron 调用显式失败，绝不静默。

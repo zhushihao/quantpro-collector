@@ -393,6 +393,13 @@ export const QUOTA_CRONS: readonly RouteCostProfile[] = [
 		[],
 		"daily retention sweep: unbounded documents scan plus Vectorize deletion; must report a structured skip",
 	),
+	profile(
+		"cron",
+		"cron:40 16 * * *",
+		"heavy_bounded",
+		[aiNeurons(940), d1Read(20_000), d1Write(4_000)],
+		"daily semantic indexing (owner approved 2026-09-30): the scheduled loop reserves each 10-document batch through the same admission path as the HTTP run route (940 neurons per batch) and stops when the UTC-day ledger refuses; this per-batch declaration is the loop's unit",
+	),
 ];
 
 export const QUOTA_ENTRYPOINTS: readonly RouteCostProfile[] = [
