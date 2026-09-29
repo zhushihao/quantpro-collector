@@ -3128,6 +3128,16 @@ async function handleResearchReplicaIngest(
 		budget: ReservationBudget;
 		result: { status: string; reservation_id?: string };
 	} | null = null;
+	// The global live-row scan cap (256) is shared by every heavy route: an
+	// admission that exits without settlement leaks one slot per call and, under
+	// sustained ingest traffic, jams ingest + semantic + run envelopes platform
+	// wide (2026-09-30 incident). Every exit after admission therefore settles
+	// the declared bound; the success path marks admissionSettled first.
+	let admissionSettled = false;
+	const settleDeclaredOnLeak = (): Promise<void> =>
+		admission && !admissionSettled
+			? chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined)
+			: Promise.resolve();
 	if (admissionMode(env) === "enforce") {
 		const profile = routeCostProfile("http:/internal/research-replica/v2/ingest");
 		if (!profile || profile.cost_class !== "heavy_bounded") {
@@ -3171,21 +3181,25 @@ async function handleResearchReplicaIngest(
 	// §A8 双道尺寸门：Content-Length 预检（缺失/非数值跳过）+ 读体后实测。
 	const contentLength = Number(request.headers.get("Content-Length"));
 	if (Number.isFinite(contentLength) && contentLength > RESEARCH_INGEST_MAX_BODY_BYTES) {
+		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("RATE_LIMITED"), 413);
 	}
 	let raw: string;
 	try {
 		raw = await request.text();
 	} catch {
+		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	if (new TextEncoder().encode(raw).byteLength > RESEARCH_INGEST_MAX_BODY_BYTES) {
+		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("RATE_LIMITED"), 413);
 	}
 	let body: unknown;
 	try {
 		body = JSON.parse(raw);
 	} catch {
+		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	if (
@@ -3196,6 +3210,7 @@ async function handleResearchReplicaIngest(
 			(key) => key !== "record" && key !== "object_chunks_base64",
 		)
 	) {
+		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	const transport = body as { record?: unknown; object_chunks_base64?: unknown };
@@ -3240,11 +3255,12 @@ async function handleResearchReplicaIngest(
 		// usage must not be "corrected" by an after-the-fact write).
 		if (admission) {
 			const budget = admission.budget;
-			await settleReservation(env.RESEARCH_REPLICA!, {
+			const settleOutcome = await settleReservation(env.RESEARCH_REPLICA!, {
 				reservation_id: admission.result.reservation_id as string,
 				observed: budget.snapshot(),
 				reason: "ingest_completed",
 			}).catch(() => undefined);
+			if (settleOutcome?.status === "SETTLED") admissionSettled = true;
 		}
 		// Envelope pinned explicitly: the additive in-process fields
 		// (semantic_target) never widen the frozen four-key transport response.
@@ -3256,9 +3272,12 @@ async function handleResearchReplicaIngest(
 		});
 	} catch (error) {
 		// A refusal from inside the guarded region (amplification past the reserved
-		// bound, or missing D1 usage metadata) is a quota refusal, not a store error;
-		// the reservation is intentionally kept because an R2 journal may already
-		// have been written.
+		// bound, or missing D1 usage metadata) is a quota refusal, not a store error.
+		// The reservation used to be kept live here by design; that collided with
+		// the global live-row scan cap — sustained traffic jammed every heavy route
+		// platform wide (2026-09-30). Charging the declared bound is equally
+		// conservative for the ceiling (booked is monotonic) and frees the slot.
+		await settleDeclaredOnLeak();
 		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
