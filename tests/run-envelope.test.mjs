@@ -890,7 +890,7 @@ test("MCP end-to-end heartbeat and registered_tools advertisement", async () => 
 		const status = await client.callTool({ name: "get_gateway_status", arguments: {} });
 		const statusBody = JSON.parse(status.content[0].text);
 		assert.ok(statusBody.registered_tools.includes("submit_run_envelope"));
-		assert.equal(statusBody.state_gateway_version, "1.2.0");
+		assert.equal(statusBody.state_gateway_version, "1.3.0");
 	} finally {
 		await close();
 	}

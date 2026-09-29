@@ -427,3 +427,34 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 		await server.server.close();
 	}
 });
+
+test("get_gateway_status.registered_tools never drifts from the real MCP registry (#50)", async () => {
+	const server = createServer(
+		undefined,
+		"ENABLED",
+		new Set(["market:read", "state:read", "state:write"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "registered-tools-drift-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		const listed = await client.listTools();
+		const listedNames = new Set(listed.tools.map((tool) => tool.name));
+		const status = await client.callTool({ name: "get_gateway_status", arguments: {} });
+		const body = JSON.parse(status.content[0].text);
+		assert.ok(Array.isArray(body.registered_tools) && body.registered_tools.length > 0);
+		for (const name of body.registered_tools) {
+			assert.ok(
+				listedNames.has(name),
+				`registered_tools advertises "${name}" but tools/list does not register it`,
+			);
+		}
+		assert.ok(body.registered_tools.includes("get_production_health_snapshot"));
+		assert.equal(body.state_gateway_version, "1.3.0");
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});
