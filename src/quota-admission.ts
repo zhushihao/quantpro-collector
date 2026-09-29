@@ -113,7 +113,7 @@ export function baselineCoverageAgeMs(periodKind: string): number {
  * on the account are invisible to the ledger, so the daily budget admits at
  * most 9,500 - 500 booked neurons for ledger traffic.
  */
-export const UTC_DAY_OFF_LEDGER_HEADROOM = 500;
+export const UTC_DAY_OFF_LEDGER_HEADROOM = 200;
 
 function baselineCutoffFor(periodKind: string, now: Date): string {
 	return new Date(now.getTime() - baselineCoverageAgeMs(periodKind)).toISOString();

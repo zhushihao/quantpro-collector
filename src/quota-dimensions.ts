@@ -59,7 +59,7 @@ export interface DimensionSpec {
 }
 
 /** Bump whenever the published allowances or 95% policy change; evidence in the record. */
-export const QUOTA_CATALOG_VERSION = "quota-catalog/2026-09-30.4";
+export const QUOTA_CATALOG_VERSION = "quota-catalog/2026-09-30.5";
 
 /** The pricing/dimension evidence this catalog was transcribed from. */
 export const QUOTA_CATALOG_SOURCES: readonly string[] = [
@@ -94,6 +94,7 @@ function spec(
 	included: number | null,
 	provable: boolean,
 	note: string,
+	thresholdFraction = 0.95,
 ): DimensionSpec {
 	return {
 		key,
@@ -103,7 +104,11 @@ function spec(
 		threshold_95:
 			included === null
 				? null
-				: threshold95(included * (unit === "GB-month" ? STORAGE_UNIT_SCALE : 1)),
+				: Math.floor(
+						included *
+							(unit === "GB-month" ? STORAGE_UNIT_SCALE : 1) *
+							thresholdFraction,
+					),
 		provable,
 		note,
 	};
@@ -242,7 +247,8 @@ export const QUOTA_DIMENSIONS: readonly DimensionSpec[] = [
 		"utc_day",
 		10_000,
 		true,
-		"owner-approved daily-budget admission (2026-09-30): free allowance resets 00:00 UTC; bge-m3 is 1075 neurons/M input tokens and the embedding pipeline caps a document at 32 chunks x 1,350 chars, so 1 char = 1 token (worst case) proves a 47-neuron per-document cap; run declarations add retry headroom; off-ledger drift is covered by the runtime-bootstrapped daily baseline headroom",
+		"owner-approved daily-budget admission; threshold raised to the FULL free allowance on 2026-09-30 (owner: previous 95% line was too conservative against the observed ~9-24 neurons/document) - the line is the zero-cost boundary, usage inside it never bills; bge-m3 is 1075 neurons/M input tokens and the embedding pipeline caps a document at 32 chunks x 1,350 chars, so 1 char = 1 token (worst case) proves a 47-neuron per-document cap; run declarations add retry headroom; off-ledger drift is covered by the runtime-bootstrapped daily baseline headroom",
+		1.0,
 	),
 	spec(
 		"vectorize.queried_dims",

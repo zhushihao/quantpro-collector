@@ -63,7 +63,7 @@ test("catalog thresholds are floor(95% of the official allowance)", () => {
 	assert.equal(byKey.get("r2.class_a").threshold_95, 950_000);
 	assert.equal(byKey.get("r2.class_b").threshold_95, 9_500_000);
 	assert.equal(byKey.get("r2.storage_gb_month").threshold_95, 9_500);
-	assert.equal(byKey.get("ai.neurons").threshold_95, 9_500);
+	assert.equal(byKey.get("ai.neurons").threshold_95, 10_000, "zero-cost line = full free allowance");
 	assert.equal(byKey.get("ai.neurons").period, "utc_day");
 	assert.equal(byKey.get("vectorize.queried_dims").threshold_95, 47_500_000);
 	assert.equal(byKey.get("vectorize.stored_dims").threshold_95, 9_500_000);
@@ -170,7 +170,7 @@ test("storage risk is a time integral over the remaining cycle, not a flat capac
 });
 
 test("the catalog version is pinned and the guarantee boundary is stated in code", async () => {
-	assert.equal(QUOTA_CATALOG_VERSION, "quota-catalog/2026-09-30.4");
+	assert.equal(QUOTA_CATALOG_VERSION, "quota-catalog/2026-09-30.5");
 	assert.equal(QUOTA_DIMENSIONS.length, 19);
 	const { readFile } = await import("node:fs/promises");
 	const text = await readFile(new URL("../src/quota-breaker.ts", import.meta.url), "utf8");

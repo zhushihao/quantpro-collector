@@ -343,10 +343,10 @@ test("utc_day ai.neurons bootstraps its daily baseline and admits through the bu
 		.first();
 	assert.equal(row?.state, "VERIFIED");
 	assert.equal(Number(row?.used), 0);
-	// Budget math: 9,500 threshold - 500 off-ledger headroom admits 9,000/day.
+	// Budget math: 10,000 free-allowance line - 200 off-ledger headroom admits 9,800/day.
 	const overBudget = await admitOperation(
 		db,
-		request("op-utcday-over", [{ dimension_key: "ai.neurons", units: 9_000 }]),
+		request("op-utcday-over", [{ dimension_key: "ai.neurons", units: 9_801 }]),
 		{ account_id: ACCOUNT, now: NOW },
 	);
 	assert.equal(overBudget.status, "DENIED");
