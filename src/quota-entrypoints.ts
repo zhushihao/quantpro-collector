@@ -59,6 +59,10 @@ const d1Write = (units: number): AdmissionDimension => ({
 const r2A = (units: number): AdmissionDimension => ({ dimension_key: "r2.class_a", units });
 const r2B = (units: number): AdmissionDimension => ({ dimension_key: "r2.class_b", units });
 const aiNeurons = (units: number): AdmissionDimension => ({ dimension_key: "ai.neurons", units });
+const vectorizeQueried = (units: number): AdmissionDimension => ({
+	dimension_key: "vectorize.queried_dims",
+	units,
+});
 
 /** HTTP entrypoints served by `src/index.ts`, `src/oauth-entry.ts`, `src/oauth-diagnostics-entry.ts`. */
 export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
@@ -307,9 +311,9 @@ const TOOL_CLASSES: Record<
 	},
 	get_document: { cost_class: "light_read", dimensions: [d1Read(16)], note: "document read" },
 	search_documents_semantic: {
-		cost_class: "heavy_unbounded",
-		dimensions: [],
-		note: "embedding query has no provable neuron/dimension accounting",
+		cost_class: "heavy_bounded",
+		dimensions: [d1Read(32), aiNeurons(94), vectorizeQueried(1_024)],
+		note: "semantic query: one bge-m3 embedding + one 1024-dim index query + index lookups. aiNeurons(94) derives from the owner-approved 47-neuron per-document unit (see the index run entry) x 2x retry headroom — a single query embeds at most one document equivalent; vectorizeQueried(1024) is the index dimensionality x exactly one query per call. Read face: admitted on arrival, billed by declaration.",
 	},
 	search_evidence: { cost_class: "light_read", dimensions: [d1Read(32)], note: "evidence read" },
 	get_evidence: { cost_class: "light_read", dimensions: [d1Read(16)], note: "evidence read" },

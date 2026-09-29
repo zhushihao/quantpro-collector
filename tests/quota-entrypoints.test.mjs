@@ -136,6 +136,18 @@ test("cap-reserved routes admit through the ledger; unproven AI/vectorize/retent
 	}
 	// Keyed reads are light_read with declared caps: never refused by the guard,
 	// always billed on arrival.
+	// The semantic query face carries derived, owner-anchored bounds: it must
+	// admit under enforce (it was the one hard daytime breakage on 2026-09-30).
+	assert.deepEqual(
+		routeCostProfile("mcp:search_documents_semantic").dimensions.map(
+			(dimension) => [dimension.dimension_key, dimension.units],
+		),
+		[
+			["d1.rows_read", 32],
+			["ai.neurons", 94],
+			["vectorize.queried_dims", 1_024],
+		],
+	);
 	for (const route of ["mcp:get_state_snapshot", "mcp:get_gateway_status"]) {
 		assert.equal(routeCostProfile(route)?.cost_class, "light_read", route);
 		assert.ok((routeCostProfile(route)?.dimensions.length ?? 0) > 0, route);
