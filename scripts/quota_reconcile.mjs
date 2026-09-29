@@ -1,44 +1,57 @@
 #!/usr/bin/env node
-// D1/平台用量对账（Owner 硬约束 2026-09-29：按付费版上限的 95% 设计预算，超线熔断）。
-// 数据源：Cloudflare GraphQL Analytics（D1 rowsRead/rowsWritten，按日聚合）。
-// 退出码：0=OK；2=WARN（≥80% 日线）；3=CIRCUIT_OPEN（≥95% 日线或月度按比例超线）。
+// Collector 用量对账（只读、**非权威**）。
+//
+// ⚠ SDD CQ 规格（2026-09-29）后的定位变更：本脚本**不再驱动任何准入门**。
+//   - 已废止：月包含量 ÷ 31 的"日红线"、日线 × 已过天数的"按比例月线"，
+//     以及 `CIRCUIT_OPEN / WARN` 退出码语义。付费版 D1 额度按**账户订阅续费日**
+//     重置，不是 UTC 自然月；月额 ÷ 31 不是 95% 保证。
+//   - 现行准入在 Collector 服务端：`src/quota-admission.ts`（账户账期锚点 +
+//     VERIFIED 基线 + 多维原子预留）。本脚本的输出**只能作为人工提示**：
+//     Cloudflare Billable Usage API 为日更且无已知最迟到达保证；2026-09-29
+//     授权后只读返回 HTTP 200，但仅出现 R2 计费行，缺失维度不能按零用量
+//     处理。此脚本仍不能作为准入或实时闭环。
+//   - 除硬失败外退出码恒为 0；不会再输出 2/3 的"熔断"退出码被外部当成闸。
+//
+// 数据源：Cloudflare GraphQL Analytics（D1 rowsRead/rowsWritten、Worker 请求数，
+// 按日聚合），仅只读。凭据只从环境读取，不打印、不落盘。
 // 用法：CLOUDFLARE_API_TOKEN=... node scripts/quota_reconcile.mjs [--json]
 
 const ACCOUNT_TAG = "4b0901ceeeef89ac3b8414d56c50c946";
 const D1_DATABASE_ID = "0e20aca4-c394-4f41-aa46-d98831b81836";
 const WORKER_NAME = "cn-hk-quotes-mcp";
 
-// —— 95 折预算表（付费版 included 用量 × 0.95；日线 = 月线 / 31）——
-const BUDGET = {
-	"d1.rowsRead": { monthly: 25e9 * 0.95, label: "D1 读取行数/月" },
-	"d1.rowsWritten": { monthly: 50e6 * 0.95, label: "D1 写入行数/月" },
+// 官方付费版包含量（仅作显示参考；准入阈值以 src/quota-dimensions.ts 为准）。
+const INCLUDED_REFERENCE = {
+	"d1.rowsRead": 25_000_000_000,
+	"d1.rowsWritten": 50_000_000,
 };
+const ROLLING_WINDOW_DAYS = 31;
 
-const WARN_RATIO = 0.8; // 预警线：日红线的 80%
-const CIRCUIT_RATIO = 0.95; // 熔断线：达日红线即熔断
-
-function monthStartUtc(now = new Date()) {
-	return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-}
-function ymd(d) {
-	return d.toISOString().slice(0, 10);
-}
-function dayOfMonthUtc(now = new Date()) {
-	return now.getUTCDate();
+function ymd(date) {
+	return date.toISOString().slice(0, 10);
 }
 
 import { execFileSync } from "node:child_process";
 
 async function graphql(query, token) {
 	// curl 子进程而非 fetch：Windows 上 undici + process.exit 会触发 libuv 关闭断言，
-	// 破坏本脚本的熔断退出码语义（0/2/3）。
+	// 破坏退出码语义。
 	const raw = execFileSync(
 		"curl",
-		["-s", "-X", "POST", "https://api.cloudflare.com/client/v4/graphql",
-			"-H", `Authorization: Bearer ${token}`,
-			"-H", "Content-Type: application/json",
-			"--data", JSON.stringify({ query }),
-			"--max-time", "30"],
+		[
+			"-s",
+			"-X",
+			"POST",
+			"https://api.cloudflare.com/client/v4/graphql",
+			"-H",
+			`Authorization: Bearer ${token}`,
+			"-H",
+			"Content-Type: application/json",
+			"--data",
+			JSON.stringify({ query }),
+			"--max-time",
+			"30",
+		],
 		{ encoding: "utf8", maxBuffer: 10 * 1024 * 1024 },
 	);
 	const body = JSON.parse(raw);
@@ -49,23 +62,23 @@ async function graphql(query, token) {
 async function main() {
 	const token = process.env.CLOUDFLARE_API_TOKEN;
 	if (!token) {
-		console.error("CLOUDFLARE_API_TOKEN 未设置");
+		console.error("CLOUDFLARE_API_TOKEN 未设置（只读分析凭据）");
 		process.exit(1);
 	}
 	const now = new Date();
-	const start = monthStartUtc(now);
-	const q = `query {
+	const windowStart = new Date(now.getTime() - ROLLING_WINDOW_DAYS * 24 * 3600 * 1000);
+	const query = `query {
 		viewer {
 			accounts(filter: {accountTag: "${ACCOUNT_TAG}"}) {
 				d1AnalyticsAdaptiveGroups(
-					filter: {datetime_geq: "${start.toISOString()}", datetime_lt: "${now.toISOString()}", databaseId: "${D1_DATABASE_ID}"},
+					filter: {datetime_geq: "${windowStart.toISOString()}", datetime_lt: "${now.toISOString()}", databaseId: "${D1_DATABASE_ID}"},
 					limit: 40, orderBy: [date_ASC]
 				) {
 					dimensions { date }
 					sum { rowsRead rowsWritten }
 				}
 				workersInvocationsAdaptive(
-					filter: {datetime_geq: "${start.toISOString()}", datetime_lt: "${now.toISOString()}", scriptName: "${WORKER_NAME}"},
+					filter: {datetime_geq: "${windowStart.toISOString()}", datetime_lt: "${now.toISOString()}", scriptName: "${WORKER_NAME}"},
 					limit: 40, orderBy: [date_ASC]
 				) {
 					dimensions { date }
@@ -74,68 +87,68 @@ async function main() {
 			}
 		}
 	}`;
-	const data = await graphql(q, token);
-	const acct = data.viewer.accounts[0];
-	const d1Days = acct.d1AnalyticsAdaptiveGroups.map((g) => ({
-		date: g.dimensions.date,
-		rowsRead: g.sum.rowsRead,
-		rowsWritten: g.sum.rowsWritten,
+	const data = await graphql(query, token);
+	const account = data.viewer.accounts[0];
+	const d1Days = account.d1AnalyticsAdaptiveGroups.map((group) => ({
+		date: group.dimensions.date,
+		rowsRead: group.sum.rowsRead,
+		rowsWritten: group.sum.rowsWritten,
 	}));
-	const reqDays = acct.workersInvocationsAdaptive.map((g) => ({
-		date: g.dimensions.date,
-		requests: g.sum.requests,
+	const requestDays = account.workersInvocationsAdaptive.map((group) => ({
+		date: group.dimensions.date,
+		requests: group.sum.requests,
 	}));
-
-	// 月累计与今日读数
-	const monthRead = d1Days.reduce((a, d) => a + d.rowsRead, 0);
-	const monthWritten = d1Days.reduce((a, d) => a + d.rowsWritten, 0);
-	const today = ymd(now);
-	const todayRead = d1Days.find((d) => d.date === today)?.rowsRead ?? 0;
-
-	// 日红线（月预算均摊 31 天）与按比例月线
-	const dailyLine = (b) => b.monthly / 31;
-	const monthProportionalLine = (b) => (b.monthly / 31) * dayOfMonthUtc(now);
-
-	const readBudget = BUDGET["d1.rowsRead"];
-	const readDailyLine = dailyLine(readBudget);
-	const readMonthLine = monthProportionalLine(readBudget);
-	const todayRatio = todayRead / readDailyLine;
-	const monthRatio = monthRead / readMonthLine;
-
-	let verdict = "OK";
-	if (todayRatio >= CIRCUIT_RATIO || monthRatio >= CIRCUIT_RATIO) verdict = "CIRCUIT_OPEN";
-	else if (todayRatio >= WARN_RATIO || monthRatio >= WARN_RATIO) verdict = "WARN";
 
 	const report = {
-		verdict,
+		// 这个字段是刻意的：任何消费者都不得把本报告当作准入判据。
+		gate_authority: "NONE",
+		state: "UNVERIFIED",
 		asOf: now.toISOString(),
-		d1: {
-			todayRowsRead: todayRead,
-			todayDailyLine: Math.round(readDailyLine),
-			todayRatioPct: +(todayRatio * 100).toFixed(1),
-			monthRowsRead: monthRead,
-			monthProportionalLine: Math.round(readMonthLine),
-			monthRatioPct: +(monthRatio * 100).toFixed(1),
-			monthlyBudget95: readBudget.monthly,
-			days: d1Days,
+		window: {
+			start: ymd(windowStart),
+			end: ymd(now),
+			days: d1Days.length,
+			kind: `rolling_${ROLLING_WINDOW_DAYS}d`,
 		},
-		workersRequests: reqDays,
-		note: "预算=付费版 included × 95%；日线=月预算/31；月线=日线×本月已过天数（防月初狂飙）",
+		observed: {
+			d1RowsRead: d1Days.reduce((total, day) => total + day.rowsRead, 0),
+			d1RowsWritten: d1Days.reduce((total, day) => total + day.rowsWritten, 0),
+			requests: requestDays.reduce((total, day) => total + day.requests, 0),
+			includedReference: INCLUDED_REFERENCE,
+		},
+		days: d1Days,
+		requestsPerDay: requestDays,
+		notAuthoritativeBecause: [
+			"计费期是账户订阅续费周期，不是 UTC 自然月；本脚本没有权威账期锚点",
+			"账单 API 已能只读访问，但当前只返回 R2 行；缺失维度不可当零，且日更无已知最大延迟",
+			"本脚本不覆盖 Workers/KV/R2/AI/Vectorize 的账号级剩余额度",
+			"运维提示不得用于放行生产写入或恢复补录",
+		],
+		admissionReference: "src/quota-admission.ts（账户账期锚点 + VERIFIED 基线 + 多维原子预留）",
 	};
 
 	if (process.argv.includes("--json")) {
 		console.log(JSON.stringify(report, null, 2));
 	} else {
-		console.log(`判定: ${verdict}`);
-		console.log(`D1 读取  今日 ${report.d1.todayRowsRead.toLocaleString()} / 日线 ${report.d1.todayDailyLine.toLocaleString()}（${report.d1.todayRatioPct}%）`);
-		console.log(`D1 读取  月累计 ${report.d1.monthRowsRead.toLocaleString()} / 按比例月线 ${report.d1.monthProportionalLine.toLocaleString()}（${report.d1.monthRatioPct}%）`);
-		console.log(`D1 写入  月累计 ${monthWritten.toLocaleString()} / 月预算 ${Math.round(BUDGET["d1.rowsWritten"].monthly).toLocaleString()}`);
-		for (const d of d1Days) console.log(`  ${d.date}: read=${d.rowsRead.toLocaleString()} written=${d.rowsWritten.toLocaleString()}`);
+		console.log("判定: UNVERIFIED（非权威提示；不驱动准入）");
+		console.log(
+			`D1 读取  近 ${ROLLING_WINDOW_DAYS} 天观测 ${report.observed.d1RowsRead.toLocaleString()} 行`,
+		);
+		console.log(
+			`D1 写入  近 ${ROLLING_WINDOW_DAYS} 天观测 ${report.observed.d1RowsWritten.toLocaleString()} 行`,
+		);
+		console.log(
+			`Worker 请求 近 ${ROLLING_WINDOW_DAYS} 天观测 ${report.observed.requests.toLocaleString()} 次`,
+		);
+		console.log("计费期口径：付费版按账户订阅续费日重置（非 UTC 自然月；禁用月额÷31）");
+		console.log(
+			"账单 API 已返回 200，但仅 R2 行且有未知尾部 → 本脚本 gate_authority=NONE",
+		);
 	}
-	process.exit(verdict === "CIRCUIT_OPEN" ? 3 : verdict === "WARN" ? 2 : 0);
+	process.exit(0);
 }
 
-main().catch((err) => {
-	console.error("reconcile failed:", err.message);
+main().catch((error) => {
+	console.error("reconcile failed:", error.message);
 	process.exit(1);
 });

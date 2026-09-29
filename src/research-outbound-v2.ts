@@ -88,6 +88,13 @@ const SAFE_MESSAGES: Record<string, string> = {
 	INTEGRITY_FAILED: "integrity verification failed",
 	UNSUPPORTED_OPERATION: "operation is not supported by this boundary",
 	RATE_LIMITED: "rate limited; retry later",
+	// SDD CQ spec §5: a quota refusal must not promise a UTC-day reset.  The paid
+	// allowance follows the account's subscription period and re-opening it needs
+	// an operator-verified baseline, so no automated recovery instant is offered.
+	QUOTA_CIRCUIT_OPEN:
+		"platform usage budget circuit is open; heavy work is paused until an operator verifies the account baseline",
+	QUOTA_GUARD_UNAVAILABLE:
+		"usage guard cannot prove a safe upper bound; heavy work is paused until the guard is available",
 };
 const HIDDEN_KEYS = new Set([
 	"object_key",

@@ -123,6 +123,26 @@ import {
 } from "./run-envelope.ts";
 import { runScheduleReconciliation } from "./automation-schedule.ts";
 import { getProductionHealthSnapshot } from "./production-health.ts";
+import {
+	QUOTA_ACCOUNT_TAG,
+	QUOTA_CATALOG_VERSION,
+	admissionHandle,
+	admissionMode,
+	admitOperation,
+	cronQuotaOutcome,
+	legacyBreakerFlag,
+	quotaHttpRefusal,
+	quotaMcpRefusal,
+	quotaStatus,
+	QuotaGuardError,
+	ReservationBudget,
+	routeCostProfile,
+	settleReservation,
+	syncDimensionCatalog,
+	createGuardedD1,
+	createGuardedR2,
+	QUOTA_DIMENSIONS,
+} from "./quota-breaker.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
@@ -155,6 +175,14 @@ interface Env {
 	/** 转发主体头白名单（空格分隔，含桥身份）；未配置时保持旧行为（开放接受）。 */
 	COLLECTOR_FORWARDABLE_PRINCIPALS?: string;
 	RESEARCH_REPLICA?: D1Database;
+	/** Multi-dimension 95% admission switch: `off` (default) | `enforce`. */
+	QUOTA_ADMISSION_MODE?: string;
+	/**
+	 * Legacy 2026-09-29 daily prototype flag.  Inert by contract: it never opens
+	 * a gate and is only reported so an operator cannot mistake it for protection.
+	 */
+	QUOTA_BREAKER_ENABLED?: string;
+	CLOUDFLARE_API_TOKEN?: string;
 	RESEARCH_OBJECTS?: R2Bucket;
 	/**
 	 * Task D bindings: Workers AI (`@cf/baai/bge-m3`) and the single PUBLIC
@@ -636,6 +664,154 @@ export async function updateQuoteBridge(
 	return payload;
 }
 
+/** Server-owned billing account id for the admission ledger. */
+function quotaAccountId(): string {
+	return QUOTA_ACCOUNT_TAG;
+}
+
+/**
+ * Multi-dimension admission (SDD CQ spec §"准入、原子性、异步和恢复合同").
+ *
+ * `off` (default) performs no gating.  `enforce` requires an ADMITTED
+ * reservation for every `heavy_bounded` route and refuses every
+ * `heavy_unbounded` route outright; with no verified account baseline the ledger
+ * denies by construction, so the safe state is CLOSED rather than a modelled
+ * "95% guarantee".
+ */
+async function admitHeavyRouteForEnv(
+	env: Env | undefined,
+	args: { route: string; operation_id: string; fingerprint: string },
+): Promise<{
+	handle: NonNullable<ReturnType<typeof admissionHandle>>;
+	budget: ReservationBudget;
+	result: { status: string; reservation_id?: string };
+}> {
+	const profile = routeCostProfile(args.route);
+	if (!profile) {
+		throw new QuotaGuardError(
+			"QUOTA_GUARD_UNAVAILABLE",
+			`route ${args.route} is not classified in the cost catalog`,
+		);
+	}
+	if (profile.cost_class === "heavy_unbounded") {
+		throw new QuotaGuardError(
+			"QUOTA_GUARD_UNAVAILABLE",
+			`route ${args.route} has no provable per-operation upper bound`,
+		);
+	}
+	const db = env?.RESEARCH_REPLICA;
+	if (!db)
+		throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "admission ledger binding is missing");
+	const catalogOk = await ensureDimensionCatalog(db).then(
+		() => true,
+		() => false,
+	);
+	if (!catalogOk) {
+		throw new QuotaGuardError(
+			"QUOTA_GUARD_UNAVAILABLE",
+			"dimension catalog is not synchronised",
+		);
+	}
+	const result = await admitOperation(
+		db,
+		{
+			operation_id: args.operation_id,
+			fingerprint: args.fingerprint,
+			route: args.route,
+			dimensions: profile.dimensions,
+		},
+		{ account_id: quotaAccountId() },
+	);
+	if (result.status === "DENIED") {
+		const code = result.reason === "limit" ? "QUOTA_CIRCUIT_OPEN" : "QUOTA_GUARD_UNAVAILABLE";
+		throw new QuotaGuardError(code, `admission denied (${result.reason}) for ${args.route}`);
+	}
+	if (result.status === "REPLAY") {
+		throw new QuotaGuardError(
+			"QUOTA_GUARD_UNAVAILABLE",
+			`operation ${args.operation_id} already completed; refusing to repeat it`,
+		);
+	}
+	const handle = admissionHandle(result, {
+		operation_id: args.operation_id,
+		route: args.route,
+	});
+	if (!handle) throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "admission handle missing");
+	return { handle, budget: new ReservationBudget(handle), result };
+}
+
+/**
+ * Settle a reservation with the platform-observed practical usage.  Used by the
+ * guarded ingest path; a rejection keeps the reservation (never a silent
+ * "corrected" write).
+ */
+async function settleObserved(
+	env: Env | undefined,
+	reservationId: string,
+	observed: { dimension_key: never; units: number }[],
+	reason: string,
+): Promise<void> {
+	const db = env?.RESEARCH_REPLICA;
+	if (!db || observed.length === 0) return;
+	await settleReservation(db, {
+		reservation_id: reservationId,
+		observed,
+		reason,
+	}).catch(() => undefined);
+}
+
+/**
+ * Declared-bound charge for routes whose internal calls are not yet metered per
+ * dimension (MCP heavy tools).  Conservative: the whole declared bound is
+ * charged, so a later settlement can never under-count; the residual gap is
+ * reported in the implementation report.
+ */
+async function chargeDeclaredBoundForEnv(
+	env: Env | undefined,
+	result: { status: string; reservation_id?: string },
+): Promise<void> {
+	const db = env?.RESEARCH_REPLICA;
+	if (!db || result.status !== "ADMITTED" || !result.reservation_id) return;
+	const reserved = await db
+		.prepare(
+			`SELECT dimension_key, units FROM quota_reservation_units WHERE reservation_id = ?`,
+		)
+		.bind(result.reservation_id)
+		.all<{ dimension_key: string; units: number }>();
+	const observed = (reserved.results ?? []).map((row) => ({
+		dimension_key: row.dimension_key as never,
+		units: Number(row.units),
+	}));
+	await settleObserved(env, result.reservation_id, observed, "declared_bound_charged");
+}
+
+/**
+ * Dimension-catalog synchronisation cache, keyed by the concrete D1 binding and
+ * the catalog version.  The write is bounded (one row per catalog dimension, once
+ * per isolate per version); a failure clears the entry so the next admission
+ * retries instead of trusting a half-written catalog.  Catalog rows are copied
+ * into D1 so the admission guard can reject a stale or edited ceiling.
+ */
+const dimensionCatalogReady = new WeakMap<D1Database, Map<string, Promise<void>>>();
+
+function ensureDimensionCatalog(db: D1Database): Promise<void> {
+	let byVersion = dimensionCatalogReady.get(db);
+	if (!byVersion) {
+		byVersion = new Map();
+		dimensionCatalogReady.set(db, byVersion);
+	}
+	const key = QUOTA_CATALOG_VERSION;
+	let ready = byVersion.get(key);
+	if (!ready) {
+		ready = syncDimensionCatalog(db, QUOTA_DIMENSIONS).catch((error) => {
+			byVersion!.delete(key);
+			throw error;
+		});
+		byVersion.set(key, ready);
+	}
+	return ready;
+}
+
 /**
  * MCP server 工厂（每个 HTTP 请求构造一次，`ctx.requestInfo` 即原始请求）。
  *
@@ -658,8 +834,107 @@ export function createServer(
 		version: "1.3.1",
 	});
 
+	/**
+	 * MCP tool registration wrapper: every registered tool is classified by the
+	 * entrypoint cost catalog (`src/quota-entrypoints.ts`), and the coverage test
+	 * fails when a new tool is not classified.
+	 *
+	 * Enforce mode:
+	 *   - `heavy_unbounded` is refused outright with `isError: true` and the
+	 *     machine-readable `QUOTA_GUARD_UNAVAILABLE` body (no provable bound):
+	 *     AI embedding, semantic search and the retention sweep stay closed.
+	 *   - `heavy_bounded` requires a VERIFIED per-dimension baseline and an
+	 *     ADMITTED cap reservation before the first paid side effect; its
+	 *     declared units are caps that exceed any real per-call cost, and
+	 *     over-cap actuals keep the reservation and halt the route.
+	 *   - `light_read` keeps its declared cap and is billed on arrival, never
+	 *     refused by the guard. Control and zero-declared-cost paths remain
+	 *     unguarded; the route catalog does not establish account-wide quota
+	 *     coverage.
+	 *
+	 * A caller with no scope basis is refused before admission. A caller with
+	 * insufficient tool-specific scope could otherwise reserve before the handler
+	 * checks authorization; heavy admission therefore runs only for callers that
+	 * carry a research scope or principal.
+	 */
+	const rawRegisterTool = server.registerTool.bind(server) as unknown as (
+		name: string,
+		config: unknown,
+		handler: (...args: never[]) => unknown,
+	) => unknown;
+	const registerToolImplementation = (
+		name: string,
+		config: unknown,
+		handler: (...args: never[]) => unknown,
+	) => {
+		const route = `mcp:${name}`;
+		const guarded = async (...args: never[]) => {
+			const profile = routeCostProfile(route);
+			const requestId = crypto.randomUUID().replaceAll("-", "");
+			if (!profile) {
+				return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
+			}
+			let admission: Awaited<ReturnType<typeof admitHeavyRoute>> | null = null;
+			if (admissionMode(env) === "enforce") {
+				if (profile.cost_class === "heavy_unbounded") {
+					return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
+				}
+				if (
+					profile.cost_class === "heavy_bounded" &&
+					researchScopes.size === 0 &&
+					researchPrincipal === null
+				) {
+					// No scope basis at all: never run heavy work unguarded.  The
+					// handler would deny on its scope check; refusing here also keeps
+					// the paid path closed for an unauthenticated caller.
+					return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
+				}
+				if (
+					profile.cost_class === "heavy_bounded" &&
+					(researchScopes.size > 0 || researchPrincipal !== null)
+				) {
+					const digest = await crypto.subtle.digest(
+						"SHA-256",
+						new TextEncoder().encode([route, requestId].join("\u0000")),
+					);
+					const fingerprint = [...new Uint8Array(digest)]
+						.map((byte) => byte.toString(16).padStart(2, "0"))
+						.join("");
+					try {
+						admission = await admitHeavyRoute({
+							route,
+							operation_id: `${route}:${requestId}`,
+							fingerprint,
+						});
+					} catch (error) {
+						return quotaMcpRefusal(
+							error instanceof QuotaGuardError
+								? error.error_code
+								: "QUOTA_GUARD_UNAVAILABLE",
+							requestId,
+						);
+					}
+				}
+			}
+			try {
+				return await handler(...args);
+			} finally {
+				// The declared bound is charged once the handler settled: a scope
+				// refusal still consumes the declared bound (conservative), and a
+				// crashed handler leaves the reservation live instead of losing it.
+				if (admission) await chargeDeclaredBound(admission.result);
+			}
+		};
+		return rawRegisterTool(name, config, guarded);
+	};
+	/**
+	 * Asserted to the SDK signature so call sites keep the schema-derived handler
+	 * typing; the implementation above only adds the cost-catalog gate.
+	 */
+	const registerTool = registerToolImplementation as unknown as typeof server.registerTool;
+
 	// 保留测试工具，确认 MCP 基础链路持续正常
-	server.registerTool(
+	registerTool(
 		"calculate",
 		{
 			description: "执行基础四则运算，仅用于 MCP 连通性测试",
@@ -705,7 +980,7 @@ export function createServer(
 	);
 
 	// 正式行情工具
-	server.registerTool(
+	registerTool(
 		"get_portfolio_quotes",
 		{
 			description:
@@ -778,7 +1053,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"get_public_quotes",
 		{
 			description: "获取不含持仓身份的 A/H 公开行情快照。仅返回行情、时间和质量字段。",
@@ -813,7 +1088,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"get_control_plane_status",
 		{
 			description:
@@ -860,6 +1135,11 @@ export function createServer(
 		if (!storage) throw new ResearchBoundaryError("STORE_UNAVAILABLE");
 		return storage.db;
 	};
+	const quotaEnforced = () => admissionMode(env) === "enforce";
+	const admitHeavyRoute = (args: { route: string; operation_id: string; fingerprint: string }) =>
+		admitHeavyRouteForEnv(env, args);
+	const chargeDeclaredBound = (result: { status: string; reservation_id?: string }) =>
+		chargeDeclaredBoundForEnv(env, result);
 	const researchDomain = async (operation: () => Promise<unknown>) => {
 		try {
 			return {
@@ -868,6 +1148,9 @@ export function createServer(
 				],
 			};
 		} catch (error) {
+			if (error instanceof QuotaGuardError) {
+				return quotaMcpRefusal(error.error_code, crypto.randomUUID().replaceAll("-", ""));
+			}
 			const safe =
 				error instanceof ResearchBoundaryError
 					? error.asError()
@@ -880,8 +1163,21 @@ export function createServer(
 	};
 	const researchRead = <T>(tool: string, operation: () => Promise<T>) => {
 		const requestId = crypto.randomUUID().replaceAll("-", "");
-		return researchDomain(() =>
-			withResearchReadRetry(operation, {
+		const gate = async () => {
+			if (!quotaEnforced()) return;
+			const profile = routeCostProfile(`mcp:${tool}`);
+			// Read-only routes are billed on arrival and may degrade safely; only a
+			// route the catalog cannot classify or that has no provable bound is
+			// refused.  A local day counter is never treated as a 95% guarantee.
+			if (profile && profile.cost_class !== "heavy_unbounded") return;
+			throw new QuotaGuardError(
+				"QUOTA_GUARD_UNAVAILABLE",
+				`read tool ${tool} is not covered by a provable cost profile`,
+			);
+		};
+		return researchDomain(async () => {
+			await gate();
+			return withResearchReadRetry(operation, {
 				requestId,
 				tool,
 				onFailure: (failure) => {
@@ -893,8 +1189,8 @@ export function createServer(
 						}),
 					);
 				},
-			}),
-		);
+			});
+		});
 	};
 	const researchWrite = researchDomain;
 	const callerPrincipal = (): Promise<string | null> =>
@@ -1055,7 +1351,7 @@ export function createServer(
 		return stateGatewayErrorResponse(error);
 	};
 
-	server.registerTool(
+	registerTool(
 		"get_state_snapshot",
 		{
 			description:
@@ -1104,7 +1400,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"read_state_snapshot",
 		{
 			description:
@@ -1153,7 +1449,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"read_state_snapshot_v2",
 		{
 			description:
@@ -1201,7 +1497,6 @@ export function createServer(
 			}
 		},
 	);
-
 
 	const resolveOwnerCommandContext = async () => {
 		if (!env?.PORTFOLIO_UNIVERSE) {
@@ -1284,7 +1579,7 @@ export function createServer(
 		}
 	};
 
-	server.registerTool(
+	registerTool(
 		"append_company_events",
 		{
 			description:
@@ -1309,21 +1604,25 @@ export function createServer(
 					}),
 				);
 			}
-			return ownerCommandResponse("append_company_events", command.run_id, async (requestId) => {
-				const context = await resolveOwnerCommandContext();
-				return (await appendInvestmentCommand({
-					db: env.RESEARCH_REPLICA!,
-					token: env.GITHUB_TOKEN,
-					channel: "COMPANY",
-					command,
-					portfolioVersion: context.portfolioVersion,
-					requestId,
-				})) as unknown as Record<string, unknown>;
-			});
+			return ownerCommandResponse(
+				"append_company_events",
+				command.run_id,
+				async (requestId) => {
+					const context = await resolveOwnerCommandContext();
+					return (await appendInvestmentCommand({
+						db: env.RESEARCH_REPLICA!,
+						token: env.GITHUB_TOKEN,
+						channel: "COMPANY",
+						command,
+						portfolioVersion: context.portfolioVersion,
+						requestId,
+					})) as unknown as Record<string, unknown>;
+				},
+			);
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"append_industry_events",
 		{
 			description:
@@ -1348,21 +1647,25 @@ export function createServer(
 					}),
 				);
 			}
-			return ownerCommandResponse("append_industry_events", command.run_id, async (requestId) => {
-				const context = await resolveOwnerCommandContext();
-				return (await appendInvestmentCommand({
-					db: env.RESEARCH_REPLICA!,
-					token: env.GITHUB_TOKEN,
-					channel: "INDUSTRY",
-					command,
-					portfolioVersion: context.portfolioVersion,
-					requestId,
-				})) as unknown as Record<string, unknown>;
-			});
+			return ownerCommandResponse(
+				"append_industry_events",
+				command.run_id,
+				async (requestId) => {
+					const context = await resolveOwnerCommandContext();
+					return (await appendInvestmentCommand({
+						db: env.RESEARCH_REPLICA!,
+						token: env.GITHUB_TOKEN,
+						channel: "INDUSTRY",
+						command,
+						portfolioVersion: context.portfolioVersion,
+						requestId,
+					})) as unknown as Record<string, unknown>;
+				},
+			);
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"append_close_events",
 		{
 			description:
@@ -1387,21 +1690,25 @@ export function createServer(
 					}),
 				);
 			}
-			return ownerCommandResponse("append_close_events", command.run_id, async (requestId) => {
-				const context = await resolveOwnerCommandContext();
-				return (await appendInvestmentCommand({
-					db: env.RESEARCH_REPLICA!,
-					token: env.GITHUB_TOKEN,
-					channel: "CLOSE",
-					command,
-					portfolioVersion: context.portfolioVersion,
-					requestId,
-				})) as unknown as Record<string, unknown>;
-			});
+			return ownerCommandResponse(
+				"append_close_events",
+				command.run_id,
+				async (requestId) => {
+					const context = await resolveOwnerCommandContext();
+					return (await appendInvestmentCommand({
+						db: env.RESEARCH_REPLICA!,
+						token: env.GITHUB_TOKEN,
+						channel: "CLOSE",
+						command,
+						portfolioVersion: context.portfolioVersion,
+						requestId,
+					})) as unknown as Record<string, unknown>;
+				},
+			);
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"append_market_observation",
 		{
 			description:
@@ -1426,21 +1733,25 @@ export function createServer(
 					}),
 				);
 			}
-			return ownerCommandResponse("append_market_observation", command.run_id, async (requestId) => {
-				const context = await resolveOwnerCommandContext();
-				return (await appendMarketObservation({
-					db: env.RESEARCH_REPLICA!,
-					token: env.GITHUB_TOKEN,
-					command,
-					portfolioVersion: context.portfolioVersion,
-					liveUniverseHash: context.liveUniverseHash,
-					requestId,
-				})) as unknown as Record<string, unknown>;
-			});
+			return ownerCommandResponse(
+				"append_market_observation",
+				command.run_id,
+				async (requestId) => {
+					const context = await resolveOwnerCommandContext();
+					return (await appendMarketObservation({
+						db: env.RESEARCH_REPLICA!,
+						token: env.GITHUB_TOKEN,
+						command,
+						portfolioVersion: context.portfolioVersion,
+						liveUniverseHash: context.liveUniverseHash,
+						requestId,
+					})) as unknown as Record<string, unknown>;
+				},
+			);
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"submit_run_envelope",
 		{
 			description:
@@ -1526,7 +1837,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"validate_state_batch",
 		{
 			description:
@@ -1572,7 +1883,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"append_state_batch",
 		{
 			description:
@@ -1665,8 +1976,7 @@ export function createServer(
 		};
 	};
 
-
-	server.registerTool(
+	registerTool(
 		"begin_run",
 		{
 			description:
@@ -1709,7 +2019,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"end_run",
 		{
 			description:
@@ -1748,7 +2058,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"record_automation_run",
 		{
 			description:
@@ -1865,7 +2175,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"get_automation_run_history",
 		{
 			description:
@@ -1906,7 +2216,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"get_production_health_snapshot",
 		{
 			description:
@@ -1953,7 +2263,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"get_state_write_receipt",
 		{
 			description:
@@ -2010,7 +2320,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"get_gateway_status",
 		{
 			description:
@@ -2040,8 +2350,39 @@ export function createServer(
 					serviceVersion: "1.3.1",
 					db: env?.RESEARCH_REPLICA,
 				});
+				// Quota admission exposure (SDD CQ spec §"用量/状态查询"): operators and
+				// observers read the per-dimension CLOSED/OPEN/UNKNOWN state, the
+				// verified period, the live reservation count and the explicit gaps.
+				// No token, no document content. Fail-soft: an unavailable ledger is
+				// reported as UNKNOWN, never as "safe".
+				let quota: unknown = null;
+				if (env?.RESEARCH_REPLICA) {
+					try {
+						quota = {
+							...(await quotaStatus(env.RESEARCH_REPLICA, {
+								account_id: quotaAccountId(),
+								dimensions: QUOTA_DIMENSIONS,
+							})),
+							mode: admissionMode(env),
+							legacy: legacyBreakerFlag(env),
+							quantified_guarantee: false,
+							uncovered: [
+								"inbound Workers requests and CPU are billed before this code runs",
+								"stored D1/KV/R2 GB-month keeps billing without any new write",
+								"unobserved third-party traffic on the same account",
+							],
+						};
+					} catch {
+						quota = { state: "UNKNOWN", quantified_guarantee: false };
+					}
+				}
 				return {
-					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify({ ...result, quota }, null, 2),
+						},
+					],
 				};
 			} catch (error) {
 				return stateGatewayErrorResponse(error);
@@ -2095,7 +2436,7 @@ export function createServer(
 	};
 	const requireMarketLedgerAppend = (tool: string) => requireStateScope(STATE_WRITE_SCOPE, tool);
 
-	server.registerTool(
+	registerTool(
 		"get_market_checkpoints",
 		{
 			description:
@@ -2137,7 +2478,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"append_market_checkpoint",
 		{
 			description:
@@ -2210,7 +2551,7 @@ export function createServer(
 		},
 	);
 
-	server.registerTool(
+	registerTool(
 		"search_documents",
 		{
 			description: "在 Collector 的 PUBLIC Research replica 中搜索文档元数据。",
@@ -2222,18 +2563,19 @@ export function createServer(
 		async ({ query, limit }) =>
 			researchRead("search_documents", () => researchAdapter().searchDocuments(query, limit)),
 	);
-	server.registerTool(
+	registerTool(
 		"get_document",
 		{
 			description: "读取 Collector replica 中经 SHA-256 校验的 PUBLIC 文档正文。",
 			inputSchema: z.object({ document_id: z.string().min(1) }),
 		},
-		async ({ document_id }) => researchRead("get_document", () => researchAdapter().getDocument(document_id)),
+		async ({ document_id }) =>
+			researchRead("get_document", () => researchAdapter().getDocument(document_id)),
 	);
 	// Task D: the only semantic surface.  PUBLIC replica metadata only; a hit is
 	// re-validated against D1/R2 before it is returned, so a stale or private
 	// vector can never be served.  No visibility/source_id input exists here.
-	server.registerTool(
+	registerTool(
 		"search_documents_semantic",
 		{
 			description:
@@ -2256,49 +2598,56 @@ export function createServer(
 				}),
 			),
 	);
-	server.registerTool(
+	registerTool(
 		"search_evidence",
 		{
 			description: "列出 Collector replica 中的 PUBLIC Evidence。",
 			inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional() }),
 		},
-		async ({ limit }) => researchRead("search_evidence", () => researchAdapter().searchEvidence(limit)),
+		async ({ limit }) =>
+			researchRead("search_evidence", () => researchAdapter().searchEvidence(limit)),
 	);
-	server.registerTool(
+	registerTool(
 		"get_evidence",
 		{
 			description: "读取 Collector replica 中指定的 PUBLIC Evidence。",
 			inputSchema: z.object({ evidence_id: z.string().min(1) }),
 		},
-		async ({ evidence_id }) => researchRead("get_evidence", () => researchAdapter().getEvidence(evidence_id)),
+		async ({ evidence_id }) =>
+			researchRead("get_evidence", () => researchAdapter().getEvidence(evidence_id)),
 	);
-	server.registerTool(
+	registerTool(
 		"get_theme_accumulator",
 		{
 			description: "读取指定主题的 PUBLIC Evidence Accumulator。",
 			inputSchema: z.object({ subject_key: z.string().min(1) }),
 		},
 		async ({ subject_key }) =>
-			researchRead("get_theme_accumulator", () => researchAdapter().getThemeAccumulator(subject_key)),
+			researchRead("get_theme_accumulator", () =>
+				researchAdapter().getThemeAccumulator(subject_key),
+			),
 	);
-	server.registerTool(
+	registerTool(
 		"get_company_evidence_state",
 		{
 			description: "读取指定公司的 PUBLIC Evidence Accumulator 状态。",
 			inputSchema: z.object({ company: z.string().min(1) }),
 		},
 		async ({ company }) =>
-			researchRead("get_company_evidence_state", () => researchAdapter().getCompanyEvidenceState(company)),
+			researchRead("get_company_evidence_state", () =>
+				researchAdapter().getCompanyEvidenceState(company),
+			),
 	);
-	server.registerTool(
+	registerTool(
 		"get_coverage_status",
 		{
 			description: "读取 Collector replica 中的 PUBLIC Research Coverage。",
 			inputSchema: z.object({ limit: z.number().int().min(1).max(100).optional() }),
 		},
-		async ({ limit }) => researchRead("get_coverage_status", () => researchAdapter().getCoverageStatus(limit)),
+		async ({ limit }) =>
+			researchRead("get_coverage_status", () => researchAdapter().getCoverageStatus(limit)),
 	);
-	server.registerTool(
+	registerTool(
 		"get_source_health",
 		{
 			description:
@@ -2307,9 +2656,10 @@ export function createServer(
 				limit: z.number().int().min(1).max(100).optional(),
 			}),
 		},
-		async ({ limit }) => researchRead("get_source_health", () => researchAdapter().getSourceHealth(limit)),
+		async ({ limit }) =>
+			researchRead("get_source_health", () => researchAdapter().getSourceHealth(limit)),
 	);
-	server.registerTool(
+	registerTool(
 		"get_market_signal_state",
 		{
 			description:
@@ -2317,9 +2667,11 @@ export function createServer(
 			inputSchema: z.object({ subject_key: z.string().min(1).max(128) }),
 		},
 		async ({ subject_key }) =>
-			researchRead("get_market_signal_state", () => researchAdapter().getMarketSignalState(subject_key)),
+			researchRead("get_market_signal_state", () =>
+				researchAdapter().getMarketSignalState(subject_key),
+			),
 	);
-	server.registerTool(
+	registerTool(
 		"list_research_jobs",
 		{
 			description:
@@ -2334,16 +2686,19 @@ export function createServer(
 				researchAdapter().listResearchJobs(limit, { claimableOnly: claimable_only }),
 			),
 	);
-	server.registerTool(
+	registerTool(
 		"get_research_job_context",
 		{
 			description:
 				"读取 Collector replica 中指定 PUBLIC Research Job 的上下文：job record（含触发证据）+ server_state + 提交历史 proposals。claim_token 永不出现在本面。",
 			inputSchema: z.object({ job_id: z.string().min(1) }),
 		},
-		async ({ job_id }) => researchRead("get_research_job_context", () => researchAdapter().getResearchJobContext(job_id)),
+		async ({ job_id }) =>
+			researchRead("get_research_job_context", () =>
+				researchAdapter().getResearchJobContext(job_id),
+			),
 	);
-	server.registerTool(
+	registerTool(
 		"claim_research_job",
 		{
 			description:
@@ -2373,7 +2728,7 @@ export function createServer(
 			);
 		},
 	);
-	server.registerTool(
+	registerTool(
 		"submit_research_result_proposal",
 		{
 			description:
@@ -2428,7 +2783,7 @@ export function createServer(
 			);
 		},
 	);
-	server.registerTool(
+	registerTool(
 		"defer_research_job",
 		{
 			description:
@@ -2536,7 +2891,8 @@ function scheduleBackground(
 						event: "research_semantic_index_background_failure",
 						timestamp: new Date().toISOString(),
 						stage: label,
-						error_code: error instanceof ResearchBoundaryError ? error.error_code : "UNKNOWN",
+						error_code:
+							error instanceof ResearchBoundaryError ? error.error_code : "UNKNOWN",
 					}),
 				);
 			}
@@ -2560,6 +2916,22 @@ function decodeBase64Chunks(value: unknown): Uint8Array[] {
 }
 
 /**
+ * HTTP refusal for the quota guard.  Always 503 (never 429: this is a budget
+ * circuit, not rate limiting), with the fixed four-key body.  `Retry-After` is
+ * only emitted when a recovery instant is provable — today no verified baseline
+ * exists, so it is omitted.
+ */
+function quotaGuardResponse(error: unknown, requestId: string): Response {
+	const code = error instanceof QuotaGuardError ? error.error_code : "QUOTA_GUARD_UNAVAILABLE";
+	const refusal = quotaHttpRefusal(code, requestId, null);
+	const headers = new Headers({ "Content-Type": "application/json; charset=utf-8" });
+	if (refusal.retry_after_seconds !== null) {
+		headers.set("Retry-After", String(refusal.retry_after_seconds));
+	}
+	return new Response(JSON.stringify(refusal.body), { status: refusal.status, headers });
+}
+
+/**
  * C5 private one-way transport.  This is an internal ingestion endpoint, not
  * an MCP tool and not a RESEARCH database connection.  The separate secret is
  * deliberately unrelated to LIVE/market scopes and remains fail-closed until
@@ -2580,6 +2952,55 @@ async function handleResearchReplicaIngest(
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
+	// Multi-dimension admission (SDD CQ spec §2): every heavy ingest must hold an
+	// atomic multi-dimension reservation before its first paid side effect.  With
+	// no verified account baseline the ledger denies, so enforce mode is CLOSED.
+	const requestId = crypto.randomUUID().replaceAll("-", "");
+	let admission: {
+		handle: ReturnType<typeof admissionHandle>;
+		budget: ReservationBudget;
+		result: { status: string; reservation_id?: string };
+	} | null = null;
+	if (admissionMode(env) === "enforce") {
+		const profile = routeCostProfile("http:/internal/research-replica/v2/ingest");
+		if (!profile || profile.cost_class !== "heavy_bounded") {
+			return quotaGuardResponse(
+				new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "ingest route is not classified"),
+				requestId,
+			);
+		}
+		const operationId = `ingest:${requestId}`;
+		const digest = await crypto.subtle.digest(
+			"SHA-256",
+			new TextEncoder().encode(
+				[
+					profile.route,
+					String(request.headers.get("Content-Length") ?? ""),
+					String(request.headers.get("X-Collector-Message-Id") ?? ""),
+					requestId,
+				].join("\u0000"),
+			),
+		);
+		const fingerprint = [...new Uint8Array(digest)]
+			.map((byte) => byte.toString(16).padStart(2, "0"))
+			.join("");
+		try {
+			admission = await admitHeavyRouteForEnv(env, {
+				route: profile.route,
+				operation_id: operationId,
+				fingerprint,
+			});
+		} catch (error) {
+			return quotaGuardResponse(error, requestId);
+		}
+	}
+	const guarded: ResearchReplicaStorage =
+		admission?.handle && admission.budget
+			? {
+					db: createGuardedD1(storage.db, admission.handle, admission.budget),
+					objects: createGuardedR2(storage.objects, admission.handle, admission.budget),
+				}
+			: storage;
 	// §A8 双道尺寸门：Content-Length 预检（缺失/非数值跳过）+ 读体后实测。
 	const contentLength = Number(request.headers.get("Content-Length"));
 	if (Number.isFinite(contentLength) && contentLength > RESEARCH_INGEST_MAX_BODY_BYTES) {
@@ -2616,20 +3037,47 @@ async function handleResearchReplicaIngest(
 			transport.object_chunks_base64 === undefined
 				? null
 				: decodeBase64Chunks(transport.object_chunks_base64);
-		const result = await ingestResearchReplicaRecord(storage, transport.record, objectChunks);
+		const result = await ingestResearchReplicaRecord(guarded, transport.record, objectChunks);
 		// Task D: the pending row was registered inside the ingest transaction,
 		// so this hook is only the fast path - the bounded sweep converges
 		// whatever the background task cannot finish.  The receipt below is
 		// unchanged: embedding never blocks it.
+		//
+		// In enforce mode the embedding cannot be scheduled: Workers AI neurons
+		// have no provable per-call upper bound, so the semantic index stays
+		// pending (the documented CLOSED path) instead of spending unbounded
+		// neurons.  The omission is logged, never silent.
 		if (result.semantic_target && env.AI && env.RESEARCH_PUBLIC_INDEX) {
-			const deps: SemanticIndexDeps = { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
-			const target = result.semantic_target;
-			scheduleBackground(ctx, "ingest_semantic_index", () =>
-				indexSemanticDocument(storage, deps, {
-					documentId: target.documentId,
-					versionId: target.versionId,
-				}),
-			);
+			if (admissionMode(env) === "enforce") {
+				console.log(
+					JSON.stringify({
+						event: "semantic_index_deferred_closed",
+						timestamp: new Date().toISOString(),
+						reason: "QUOTA_GUARD_UNAVAILABLE",
+						detail: "Workers AI neurons have no provable upper bound",
+					}),
+				);
+			} else {
+				const deps: SemanticIndexDeps = { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
+				const target = result.semantic_target;
+				scheduleBackground(ctx, "ingest_semantic_index", () =>
+					indexSemanticDocument(guarded, deps, {
+						documentId: target.documentId,
+						versionId: target.versionId,
+					}),
+				);
+			}
+		}
+		// Settle with the platform-reported practical usage observed by the guarded
+		// adapters.  A settlement rejection keeps the reservation (over-bound actual
+		// usage must not be "corrected" by an after-the-fact write).
+		if (admission) {
+			const budget = admission.budget;
+			await settleReservation(env.RESEARCH_REPLICA!, {
+				reservation_id: admission.result.reservation_id as string,
+				observed: budget.snapshot(),
+				reason: "ingest_completed",
+			}).catch(() => undefined);
 		}
 		// Envelope pinned explicitly: the additive in-process fields
 		// (semantic_target) never widen the frozen four-key transport response.
@@ -2640,6 +3088,11 @@ async function handleResearchReplicaIngest(
 			content_sha256: result.content_sha256,
 		});
 	} catch (error) {
+		// A refusal from inside the guarded region (amplification past the reserved
+		// bound, or missing D1 usage metadata) is a quota refusal, not a store error;
+		// the reservation is intentionally kept because an R2 journal may already
+		// have been written.
+		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
 			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
@@ -2663,6 +3116,17 @@ async function handleSemanticIndexRun(request: Request, env: Env): Promise<Respo
 	}
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	// Workers AI neurons have no provable per-call upper bound, so the embedding
+	// batch is refused in enforce mode (SDD CQ spec §4: no provable bound => deny).
+	if (admissionMode(env) === "enforce") {
+		return quotaGuardResponse(
+			new QuotaGuardError(
+				"QUOTA_GUARD_UNAVAILABLE",
+				"semantic index batch has no provable neuron upper bound",
+			),
+			crypto.randomUUID().replaceAll("-", ""),
+		);
 	}
 	let body: unknown = {};
 	try {
@@ -2751,6 +3215,24 @@ async function handleRetentionRun(request: Request, env: Env): Promise<Response>
 	}
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	// Quota admission (SDD CQ spec §4): the retention sweep combines an unbounded
+	// `research_records` scan with Vectorize stock deletion.  Neither has a
+	// provable upper bound, so enforce mode refuses the run and reports the
+	// compliance backlog instead of silently consuming the allowance.  The dry-run
+	// listing remains available for the compliance remediation window.
+	if (admissionMode(env) === "enforce") {
+		const url = new URL(request.url);
+		const dryRunParam = url.searchParams.get("dry_run");
+		if (!(dryRunParam === "1" || dryRunParam === "true")) {
+			return quotaGuardResponse(
+				new QuotaGuardError(
+					"QUOTA_GUARD_UNAVAILABLE",
+					"retention sweep has no provable scan/vector upper bound; dry_run remains available",
+				),
+				crypto.randomUUID().replaceAll("-", ""),
+			);
+		}
 	}
 	const url = new URL(request.url);
 	const dryRunParam = url.searchParams.get("dry_run");
@@ -3183,6 +3665,20 @@ async function handlePublicQuotes(request: Request, env: Env): Promise<Response>
 export default {
 	fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
+		if (admissionMode(env) === "enforce") {
+			const profile = routeCostProfile(`http:${url.pathname}`);
+			if (
+				profile?.cost_class === "heavy_unbounded" &&
+				url.pathname !== "/internal/research-replica/v2/ingest" &&
+				url.pathname !== "/internal/research-semantic-index/run" &&
+				url.pathname !== "/internal/research-retention/run"
+			) {
+				return quotaGuardResponse(
+					new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "route cost is unproven"),
+					crypto.randomUUID().replaceAll("-", ""),
+				);
+			}
+		}
 		if (url.pathname === "/api/github-auth/probe") return handleGithubAuthProbe(request);
 		if (url.pathname === "/api/github-auth/quote-universe")
 			return handleGithubAuthUniverse(request, env);
@@ -3272,6 +3768,22 @@ export default {
 			try {
 				const storage = researchReplicaStorage(env);
 				if (!storage) throw new ResearchBoundaryError("STORE_UNAVAILABLE");
+				// Quota admission (SDD CQ spec §4/§5): the retention sweep has no
+				// provable scan or Vectorize-stock upper bound.  Enforce mode reports
+				// a structured skip/failed outcome and never fabricates a success
+				// receipt; the compliance backlog stays visible to operators.
+				if (admissionMode(env) === "enforce") {
+					const outcome = cronQuotaOutcome(
+						"QUOTA_GUARD_UNAVAILABLE",
+						"research_retention",
+					);
+					logBridgeStage(context, `scheduled_${outcome.status}`, {
+						task: outcome.task,
+						reason: outcome.reason,
+						detail: "unbounded documents scan and Vectorize stock deletion have no provable bound",
+					});
+					return;
+				}
 				const deps: RetentionDeps = { index: env.RESEARCH_PUBLIC_INDEX ?? null };
 				const report: RetentionRunReport = await runRetentionSweep(storage, deps, {
 					trigger: "scheduled",
@@ -3292,6 +3804,15 @@ export default {
 		const runId = controller.cron ? `cron:${controller.cron}` : "test:scheduled";
 		const context = bridgeContext(runId);
 		logBridgeStage(context, "scheduled_enter");
+		// The legacy 2026-09-29 daily prototype is inert: report a leftover flag
+		// explicitly so it can never be mistaken for an active 95% guard.
+		const legacy = legacyBreakerFlag(env);
+		if (legacy.present) {
+			logBridgeStage(context, "quota_legacy_flag_ignored", {
+				flag: legacy.flag,
+				prototype_state: legacy.prototype_state,
+			});
+		}
 
 		try {
 			const payload = await updateQuoteBridge(env, context.runId);

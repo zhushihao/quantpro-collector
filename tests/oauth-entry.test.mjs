@@ -53,6 +53,14 @@ test("LIVE control plane keeps its keyspace and contracts but is served from an 
 	assert.match(portfolioDelta, /PORTFOLIO_UNIVERSE_DELTA_KV_KEY = "live-portfolio\/private\//);
 });
 
+test("enforced quota mode disables unbounded OAuth diagnostic D1 writes and reads", async () => {
+	const diagnostics = await source("../src/oauth-diagnostics-entry.ts");
+	const writer = diagnostics.slice(diagnostics.indexOf("async function writeDiagnostic"), diagnostics.indexOf("function tokenAuthMethod"));
+	const reader = diagnostics.slice(diagnostics.indexOf("async function readLatest"), diagnostics.indexOf("export default"));
+	assert.match(writer, /if \(env\.QUOTA_ADMISSION_MODE === "enforce"\) return;/);
+	assert.match(reader, /if \(env\.QUOTA_ADMISSION_MODE === "enforce"\) return Response\.json\(\{ available: false \}, \{ status: 503 \}\);/);
+});
+
 test("temporary production storage diagnostic is removed after identifying the KV daily quota root cause", async () => {
 	const oauth = await source("../src/oauth-entry.ts");
 	assert.doesNotMatch(oauth, /STORAGE_SMOKE_USER_AGENT/);
