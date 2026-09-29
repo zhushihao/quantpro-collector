@@ -218,39 +218,58 @@ export function createGuardedD1(
 			);
 		}
 	};
-	return {
-		prepare(sql: string) {
-			const statement = db.prepare(sql);
-			const wrap = (bound: D1PreparedStatement): D1PreparedStatement =>
-				new Proxy(bound, {
-					get(target, property, receiver) {
-						const value = Reflect.get(target, property, receiver);
-						if (typeof value !== "function") return value;
-						if (property === "bind") {
-							const bind = target.bind as unknown as (
-								...values: unknown[]
-							) => D1PreparedStatement;
-							return (...values: unknown[]) => wrap(bind(...values));
-						}
-						return async (...args: unknown[]) => {
-							const result = await (
-								value as (...inner: unknown[]) => Promise<unknown>
-							).apply(target, args);
-							await guard(sql, (result as { meta?: unknown })?.meta);
-							return result;
-						};
-					},
-				}) as D1PreparedStatement;
-			return wrap(statement);
+	const wrap = (sql: string, bound: D1PreparedStatement): D1PreparedStatement =>
+		new Proxy(bound, {
+			get(target, property, receiver) {
+				const value = Reflect.get(target, property, receiver);
+				if (typeof value !== "function") return value;
+				if (property === "bind") {
+					const bind = target.bind as unknown as (
+						...values: unknown[]
+					) => D1PreparedStatement;
+					return (...values: unknown[]) => wrap(sql, bind(...values));
+				}
+				if (
+					property === "first" ||
+					property === "run" ||
+					property === "all" ||
+					property === "raw"
+				) {
+					return async (...args: unknown[]) => {
+						const result = await (
+							value as (...inner: unknown[]) => Promise<unknown>
+						).apply(target, args);
+						await guard(sql, (result as { meta?: unknown })?.meta);
+						return result;
+					};
+				}
+				// Any other runtime affordance (e.g. D1 session APIs) passes through
+				// unwrapped rather than turning into an opaque guarded function.
+				return value.bind(target);
+			},
+		}) as D1PreparedStatement;
+	// Proxy the database itself: prepare/batch are guarded, every other property
+	// (session APIs, internal handles the runtime reaches for) passes through to
+	// the real binding so the Worker runtime never sees a hole in the object.
+	return new Proxy(db, {
+		get(target, property, receiver) {
+			if (property === "prepare") {
+				const prepare = target.prepare.bind(target) as (sql: string) => D1PreparedStatement;
+				return (sql: string) => wrap(sql, prepare(sql));
+			}
+			if (property === "batch") {
+				return async (statements: D1PreparedStatement[]) => {
+					requireWriteBound();
+					const results = await target.batch(statements);
+					for (const result of results)
+						await guard("batch", (result as { meta?: unknown })?.meta);
+					return results;
+				};
+			}
+			const value = Reflect.get(target, property, target);
+			return typeof value === "function" ? value.bind(target) : value;
 		},
-		async batch(statements: D1PreparedStatement[]) {
-			requireWriteBound();
-			const results = await db.batch(statements);
-			for (const result of results)
-				await guard("batch", (result as { meta?: unknown })?.meta);
-			return results;
-		},
-	} as unknown as D1Database;
+	}) as unknown as D1Database;
 }
 
 // ---------------------------------------------------------------------------
