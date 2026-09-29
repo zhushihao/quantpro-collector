@@ -55,10 +55,19 @@ test("LIVE control plane keeps its keyspace and contracts but is served from an 
 
 test("enforced quota mode disables unbounded OAuth diagnostic D1 writes and reads", async () => {
 	const diagnostics = await source("../src/oauth-diagnostics-entry.ts");
-	const writer = diagnostics.slice(diagnostics.indexOf("async function writeDiagnostic"), diagnostics.indexOf("function tokenAuthMethod"));
-	const reader = diagnostics.slice(diagnostics.indexOf("async function readLatest"), diagnostics.indexOf("export default"));
-	assert.match(writer, /if \(env\.QUOTA_ADMISSION_MODE === "enforce"\) return;/);
-	assert.match(reader, /if \(env\.QUOTA_ADMISSION_MODE === "enforce"\) return Response\.json\(\{ available: false \}, \{ status: 503 \}\);/);
+	const writer = diagnostics.slice(
+		diagnostics.indexOf("async function writeDiagnostic"),
+		diagnostics.indexOf("function tokenAuthMethod"),
+	);
+	const reader = diagnostics.slice(
+		diagnostics.indexOf("async function readLatest"),
+		diagnostics.indexOf("export default"),
+	);
+	assert.match(writer, /if \(env\.QUOTA_ADMISSION_MODE === "enforce"\)\s*\n?\s*return;/);
+	assert.match(
+		reader,
+		/if \(env\.QUOTA_ADMISSION_MODE === "enforce"\)\s*\n?\s*return Response\.json\(\{ available: false \}, \{ status: 503 \}\);/,
+	);
 });
 
 test("temporary production storage diagnostic is removed after identifying the KV daily quota root cause", async () => {

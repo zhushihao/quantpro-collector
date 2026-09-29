@@ -166,7 +166,8 @@ function applyChatGptCallbackIssuerCompat(response: Response): Response {
 }
 
 async function readLatest(env: Env): Promise<Response> {
-	if (env.QUOTA_ADMISSION_MODE === "enforce") return Response.json({ available: false }, { status: 503 });
+	if (env.QUOTA_ADMISSION_MODE === "enforce")
+		return Response.json({ available: false }, { status: 503 });
 	const db = env.RESEARCH_REPLICA;
 	if (!db) return Response.json({ available: false }, { status: 503 });
 	await ensureTable(db);
