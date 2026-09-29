@@ -1373,3 +1373,151 @@ export async function probeSemanticIndex(
 		vector_count: Number(info?.vectorCount ?? 0),
 	};
 }
+
+/* ------------------------------------------------------------------ */
+/* Precomputed vectors (local-GPU embedding, owner approved 2026-09-30) */
+/* ------------------------------------------------------------------ */
+
+export type PrecomputedVectorIngestPayload = {
+	document_id: string;
+	version_id: string;
+	content_sha256: string | null;
+	/** `values` must be SEMANTIC_VECTOR_DIMENSIONS-wide; ordinals 0..N-1 dense. */
+	vectors: { ordinal: number; values: number[] }[];
+	/** Dry-run consistency probe: query the stored vector, write nothing. */
+	consistency_check?: boolean;
+};
+
+export type PrecomputedVectorIngestResult =
+	| { status: "READY"; upserted: number }
+	| { status: "REPLAY"; upserted: 0 }
+	| { status: "CONSISTENCY"; score: number | null; matches: number }
+	| { status: "REJECTED"; reason: string };
+
+function precomputedPayloadError(payload: unknown): string | null {
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		return "body must be an object";
+	}
+	const candidate = payload as Partial<PrecomputedVectorIngestPayload>;
+	if (typeof candidate.document_id !== "string" || !candidate.document_id) {
+		return "document_id is required";
+	}
+	if (typeof candidate.version_id !== "string" || !candidate.version_id) {
+		return "version_id is required";
+	}
+	if (!Array.isArray(candidate.vectors) || candidate.vectors.length === 0) {
+		return "vectors must be a non-empty array";
+	}
+	if (candidate.vectors.length > SEMANTIC_MAX_CHUNKS) {
+		return `at most ${SEMANTIC_MAX_CHUNKS} vectors per document`;
+	}
+	for (let index = 0; index < candidate.vectors.length; index += 1) {
+		const vector = candidate.vectors[index];
+		if (!vector || vector.ordinal !== index) {
+			return `vectors[${index}].ordinal must be ${index} (dense, ordered)`;
+		}
+		if (
+			!Array.isArray(vector.values) ||
+			vector.values.length !== SEMANTIC_VECTOR_DIMENSIONS ||
+			vector.values.some((value) => typeof value !== "number" || !Number.isFinite(value))
+		) {
+			return `vectors[${index}].values must be ${SEMANTIC_VECTOR_DIMENSIONS} finite numbers`;
+		}
+	}
+	if (
+		candidate.content_sha256 !== null &&
+		candidate.content_sha256 !== undefined &&
+		!/^[0-9a-f]{64}$/.test(candidate.content_sha256)
+	) {
+		return "content_sha256 must be a hex sha256 or null (title-only)";
+	}
+	return null;
+}
+
+/**
+ * Store locally-computed embeddings for one PUBLIC document version and mark it
+ * READY, or run a write-less consistency probe (query the already-stored vector
+ * of the same document and report the cosine score against the local one).
+ * The state row must exist (registered by the document_version ingest); the
+ * supplied content hash must match the current servable body so stale vectors
+ * can never attach to newer content.
+ */
+export async function ingestPrecomputedVectors(
+	storage: SemanticIndexStorage,
+	deps: { index: Vectorize },
+	payload: PrecomputedVectorIngestPayload,
+	now = new Date().toISOString(),
+): Promise<PrecomputedVectorIngestResult> {
+	const invalid = precomputedPayloadError(payload);
+	if (invalid) return { status: "REJECTED", reason: invalid };
+
+	const row = await storage.db
+		.prepare(
+			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND retired_at IS NULL`,
+		)
+		.bind(payload.document_id, payload.version_id)
+		.first<SemanticIndexStateRow>();
+	if (!row) return { status: "REJECTED", reason: "no registered state row for this version" };
+
+	const { candidate, servable } = await currentVersionCandidate(storage, payload.document_id);
+	if (!candidate || candidate.versionId !== payload.version_id) {
+		return { status: "REJECTED", reason: "version is not the current servable version" };
+	}
+	const body = servable ? servableBody(candidate.payload) : null;
+	const title = documentTitle(candidate);
+	if (body) {
+		if (payload.content_sha256 !== body.contentSha256) {
+			return { status: "REJECTED", reason: "content_sha256 does not match the current body" };
+		}
+	} else if (!title || payload.content_sha256 !== null) {
+		return {
+			status: "REJECTED",
+			reason: "title-only document requires content_sha256 null",
+		};
+	}
+
+	if (payload.consistency_check) {
+		const matches = await deps.index.query(payload.vectors[0].values, {
+			topK: 1,
+			filter: { document_id: payload.document_id },
+			returnMetadata: SEMANTIC_METADATA_RETRIEVAL,
+		});
+		const top = matches.matches?.[0];
+		return {
+			status: "CONSISTENCY",
+			score: typeof top?.score === "number" ? top.score : null,
+			matches: matches.matches?.length ?? 0,
+		};
+	}
+
+	const entries = [];
+	for (const vector of payload.vectors) {
+		entries.push({
+			id: await semanticVectorId(payload.document_id, payload.version_id, vector.ordinal),
+			values: vector.values,
+			metadata: {
+				document_id: payload.document_id,
+				version_id: payload.version_id,
+				chunk: vector.ordinal,
+				model_id: SEMANTIC_MODEL_ID,
+			},
+		});
+	}
+	await deps.index.upsert(entries);
+	const chunks = payload.vectors.length;
+	const outcome = await markRow(
+		storage,
+		row,
+		now,
+		{
+			state: "READY",
+			contentSha256: payload.content_sha256,
+			titleOnly: body ? 0 : 1,
+			expectedChunks: chunks,
+			confirmedChunks: chunks,
+			lastErrorCode: null,
+		},
+	);
+	if (outcome === 0) return { status: "REJECTED", reason: "state row retired during upsert" };
+	return { status: "READY", upserted: chunks };
+}

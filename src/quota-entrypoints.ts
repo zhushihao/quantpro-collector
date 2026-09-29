@@ -138,6 +138,13 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 	),
 	profile(
 		"http",
+		"http:/internal/research-semantic-index/ingest-vectors",
+		"heavy_bounded",
+		[d1Read(500), d1Write(300)],
+		"locally-computed embeddings (owner approved 2026-09-30): zero Workers AI cost; the declaration covers the state-row read/write and one Vectorize upsert per document; Vectorize stored-dimension growth stays on the direct binding as disclosed for the run route",
+	),
+	profile(
+		"http",
 		"http:/internal/research-semantic-index/status",
 		"light_read",
 		[d1Read(16)],

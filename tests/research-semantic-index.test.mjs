@@ -1514,3 +1514,124 @@ test("the ingest route keeps its frozen envelope and schedules indexing in the b
 	assert.equal((await stateRow(store, "doc_ingest_plain", "ver_ingest_plain")).state, "PENDING");
 	assert.equal((await runBatch(store, fake)).ready >= 1, true);
 });
+
+test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency probe", async () => {
+	const fake = fakes();
+	const store = await searchableStore(fake);
+	const env = {
+		RESEARCH_REPLICA: store.db,
+		RESEARCH_OBJECTS: store.objects,
+		RESEARCH_REPLICA_INGEST_TOKEN: "internal-token",
+		AI: fake.ai,
+		RESEARCH_PUBLIC_INDEX: fake.index,
+	};
+	const body = "这是一段关于合成材料的行业观察正文，包含多个句子。第二句用于检索。";
+	const contentSha = sha256HexOf(encoder.encode(body));
+	const vector = (ordinal) => ({ ordinal, values: Array.from({ length: 1024 }, (_, i) => 0.001 * (ordinal + i + 1)) });
+
+	const unauthorized = await worker.fetch(
+		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+			method: "POST",
+			body: JSON.stringify({}),
+		}),
+		env,
+		{},
+	);
+	assert.equal(unauthorized.status, 401);
+
+	const badDims = await worker.fetch(
+		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+			method: "POST",
+			headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
+			body: JSON.stringify({
+				document_id: "doc_search",
+				version_id: "ver_search",
+				content_sha256: contentSha,
+				vectors: [{ ordinal: 0, values: [0.1, 0.2] }],
+			}),
+		}),
+		env,
+		{},
+	);
+	assert.equal(badDims.status, 200);
+	assert.equal((await badDims.json()).status, "REJECTED");
+
+	const gap = await worker.fetch(
+		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+			method: "POST",
+			headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
+			body: JSON.stringify({
+				document_id: "doc_search",
+				version_id: "ver_search",
+				content_sha256: contentSha,
+				vectors: [vector(0), vector(2)],
+			}),
+		}),
+		env,
+		{},
+	);
+	assert.equal((await gap.json()).status, "REJECTED", "ordinals must be dense");
+
+	const consistency = await worker.fetch(
+		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+			method: "POST",
+			headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
+			body: JSON.stringify({
+				document_id: "doc_search",
+				version_id: "ver_search",
+				content_sha256: contentSha,
+				vectors: [vector(0)],
+				consistency_check: true,
+			}),
+		}),
+		env,
+		{},
+	);
+	const probeBody = await consistency.json();
+	assert.equal(probeBody.status, "CONSISTENCY");
+	assert.equal(probeBody.matches, 1, "the stored cloud vector is found");
+	assert.ok(probeBody.score > 0.9, `cosine against the stored vector: ${probeBody.score}`);
+
+	const upsertsBefore = fake.index.upsertCalls;
+	const ok = await worker.fetch(
+		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+			method: "POST",
+			headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
+			body: JSON.stringify({
+				document_id: "doc_search",
+				version_id: "ver_search",
+				content_sha256: contentSha,
+				vectors: [vector(0), vector(1)],
+			}),
+		}),
+		env,
+		{},
+	);
+	assert.equal(ok.status, 200);
+	const okBody = await ok.json();
+	assert.equal(okBody.status, "READY");
+	assert.equal(okBody.upserted, 2);
+	assert.equal(fake.index.upsertCalls, upsertsBefore + 1);
+	const row = await store.db
+		.prepare("SELECT state, expected_chunks, confirmed_chunks FROM research_semantic_index_state WHERE document_id='doc_search' AND version_id='ver_search'")
+		.first();
+	assert.equal(row.state, "READY");
+	assert.equal(row.expected_chunks, 2);
+	assert.equal(row.confirmed_chunks, 2);
+
+	const drifted = await worker.fetch(
+		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+			method: "POST",
+			headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
+			body: JSON.stringify({
+				document_id: "doc_search",
+				version_id: "ver_search",
+				content_sha256: "f".repeat(64),
+				vectors: [vector(0)],
+			}),
+		}),
+		env,
+		{},
+	);
+	assert.equal((await drifted.json()).status, "REJECTED", "stale content must not attach");
+});

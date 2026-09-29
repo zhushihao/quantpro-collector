@@ -306,3 +306,16 @@ test("the entrypoint catalog covers both directions for HTTP routes", () => {
 	}
 	assert.equal(routeCostProfile("http:/not-a-real-route"), null);
 });
+
+test("the local-embedding ingest route is bounded and AI-free", () => {
+	const route = routeCostProfile("http:/internal/research-semantic-index/ingest-vectors");
+	assert.equal(route?.cost_class, "heavy_bounded");
+	assert.deepEqual(
+		route.dimensions.map((dimension) => [dimension.dimension_key, dimension.units]),
+		[
+			["d1.rows_read", 500],
+			["d1.rows_written", 300],
+		],
+		"local vectors cost zero neurons; only the ledger's own D1 work is reserved",
+	);
+});
