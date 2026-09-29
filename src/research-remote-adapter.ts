@@ -40,6 +40,7 @@
 import type { ResearchReplicaStorage } from "./research-replica.ts";
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import { classifyResearchReadBackendError } from "./research-read-retry.ts";
+import { FTS_TRIGRAM_MIN, ftsPhraseQuery } from "./research-fts.ts";
 import {
 	searchPublicDocumentsSemantic,
 	type SemanticIndexDeps,
@@ -282,21 +283,35 @@ export class CollectorResearchRemoteAdapter {
 	}
 
 	async searchDocuments(query?: string, limit?: number): Promise<Array<Record<string, unknown>>> {
-		const needle = query?.trim().toLocaleLowerCase() ?? "";
+		const needle = query?.trim() ?? "";
 		// Apply a requested title filter in D1 before LIMIT.  Fetching the most
 		// recently received N documents and filtering in memory made a matching
 		// older document disappear as the replica grew (the 960 / Hi-ONE official
 		// backfill is a production example).  LIMIT belongs to search results,
 		// not to an unrelated arrival-time window.
+		//
+		// 2026-09-28 (issue #10 方案①): queries of >= 3 characters run through the
+		// FTS5 trigram index instead of a lower(...) LIKE full-table scan — the
+		// scan cost 25k row reads per search and blew the D1 free-tier daily row
+		// budget.  The FTS table is only a hit accelerator: visibility, retention
+		// and payload stay owned by the research_records join, so results cannot
+		// widen.  Shorter needles (trigram cannot match them) keep the LIKE path.
+		const useFts = needle.trim().length >= FTS_TRIGRAM_MIN;
 		const rows = await this.guarded(async () => {
 			const base = `SELECT record_type, record_key, message_id, visibility, schema_version, payload_json, generated_at, updated_at FROM research_records WHERE record_type='document_version' AND visibility=? AND ${NOT_EXPIRED_BY_RETENTION}`;
-			const statement = needle
+			const statement = useFts
 				? this.storage.db
-						.prepare(`${base} AND lower(json_extract(payload_json, '$.document.title')) LIKE ? ORDER BY updated_at DESC LIMIT ?`)
-						.bind(this.visibility, `%${needle}%`, boundedLimit(limit))
-				: this.storage.db
-						.prepare(`${base} ORDER BY updated_at DESC LIMIT ?`)
-						.bind(this.visibility, boundedLimit(limit));
+						.prepare(
+							`${base} AND record_key IN (SELECT record_key FROM research_documents_fts WHERE research_documents_fts MATCH ?) ORDER BY updated_at DESC LIMIT ?`,
+						)
+						.bind(this.visibility, ftsPhraseQuery(needle), boundedLimit(limit))
+				: needle
+					? this.storage.db
+							.prepare(`${base} AND lower(json_extract(payload_json, '$.document.title')) LIKE ? ORDER BY updated_at DESC LIMIT ?`)
+							.bind(this.visibility, `%${needle.toLocaleLowerCase()}%`, boundedLimit(limit))
+					: this.storage.db
+							.prepare(`${base} ORDER BY updated_at DESC LIMIT ?`)
+							.bind(this.visibility, boundedLimit(limit));
 			const result = await statement.all<ReplicaRecordRow>();
 			return result.results ?? [];
 		});

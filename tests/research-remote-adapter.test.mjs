@@ -62,6 +62,19 @@ class FakeD1 {
 			},
 			async all() {
 				if (sql.includes("json_extract")) {
+					if (sql.includes("research_documents_fts WHERE research_documents_fts MATCH")) {
+						// FTS5 fast path: params are [visibility, phrase, limit].
+						// Simulate trigram substring semantics over titles.
+						const [visibility, phrase, limit] = this.params;
+						const needle = String(phrase).replaceAll('"', "").toLowerCase();
+						const rows = db.records.filter((row) =>
+							row.record_type === "document_version" &&
+							row.visibility === visibility &&
+							String(JSON.parse(row.payload_json).document.title ?? "").toLowerCase().includes(needle),
+						);
+						const filtered = db.excludeRetentionExpired(rows);
+						return { results: typeof limit === "number" ? filtered.slice(0, limit) : filtered };
+					}
 					if (sql.includes("lower(json_extract(payload_json, '$.document.title'))")) {
 						const [visibility, titleNeedle, limit] = this.params;
 						const rows = db.records.filter((row) =>
@@ -410,6 +423,41 @@ test("#25 accumulator semantic ordering is replay-safe, generation-safe, stable 
 	const current = await adapter.getThemeAccumulator("ai-compute");
 	assert.equal(current.record_key, "snap-z"); // snapshot id is deterministic tie-break.
 	assert.equal(current.payload.status, "ACCUMULATING"); // semantic state may legally decline after a correction.
+});
+
+test("issue #10 FTS5: migrated trigram table supports CJK substring MATCH and replay update", async () => {
+	const db = createResearchWorkflowDb();
+	// Real migrated DDL (0015) creates research_documents_fts with the trigram
+	// tokenizer; exercise the exact SQL shapes the production faces run.
+	await db.batch([
+		db.prepare("INSERT INTO research_documents_fts(record_key, document_id, text) VALUES (?, ?, ?)")
+			.bind("ver-1", "doc-1", "电子布高端需求挤压普通供给"),
+	]);
+	const hit = await db
+		.prepare("SELECT record_key FROM research_documents_fts WHERE research_documents_fts MATCH ?")
+		.bind('"子布高"')
+		.all();
+	assert.deepEqual(hit.results.map((r) => r.record_key), ["ver-1"], ">=3-char substring matches via trigram");
+	// Replay: delete-then-insert keeps exactly one shadow row with new text.
+	await db.batch([
+		db.prepare("DELETE FROM research_documents_fts WHERE record_key = ?").bind("ver-1"),
+		db.prepare("INSERT INTO research_documents_fts(record_key, document_id, text) VALUES (?, ?, ?)")
+			.bind("ver-1", "doc-1", "电子布涨价向板厂传导"),
+	]);
+	const stale = await db
+		.prepare("SELECT record_key FROM research_documents_fts WHERE research_documents_fts MATCH ?")
+		.bind('"挤压普通"')
+		.all();
+	assert.equal(stale.results.length, 0, "shadow text mirrors the newest accepted title only");
+	// The joined read shape the adapter uses: visibility/expiry ownership stays
+	// on research_records; the FTS table only narrows the hit set.
+	const joined = await db
+		.prepare(
+			"SELECT record_type, record_key FROM research_records WHERE record_type='document_version' AND visibility='PUBLIC' AND record_key IN (SELECT record_key FROM research_documents_fts WHERE research_documents_fts MATCH ?)",
+		)
+		.bind('"涨价"')
+		.all();
+	assert.deepEqual(joined.results, [], "no records row was inserted, so the join cannot widen");
 });
 
 test("#25 replica ingest new then old keeps semantic-current state in real migrated D1 SQL", async () => {

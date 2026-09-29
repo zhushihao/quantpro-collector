@@ -238,8 +238,8 @@ test("C5 stores path-free metadata, document links, and an immutable recovery jo
 	assert.equal(store.db.batches.length, 1);
 	assert.equal(
 		store.db.batches[0].length,
-		6,
-		"message + current record + body + attachment links + task D semantic pending row + supersede",
+		8,
+		"message + current record + body + attachment links + task D semantic pending row + supersede + FTS shadow delete + insert",
 	);
 	assert.equal(store.objects.objects.size, 1, "only the journal is written for metadata");
 	assert.ok(
@@ -262,6 +262,37 @@ test("C5 stores path-free metadata, document links, and an immutable recovery jo
 		true,
 		"a servable incoming version supersedes the document's other versions",
 	);
+});
+
+test("C5 FTS5 shadow rows ride the ingest batch only for PUBLIC document_version", async () => {
+	const store = storage();
+	const document = await fixture("metadata_document_version.public.json");
+	await replica.ingestResearchReplicaRecord(store, document[0], null, "2026-09-28T18:00:00+00:00");
+	const ftsStatements = store.db.batches[0].filter((statement) =>
+		statement.sql.includes("research_documents_fts"),
+	);
+	assert.equal(ftsStatements.length, 2, "delete-then-insert keeps exactly one shadow row");
+	assert.match(ftsStatements[0].sql, /^DELETE FROM research_documents_fts WHERE record_key = \?$/);
+	assert.match(ftsStatements[1].sql, /INSERT INTO research_documents_fts\(record_key, document_id, text\)/);
+	const [recordKey] = ftsStatements[0].params;
+	const [insertKey, documentId, title] = ftsStatements[1].params;
+	assert.equal(insertKey, recordKey);
+	assert.equal(documentId, document[0].payload.document.document_id);
+	assert.equal(title, document[0].payload.document.title);
+});
+
+test("C5 registers no FTS shadow row for PRIVATE or non-document records", async () => {
+	const store = storage();
+	for (const name of ["metadata_document_version.private.json", "metadata_evidence.json", "metadata_source.public.json"]) {
+		const record = (await fixture(name))[0];
+		await replica.ingestResearchReplicaRecord(store, record, null, "2026-09-28T18:01:00+00:00");
+	}
+	for (const batch of store.db.batches) {
+		assert.equal(
+			batch.some((statement) => statement.sql.includes("research_documents_fts")),
+			false,
+		);
+	}
 });
 
 test("C5 registers no semantic state for PRIVATE or non-document records", async () => {

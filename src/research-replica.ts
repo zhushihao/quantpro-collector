@@ -15,6 +15,7 @@ import {
 	semanticIndexIngestTarget,
 	type SemanticIndexTarget,
 } from "./research-semantic-index.ts";
+import { ftsIngestStatements } from "./research-fts.ts";
 
 export type ResearchReplicaStorage = {
 	db: D1Database;
@@ -304,6 +305,7 @@ export async function ingestResearchReplicaRecord(
 		// eligible before any asynchronous delete.  Embedding itself is never
 		// part of the ingest receipt.
 		statements.push(...semanticIndexIngestStatements(storage.db, record, now));
+		statements.push(...ftsIngestStatements(storage.db, record, key));
 		const results = await storage.db.batch(statements);
 		const inserted = Number(results[0]?.meta.changes ?? 0) === 1;
 		await storage.db
