@@ -890,7 +890,7 @@ test("MCP end-to-end heartbeat and registered_tools advertisement", async () => 
 		const status = await client.callTool({ name: "get_gateway_status", arguments: {} });
 		const statusBody = JSON.parse(status.content[0].text);
 		assert.ok(statusBody.registered_tools.includes("submit_run_envelope"));
-		assert.equal(statusBody.state_gateway_version, "1.3.0");
+		assert.equal(statusBody.state_gateway_version, "1.4.0");
 	} finally {
 		await close();
 	}
@@ -949,4 +949,102 @@ test("MCP end-to-end PERSISTED envelope via LIVE universe context returns the §
 	} finally {
 		await close();
 	}
+});
+
+// ---- issue #47 tails (2026-09-30): pre-write blocker + READ_ONLY observations
+
+test("blocked_by envelope records BLOCKED with a PRE_WRITE code and replays per code+hour", async () => {
+	const db = createResearchWorkflowDb();
+	const envelope = {
+		task_name: "holding-assistant-intraday",
+		summary: "portfolio LKG_VALID/stale=true，本轮阻断，未提交检查点",
+		blocked_by: "PORTFOLIO_NOT_CONFIRMED",
+	};
+	const receipt = await runEnvelope(db, envelope);
+	assert.equal(receipt.status, "ENVELOPE_RECORDED");
+	assert.equal(receipt.outcome, "BLOCKED");
+	assert.equal(receipt.blocker_code, "PRE_WRITE:PORTFOLIO_NOT_CONFIRMED");
+	assert.equal(receipt.fresh_delta_count, 0);
+	assert.equal(receipt.event_count, 0);
+	assert.equal(receipt.notification_required, false);
+	assert.equal(receipt.ledger.status, null);
+	const rows = await countRunRows(db, "task_name=?1", "holding-assistant-intraday");
+	assert.equal(rows.length, 1);
+	assert.match(rows[0].envelope_key, /^BL:PORTFOLIO_NOT_CONFIRMED:/);
+	const replay = await runEnvelope(db, envelope);
+	assert.equal(replay.status, "ENVELOPE_REPLAY");
+	assert.equal(replay.outcome, "BLOCKED");
+	const rowsAfter = await countRunRows(db, "task_name=?1", "holding-assistant-intraday");
+	assert.equal(rowsAfter.length, 1);
+});
+
+test("observations on a READ_ONLY task drive fresh delta and the notification floor", async () => {
+	const db = createResearchWorkflowDb();
+	const receipt = await runEnvelope(db, {
+		task_name: "central-policy",
+		summary: "确认 1 条中央正式政策 Fresh-Delta（居民购房贷款贴息）",
+		observations: { fresh_count: 2 },
+	});
+	assert.equal(receipt.outcome, "SILENT");
+	assert.equal(receipt.fresh_delta_count, 2);
+	assert.equal(receipt.event_count, 0);
+	assert.equal(receipt.notification_required, true);
+	assert.equal(receipt.blocker_code, null);
+	const rows = await countRunRows(db, "task_name=?1", "central-policy");
+	assert.match(rows[0].envelope_key, /^OB:2:/);
+});
+
+test("observations on a write task and blocked/payload combinations persist FAILED invalid rows", async () => {
+	const db = createResearchWorkflowDb();
+	const cases = [
+		{
+			task_name: "industry-research",
+			summary: "x",
+			observations: { fresh_count: 1 },
+		},
+		{
+			task_name: "central-policy",
+			summary: "x",
+			observations: { fresh_count: 1 },
+			blocked_by: "DATA_UNAVAILABLE",
+		},
+		{
+			task_name: "central-policy",
+			summary: "x",
+			blocked_by: "DATA_UNAVAILABLE",
+			channel_payload: {
+				channel: "INDUSTRY",
+				as_of: "2026-09-28T10:45:00+08:00",
+				events: [industryEvent()],
+			},
+		},
+	];
+	for (const envelope of cases) {
+		await assert.rejects(
+			() => runEnvelope(db, envelope),
+			(error) => {
+				assert.equal(error.code, "STATE_VALIDATION_FAILED");
+				assert.equal(error.outcome, "FAILED");
+				assert.match(error.envelopeKey, /^E:INVALID:/);
+				return true;
+			},
+		);
+	}
+	const rows = await countRunRows(db, "outcome='FAILED'");
+	assert.equal(rows.length, 3);
+});
+
+test("non-MARKET rows fall back to the installed deployment ref for prompt_version", async () => {
+	const db = createResearchWorkflowDb();
+	const receipt = await processRunEnvelope({
+		db,
+		token: "fake",
+		envelope: { task_name: "central-policy", summary: "心跳：无新增" },
+		resolveOwnerContext: OWNER_CONTEXT,
+		now: NOW,
+		collectorBuildSha: "6f13644eb36c8e4872d3774c9e91c7eca4767056",
+	});
+	assert.equal(receipt.outcome, "SILENT");
+	const rows = await countRunRows(db, "task_name=?1", "central-policy");
+	assert.equal(rows[0].prompt_version, "6f13644eb36c8e4872d3774c9e91c7eca4767056");
 });

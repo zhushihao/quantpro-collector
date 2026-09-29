@@ -7,7 +7,7 @@
 // means a heartbeat: no ledger write, one SILENT run row.
 import { z } from "zod";
 
-import { AUTOMATION_REGISTRY_KEYS } from "./automation-run-ledger.ts";
+import { AUTOMATION_REGISTRY_KEYS, READ_ONLY_TASKS } from "./automation-run-ledger.ts";
 import {
 	computeTimeliness,
 	ensureRunEnvelopeTables,
@@ -46,6 +46,18 @@ function investmentChannelMember(eventSchema: z.ZodTypeAny) {
 	};
 }
 
+// Pre-write blocker vocabulary (issue #47 item 2, 2026-09-30): a narrow enum
+// for "this run was refused by a business gate BEFORE any ledger write". The
+// 09-29 14:50/16:50 rounds were real portfolio blocks that a bare heartbeat
+// cannot distinguish from a no-op. Model-declared, but structurally separated
+// from prose and always stamped PRE_WRITE:* in blocker_code — the server never
+// grades it as content.
+export const PRE_WRITE_BLOCKERS = [
+	"PORTFOLIO_NOT_CONFIRMED",
+	"DATA_UNAVAILABLE",
+	"UPSTREAM_UNAVAILABLE",
+] as const;
+
 // Closed envelope surface: top-level strict + discriminated union members
 // strict + event items strict → JSON Schema additionalProperties:false on both
 // layers, same host-safety shape as the narrow append tools (spec §1.2).
@@ -53,6 +65,18 @@ export const SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA = z
 	.object({
 		task_name: z.enum(AUTOMATION_REGISTRY_KEYS),
 		summary: ENVELOPE_SUMMARY_SCHEMA,
+		// Optional pre-write blocker (issue #47 item 2): mutually exclusive with
+		// channel_payload and observations — enforced in processRunEnvelope.
+		blocked_by: z.enum(PRE_WRITE_BLOCKERS).optional(),
+		// Optional self-declared observation count for READ_ONLY tasks (issue
+		// #47 item 3): the only fresh-delta source a read-only run has. Task
+		// scope is enforced server-side against READ_ONLY_TASKS.
+		observations: z
+			.object({
+				fresh_count: z.number().int().min(0).max(512),
+			})
+			.strict()
+			.optional(),
 		channel_payload: z
 			.discriminatedUnion("channel", [
 				z
@@ -101,6 +125,7 @@ export type RunEnvelopeReceipt = {
 	run_id: string;
 	task_name: string;
 	outcome: RunEnvelopeOutcome;
+	blocker_code: string | null;
 	envelope_key: string;
 	slot: string | null;
 	slot_date: string | null;
@@ -247,6 +272,8 @@ function windowMinuteLookup(rows: Awaited<ReturnType<typeof readScheduleRows>>):
 
 type LedgerOutcome =
 	| { kind: "heartbeat" }
+	| { kind: "pre_write_block" }
+	| { kind: "observation"; freshCount: number }
 	| { kind: "executed"; result: Awaited<ReturnType<typeof appendInvestmentCommand>> }
 	| { kind: "error"; error: StateGatewayError; eventCount: number | null };
 
@@ -290,6 +317,7 @@ async function receiptFromRow(
 		run_id: row.run_id,
 		task_name: row.task_name,
 		outcome: row.outcome,
+		blocker_code: row.blocker_code,
 		envelope_key: row.envelope_key,
 		slot: row.slot,
 		slot_date: row.slot_date,
@@ -579,6 +607,52 @@ export async function processRunEnvelope(input: {
 	await ensureRunEnvelopeTables(input.db);
 	const scheduleRows = await readScheduleRows(input.db);
 	const windowMinutesFor = windowMinuteLookup(scheduleRows);
+	const binding = resolveSlotBinding(scheduleRows, taskName, receivedAtMs);
+
+	// ---- Narrow-field combination gate (issue #47 items 2/3) ----------------
+	// blocked_by (pre-write refusal) and observations (READ_ONLY self-declared
+	// fresh count) are both bare-run fields: neither may ride along a channel
+	// payload, and observations are restricted to READ_ONLY tasks. Violations
+	// persist the FAILED row exactly like a schema violation (review F2 replay
+	// semantics) so the audit trail shows the rejected shape.
+	const blockedBy = envelope.blocked_by ?? null;
+	const observations = envelope.observations ?? null;
+	const comboViolation = envelope.channel_payload && (blockedBy || observations)
+		? "blocked_by/observations are mutually exclusive with channel_payload"
+		: blockedBy && observations
+			? "blocked_by is mutually exclusive with observations"
+			: observations && !READ_ONLY_TASKS.includes(taskName)
+				? "observations is restricted to READ_ONLY tasks (central-policy, ai-financing-rates)"
+				: null;
+	if (comboViolation) {
+		const envelopeKey = `E:INVALID:${await sha256Hex(envelope)}`;
+		const blockerCode = "STATE_VALIDATION_FAILED:VALIDATE";
+		const inserted = await insertInvalidRunRow({
+			db: input.db,
+			taskName,
+			envelopeKey,
+			receivedAt,
+			slot: binding?.slot ?? null,
+			slotDate: binding?.slot_date ?? null,
+			blockerCode,
+			summary: envelope.summary,
+			collectorBuildSha: input.collectorBuildSha,
+			cloudflareVersionId: input.cloudflareVersionId,
+		});
+		if (inserted.replay) {
+			return receiptFromRow(input.db, inserted.replay, windowMinuteLookup(scheduleRows));
+		}
+		throw new RunEnvelopeError(
+			{
+				code: "STATE_VALIDATION_FAILED",
+				phase: "VALIDATE",
+				message: `run envelope field combination rejected: ${comboViolation}`,
+				retryable: false,
+				requestId,
+			},
+			{ runId: null, outcome: "FAILED", envelopeKey, blockerCode },
+		);
+	}
 
 	// ---- Envelope identity (spec §2.3) --------------------------------------
 	const payload = envelope.channel_payload;
@@ -586,7 +660,13 @@ export async function processRunEnvelope(input: {
 	let channel: "INDUSTRY" | "COMPANY" | "CLOSE" | "MARKET" | null = null;
 	let eventCount: number | null = null;
 	let asOf: string | null = null;
-	if (!payload) {
+	if (blockedBy) {
+		// One pre-write-blocked round per blocker code and hour (spec §2.3
+		// heartbeat granularity); retries of the same refusal replay.
+		envelopeKey = `BL:${blockedBy}:${new Date(receivedAtMs).toISOString().slice(0, 13)}`;
+	} else if (observations) {
+		envelopeKey = `OB:${observations.fresh_count}:${new Date(receivedAtMs).toISOString().slice(0, 13)}`;
+	} else if (!payload) {
 		envelopeKey = `HB:${new Date(receivedAtMs).toISOString().slice(0, 13)}`;
 	} else if (payload.channel === "MARKET") {
 		channel = "MARKET";
@@ -612,8 +692,6 @@ export async function processRunEnvelope(input: {
 		envelopeKey = `E:${channel}:${prepared.payloadSha256}`;
 	}
 
-	const binding = resolveSlotBinding(scheduleRows, taskName, receivedAtMs);
-
 	// ---- Replay gate (spec §1.4 step 3) -------------------------------------
 	const existing = await readRunV3(input.db, taskName, envelopeKey);
 	if (existing && existing.outcome !== "UNKNOWN") {
@@ -635,7 +713,13 @@ export async function processRunEnvelope(input: {
 			// The first-receipt row carries the envelope's actual production_ref
 			// (MARKET only): a later BLOCKED/FAILED terminal must not erase which
 			// version was submitted. Non-MARKET channels/heartbeats keep null.
-			promptVersion: payload && payload.channel === "MARKET" ? payload.production_ref : null,
+			// MARKET rows keep the envelope's actual production_ref (5261ebf);
+			// every other row falls back to the installed deployment ref so the
+			// observer never reads null as "version unknown" (issue #47 item 4).
+			promptVersion:
+				payload && payload.channel === "MARKET"
+					? payload.production_ref
+					: input.collectorBuildSha ?? null,
 			collectorBuildSha: input.collectorBuildSha,
 			cloudflareVersionId: input.cloudflareVersionId,
 		});
@@ -678,7 +762,11 @@ export async function processRunEnvelope(input: {
 
 	// ---- Execute (spec §1.4 step 6) ------------------------------------------
 	let ledgerOutcome: LedgerOutcome;
-	if (!payload) {
+	if (blockedBy) {
+		ledgerOutcome = { kind: "pre_write_block" };
+	} else if (observations) {
+		ledgerOutcome = { kind: "observation", freshCount: observations.fresh_count };
+	} else if (!payload) {
 		ledgerOutcome = { kind: "heartbeat" };
 	} else {
 		let executedEventCount: number | null = null;
@@ -760,7 +848,23 @@ export async function processRunEnvelope(input: {
 	let commentId: string | null = null;
 	let commentUrl: string | null = null;
 	let ledgerStatus: RunEnvelopeLedgerStatus;
-	if (ledgerOutcome.kind === "heartbeat") {
+	if (ledgerOutcome.kind === "pre_write_block") {
+		// Issue #47 item 2: refused BEFORE any ledger write. Recorded as
+		// BLOCKED with a PRE_WRITE:* code — never as a bare SILENT heartbeat,
+		// which is exactly how the 09-29 portfolio blocks were masked.
+		outcome = "BLOCKED";
+		freshDeltaCount = 0;
+		eventCount = 0;
+		ledgerStatus = null;
+	} else if (ledgerOutcome.kind === "observation") {
+		// Issue #47 item 3: READ_ONLY runs have no ledger to write; the
+		// declared count is the only auditable fresh-delta source and it feeds
+		// the notification floor like a ledger-derived delta would.
+		outcome = "SILENT";
+		freshDeltaCount = ledgerOutcome.freshCount;
+		eventCount = 0;
+		ledgerStatus = null;
+	} else if (ledgerOutcome.kind === "heartbeat") {
 		outcome = "SILENT";
 		freshDeltaCount = 0;
 		eventCount = 0;
@@ -790,7 +894,9 @@ export async function processRunEnvelope(input: {
 	const blockerCode =
 		ledgerOutcome.kind === "error"
 			? `${ledgerOutcome.error.code}:${ledgerOutcome.error.phase}`
-			: null;
+			: ledgerOutcome.kind === "pre_write_block"
+				? `PRE_WRITE:${blockedBy}`
+				: null;
 
 	const updatedAt = new Date().toISOString();
 	await updateRunV3Row({
@@ -838,6 +944,7 @@ export async function processRunEnvelope(input: {
 		run_id: runId,
 		task_name: taskName,
 		outcome,
+		blocker_code: blockerCode,
 		envelope_key: envelopeKey,
 		slot: binding?.slot ?? null,
 		slot_date: binding?.slot_date ?? null,

@@ -31,6 +31,12 @@ export const AUTOMATION_REGISTRY_KEYS = [
 	"ai-financing-rates",
 ] as const;
 
+// Tasks with no channel ledger (issue #47 item 3): their envelopes carry no
+// channel_payload, so fresh-delta can only come from the declared
+// `observations` field. The write tasks are deliberately excluded — their
+// fresh-delta stays server-derived from the ledger.
+export const READ_ONLY_TASKS: readonly string[] = ["central-policy", "ai-financing-rates"];
+
 export type AutomationRunPhase = (typeof AUTOMATION_RUN_PHASES)[number];
 export type AutomationRunStatus = (typeof AUTOMATION_RUN_STATUSES)[number];
 export type AutomationRunOutcome = (typeof AUTOMATION_RUN_OUTCOMES)[number];
