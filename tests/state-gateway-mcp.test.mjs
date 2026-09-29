@@ -452,7 +452,7 @@ test("get_gateway_status.registered_tools never drifts from the real MCP registr
 			);
 		}
 		assert.ok(body.registered_tools.includes("get_production_health_snapshot"));
-		assert.equal(body.state_gateway_version, "1.3.0");
+		assert.equal(body.state_gateway_version, "1.4.0");
 	} finally {
 		await client.close();
 		await server.server.close();

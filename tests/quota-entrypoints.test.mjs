@@ -93,7 +93,7 @@ test("every HTTP/OAuth path in the source is classified in the cost catalog", as
 
 test("every MCP tool in the source is classified, and the catalog has no extra tools", async () => {
 	const observed = await observedTools();
-	assert.equal(observed.length, 38, "the registered tool count changed; classify the new tool");
+	assert.equal(observed.length, 39, "the registered tool count changed; classify the new tool");
 	assert.deepEqual(unclassifiedEntrypoints(observed), []);
 	assert.deepEqual(missingEntrypoints(observed, "mcp_tool"), []);
 });

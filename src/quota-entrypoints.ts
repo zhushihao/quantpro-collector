@@ -274,6 +274,11 @@ const TOOL_CLASSES: Record<
 		dimensions: [d1Read(32)],
 		note: "#50 bounded read-only health projection",
 	},
+	submit_issue_bookkeeping: {
+		cost_class: "heavy_bounded",
+		dimensions: [d1Read(16), d1Write(16)],
+		note: "issue #52 controlled bookkeeping: one dedupe read+write; the GitHub call is not a D1 dimension",
+	},
 	get_state_write_receipt: {
 		cost_class: "light_read",
 		dimensions: [d1Read(16)],

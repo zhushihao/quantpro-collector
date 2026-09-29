@@ -14,6 +14,9 @@
 		"COLLECTOR_FORWARDABLE_PRINCIPALS": "chatgpt-production zcode-research-machine",
 		"COLLECTOR_STATIC_CLIENT_PRINCIPAL": "zcode-research-machine",
 		"COLLECTOR_STATIC_CLIENT_ISSUER": "https://static-direct.quantpro.invalid/",
+		// issue #52: symbolic bookkeeping targets (server-side whitelist). No
+		// arbitrary repo/issue reaches GitHub; edit here to move the sink.
+		"COLLECTOR_BOOKKEEPING_TARGETS": "{\"collector-acceptance\":{\"repo\":\"zhushihao/quantpro-collector\",\"issue\":47},\"run-observation\":{\"repo\":\"zhushihao/quantpro-collector\",\"issue\":48},\"production-health\":{\"repo\":\"zhushihao/quantpro-collector\",\"issue\":50},\"portfolio-regression\":{\"repo\":\"zhushihao/quantpro-collector\",\"issue\":51},\"bookkeeping-meta\":{\"repo\":\"zhushihao/quantpro-collector\",\"issue\":52}}",
 	},
 	"kv_namespaces": [
 		{

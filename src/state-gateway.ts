@@ -27,7 +27,7 @@ import {
 	type StateWriteReceipt,
 } from "./state-receipts.ts";
 
-export const STATE_GATEWAY_VERSION = "1.3.0";
+export const STATE_GATEWAY_VERSION = "1.4.0";
 export const STATE_GATEWAY_CONTRACT_VERSION = "state-gateway-v1";
 export const STATE_CHANNEL_SCHEMA = z.enum(STATE_WRITE_CHANNELS);
 
@@ -743,6 +743,7 @@ export async function getGatewayStatus(input: {
 			"get_market_checkpoints",
 			"append_market_checkpoint",
 			"get_production_health_snapshot",
+			"submit_issue_bookkeeping",
 		],
 		supported_channels: [...STATE_WRITE_CHANNELS],
 		supported_schema_versions: [

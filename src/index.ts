@@ -121,6 +121,10 @@ import {
 	SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA,
 	processRunEnvelope,
 } from "./run-envelope.ts";
+import {
+	ISSUE_BOOKKEEPING_INPUT_SCHEMA,
+	submitIssueBookkeeping,
+} from "./issue-bookkeeping.ts";
 import { runScheduleReconciliation } from "./automation-schedule.ts";
 import { getProductionHealthSnapshot } from "./production-health.ts";
 import {
@@ -196,6 +200,8 @@ interface Env {
 	RESEARCH_REPLICA_INGEST_TOKEN?: string;
 	/** 非敏感部署标识；由发布命令注入，用于生产版本核验。 */
 	DEPLOYED_GIT_SHA?: string;
+	/** issue #52：受控记账白名单（JSON：target_key → {repo, issue}）；缺失/非法时全部 REJECTED_TARGET。 */
+	COLLECTOR_BOOKKEEPING_TARGETS?: string;
 	CF_VERSION_METADATA?: {
 		id: string;
 		tag: string;
@@ -1768,7 +1774,7 @@ export function createServer(
 		"submit_run_envelope",
 		{
 			description:
-				"定时任务单次交件：一次调用同时完成本轮登记与内容落账。提交 task_name + 人话 summary + 可选 channel_payload；无新增时省略 channel_payload（空包=心跳）。Collector 服务端在一个调用内完成：幂等、通道校验、账本写入、运行终态派生、fresh 计数与通知门判定，并全部回执给模型。禁止携带 write_key/producer/schema_version/event_id 等服务器字段。",
+				"定时任务单次交件：一次调用同时完成本轮登记与内容落账。提交 task_name + 人话 summary + 可选 channel_payload；无新增时省略 channel_payload（空包=心跳）。业务门禁在写入前拦下本轮时改交 blocked_by（窄枚举，服务端记 BLOCKED/PRE_WRITE:*）；只读任务用 observations.fresh_count 申报观察新增（服务端计入通知门）。两者均不得与 channel_payload 同交。Collector 服务端在一个调用内完成：幂等、通道校验、账本写入、运行终态派生、fresh 计数与通知门判定，并全部回执给模型。禁止携带 write_key/producer/schema_version/event_id 等服务器字段。",
 			inputSchema: SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA,
 			annotations: {
 				readOnlyHint: false,
@@ -1846,6 +1852,64 @@ export function createServer(
 					response.content[0].text = JSON.stringify(body, null, 2);
 				}
 				return response;
+			}
+		},
+	);
+
+	registerTool(
+		"submit_issue_bookkeeping",
+		{
+			description:
+				"受控 Issue 记账：定时任务只提交记账意图（服务端白名单 target_key + 仅 COMMENT/CLOSE + 必填幂等键），GitHub 副作用由 Collector 代做并返回回执（PERSISTED/IDEMPOTENT_REPLAY/DELIVERY_BLOCKED/OUTCOME_UNKNOWN/REJECTED_TARGET）。不做通用 GitHub API；结果未知时同 dedupe_key 重查，不改键重投；投递失败不改判任何业务运行。",
+			inputSchema: ISSUE_BOOKKEEPING_INPUT_SCHEMA,
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: true,
+			},
+		},
+		async (command) => {
+			const denied = requireStateScope(STATE_WRITE_SCOPE, "submit_issue_bookkeeping");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA) {
+				return stateGatewayErrorResponse(
+					new StateGatewayError({
+						code: "STATE_UNAVAILABLE",
+						phase: "AUTH",
+						message: "State Gateway storage is not configured",
+					}),
+				);
+			}
+			const requestId = crypto.randomUUID().replaceAll("-", "");
+			try {
+				const receipt = await submitIssueBookkeeping({
+					db: env.RESEARCH_REPLICA,
+					command,
+					token: env.GITHUB_TOKEN ?? null,
+					targetsRaw: env.COLLECTOR_BOOKKEEPING_TARGETS ?? null,
+					requestId,
+				});
+				console.log(
+					JSON.stringify({
+						event: "collector_tool_operation",
+						tool: "submit_issue_bookkeeping",
+						request_id: requestId,
+						dedupe_key: receipt.dedupe_key,
+						status: receipt.status,
+					}),
+				);
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(receipt, null, 2) }],
+				};
+			} catch (error) {
+				return stateGatewayErrorResponse(
+					normalizeStateGatewayError(error, {
+						phase: "VALIDATE",
+						retryable: false,
+						requestId,
+					}),
+				);
 			}
 		},
 	);
