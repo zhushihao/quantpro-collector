@@ -170,11 +170,31 @@
   },
   "last_verified_release_ref": "2ef1010b3b75c82b9d690587be3957bbbd84432a",
   "deployment_observations": {
-    "issue": 37,
-    "status": "MIXED_VERIFIED",
+    "issue": 47,
+    "status": "ENVELOPE_PROMPTS_INSTALLED_EXACT_6_OF_6",
     "audit_path": "automation/control/production.json",
     "verified_tasks": 6,
-    "note": "2026-09-28 production closeout: active task ids reconciled; holding-assistant and industry-research now use owner-scoped narrow append tools. Per-registry production_ref is authoritative.",
+    "deployed_ref": "6f13644eb36c8e4872d3774c9e91c7eca4767056",
+    "contract": "run-v3-single-envelope",
+    "exact_verification": "Each production Scheduled Task save response returned the full persisted prompt matching its GIT_EXACT compiler artifact; 6/6 instances installed from automation/_build/envelope-6f13644.",
+    "compiled_prompt_sha256": {
+      "company-facts": "876fb4a3e446e30bf88b85e264be4d0a7630ae21efa59a86013f0dfc123c6d7a",
+      "industry-research": "90a88a00be4161d57699fcaa09c735473efe86b79a662c85e8dd55f1ec78c1fd",
+      "central-policy": "b66a87b98b9b341078c5861f5b06ead8797245a985b43061c3360515dfd6d0e2",
+      "ai-financing-rates": "404d5edb82d77a56aa5e93323abe777680154320193ee26706eb30b44092477f",
+      "holding-assistant-intraday": "317bf8d6dcc72f18daad69d0ec19444c6101a5ebaa067bc06e2e5fcb785476de",
+      "holding-assistant-preclose": "93eafbed77c7119d47808620a9b32406974a7b7b32261a603c757a0a09323ed4"
+    },
+    "compiled_prompt_chars": {
+      "company-facts": 5906,
+      "industry-research": 6243,
+      "central-policy": 4273,
+      "ai-financing-rates": 4304,
+      "holding-assistant-intraday": 6787,
+      "holding-assistant-preclose": 7705
+    },
+    "natural_run_validation": "PENDING_FIRST_POST_INSTALL_RUNS",
+    "note": "2026-09-29 GPT-side #47 activation: six production instances / five prompt products switched to the single submit_run_envelope contract from exact ref 6f13644. Per Owner activation instruction, registry entries were not modified in this observation-only commit. industry-research was observed disabled before installation but the prompt-save response later showed enabled=true even though is_enabled was not included in the update request; no enable/disable action was issued by this activation.",
     "timezone_policy": {
       "schedule_tzid": "Asia/Shanghai",
       "authority": "VEVENT DTSTART TZID",
