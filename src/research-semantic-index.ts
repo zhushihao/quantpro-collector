@@ -1056,6 +1056,16 @@ export async function runSemanticIndexBatch(
 		report.vectors_deleted = await cleanupRetiredVectors(storage, deps, now);
 		return report;
 	} catch (error) {
+		// The boundaryFailure conversion erases the root cause; name it for the
+		// operator log (no secrets, no document ids in the error text).
+		console.log(
+			JSON.stringify({
+				event: "semantic_run_failed",
+				timestamp: new Date().toISOString(),
+				error_type: error instanceof Error ? error.name : typeof error,
+				error_message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
+			}),
+		);
 		boundaryFailure(error);
 	}
 }
