@@ -59,7 +59,7 @@ export interface DimensionSpec {
 }
 
 /** Bump whenever the published allowances or 95% policy change; evidence in the record. */
-export const QUOTA_CATALOG_VERSION = "quota-catalog/2026-09-29.3";
+export const QUOTA_CATALOG_VERSION = "quota-catalog/2026-09-30.4";
 
 /** The pricing/dimension evidence this catalog was transcribed from. */
 export const QUOTA_CATALOG_SOURCES: readonly string[] = [
@@ -241,8 +241,8 @@ export const QUOTA_DIMENSIONS: readonly DimensionSpec[] = [
 		"Neurons",
 		"utc_day",
 		10_000,
-		false,
-		"official free allowance resets 00:00 UTC; no pre-call neuron cap is published: bge-m3 1075 neurons/M input tokens and character counts are not a bound",
+		true,
+		"owner-approved daily-budget admission (2026-09-30): free allowance resets 00:00 UTC; bge-m3 is 1075 neurons/M input tokens and the embedding pipeline caps a document at 32 chunks x 1,350 chars, so 1 char = 1 token (worst case) proves a 47-neuron per-document cap; run declarations add retry headroom; off-ledger drift is covered by the runtime-bootstrapped daily baseline headroom",
 	),
 	spec(
 		"vectorize.queried_dims",

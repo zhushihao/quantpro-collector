@@ -73,6 +73,7 @@ import {
 	probeSemanticIndex,
 	readSemanticIndexCoverage,
 	runSemanticIndexBatch,
+	SEMANTIC_BATCH_MAX_DOCS,
 	SEMANTIC_QUERY_MAX_LIMIT,
 	SEMANTIC_QUERY_MAX_QUERY_CHARS,
 	type SemanticIndexDeps,
@@ -143,6 +144,7 @@ import {
 	routeCostProfile,
 	settleReservation,
 	syncDimensionCatalog,
+	createGuardedAi,
 	createGuardedD1,
 	createGuardedR2,
 	QUOTA_DIMENSIONS,
@@ -3183,7 +3185,7 @@ async function handleResearchReplicaIngest(
  * as the ingest/receipts transport; no PRIVATE capability is introduced and no
  * document ids leave this face.
  */
-async function handleSemanticIndexRun(request: Request, env: Env): Promise<Response> {
+async function handleSemanticIndexRun(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
 	if (request.method !== "POST") {
 		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
 	}
@@ -3194,16 +3196,28 @@ async function handleSemanticIndexRun(request: Request, env: Env): Promise<Respo
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
-	// Workers AI neurons have no provable per-call upper bound, so the embedding
-	// batch is refused in enforce mode (SDD CQ spec §4: no provable bound => deny).
-	if (admissionMode(env) === "enforce") {
-		return quotaGuardResponse(
-			new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				"semantic index batch has no provable neuron upper bound",
-			),
-			crypto.randomUUID().replaceAll("-", ""),
-		);
+	// Daily neuron budget admission (owner approved 2026-09-30): in enforce mode
+	// the run holds a cap reservation whose ai.neurons declaration covers the
+	// directory's 10-document run cap with retry headroom; the UTC-day ledger
+	// refuses runs once the 9,500 threshold would be crossed.  The AI binding is
+	// guarded so every embedding call requires and spends against the cap.
+	const requestId = crypto.randomUUID().replaceAll("-", "");
+	const enforce = admissionMode(env) === "enforce";
+	let admission: {
+		handle: ReturnType<typeof admissionHandle>;
+		budget: ReservationBudget;
+		result: { status: string; reservation_id?: string };
+	} | null = null;
+	if (enforce) {
+		try {
+			admission = await admitHeavyRouteForEnv(env, {
+				route: "http:/internal/research-semantic-index/run",
+				operation_id: `semantic-run:${requestId}`,
+				fingerprint: crypto.randomUUID().replaceAll("-", ""),
+			});
+		} catch (error) {
+			return quotaGuardResponse(error, requestId);
+		}
 	}
 	let body: unknown = {};
 	try {
@@ -3219,13 +3233,38 @@ async function handleSemanticIndexRun(request: Request, env: Env): Promise<Respo
 	if (Object.keys(options).some((key) => key !== "max_docs" && key !== "max_register")) {
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
+	// The declared ai.neurons reservation prices 10 documents: never let a caller
+	// widen the batch past what the cap reservation covers.
+	const maxDocs =
+		typeof options.max_docs === "number" && Number.isFinite(options.max_docs)
+			? Math.max(1, Math.min(Math.floor(options.max_docs), SEMANTIC_BATCH_MAX_DOCS))
+			: SEMANTIC_BATCH_MAX_DOCS;
 	try {
-		const report = await runSemanticIndexBatch(storage, semanticIndexDeps(env), {
-			maxDocs: options.max_docs as number | undefined,
-			maxRegister: options.max_register as number | undefined,
-		});
+		const deps = semanticIndexDeps(env);
+		const handle = admission?.handle;
+		const guardedDeps: SemanticIndexDeps = handle
+			? {
+					ai: createGuardedAi(deps.ai, handle, admission!.budget) as typeof deps.ai,
+					index: deps.index,
+				}
+			: deps;
+		const report = await runSemanticIndexBatch(
+			handle
+				? { ...storage, db: createGuardedD1(storage.db, handle, admission!.budget) }
+				: storage,
+			guardedDeps,
+			{ maxDocs, maxRegister: options.max_register as number | undefined },
+		);
+		if (admission) {
+			await settleReservation(env.RESEARCH_REPLICA!, {
+				reservation_id: admission.result.reservation_id as string,
+				observed: admission.budget.snapshot(),
+				reason: "semantic_index_run_completed",
+			}).catch(() => undefined);
+		}
 		return jsonResponse(report);
 	} catch (error) {
+		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
 			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,

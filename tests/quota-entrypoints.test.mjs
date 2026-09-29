@@ -141,19 +141,26 @@ test("cap-reserved routes admit through the ledger; unproven AI/vectorize/retent
 		assert.ok((routeCostProfile(route)?.dimensions.length ?? 0) > 0, route);
 	}
 	const unbounded = QUOTA_ENTRYPOINTS.filter((entry) => entry.cost_class === "heavy_unbounded");
-	assert.ok(unbounded.length >= 2, "AI/vectorize/retention paths must be explicitly unbounded");
+	assert.ok(unbounded.length >= 1, "retention keeps its unbounded scan");
 	for (const entry of unbounded) {
 		assert.equal(entry.dimensions.length, 0, `${entry.route} must not claim a bound`);
 	}
 	assert.equal(
-		routeCostProfile("http:/internal/research-semantic-index/run")?.cost_class,
-		"heavy_unbounded",
-		"embedding has no provable neuron bound",
-	);
-	assert.equal(
 		routeCostProfile("http:/internal/research-retention/run")?.cost_class,
 		"heavy_unbounded",
 		"retention keeps its unbounded scan",
+	);
+	// Semantic embedding runs on the owner-approved daily neuron budget.
+	const run = routeCostProfile("http:/internal/research-semantic-index/run");
+	assert.equal(run?.cost_class, "heavy_bounded", "run must hold a cap reservation");
+	assert.deepEqual(
+		run.dimensions.map((dimension) => [dimension.dimension_key, dimension.units]),
+		[
+			["ai.neurons", 940],
+			["d1.rows_read", 2_000],
+			["d1.rows_written", 1_000],
+		],
+		"run cap = 10 docs x 47 neurons x retry headroom plus ledger D1 costs",
 	);
 });
 

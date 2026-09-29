@@ -58,6 +58,7 @@ const d1Write = (units: number): AdmissionDimension => ({
 });
 const r2A = (units: number): AdmissionDimension => ({ dimension_key: "r2.class_a", units });
 const r2B = (units: number): AdmissionDimension => ({ dimension_key: "r2.class_b", units });
+const aiNeurons = (units: number): AdmissionDimension => ({ dimension_key: "ai.neurons", units });
 
 /** HTTP entrypoints served by `src/index.ts`, `src/oauth-entry.ts`, `src/oauth-diagnostics-entry.ts`. */
 export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
@@ -127,9 +128,9 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 	profile(
 		"http",
 		"http:/internal/research-semantic-index/run",
-		"heavy_unbounded",
-		[],
-		"embedding path has no provable neuron upper bound (bge-m3 tokens are not character counts)",
+		"heavy_bounded",
+		[aiNeurons(940), d1Read(2_000), d1Write(1_000)],
+		"embedding run with a daily neuron budget (owner approved 2026-09-30): handler clamps max_docs to SEMANTIC_BATCH_MAX_DOCS (10); 940 = 10 docs x 47-neuron document cap x 2x retry headroom; the daily booked ledger stops runs once the UTC-day 9,500 threshold would be crossed. Vectorize upserts grow stored dimensions (a stock dimension with no provable per-call bound, ~$0.01/month at this scale) and stay on the direct binding, as disclosed.",
 	),
 	profile(
 		"http",

@@ -289,7 +289,7 @@ test("the unobserved upper bound counts against the ceiling", async () => {
 test("non-provable dimensions are refused instead of bounded by guesswork", async () => {
 	const db = createResearchWorkflowDb();
 	await seed(db);
-	for (const key of ["ai.neurons", "d1.storage_gb_month", "r2.storage_gb_month"]) {
+	for (const key of ["d1.storage_gb_month", "r2.storage_gb_month"]) {
 		const result = await admitOperation(
 			db,
 			request(`op-unprovable-${key}`, [{ dimension_key: key, units: 1 }]),
@@ -298,6 +298,59 @@ test("non-provable dimensions are refused instead of bounded by guesswork", asyn
 		assert.equal(result.status, "DENIED", `${key} must be refused`);
 		assert.equal(result.reason, "bound", `${key} must be refused as unprovable`);
 	}
+});
+
+test("utc_day ai.neurons bootstraps its daily baseline and admits through the budget", async () => {
+	const db = createResearchWorkflowDb();
+	await syncDimensionCatalog(db, QUOTA_DIMENSIONS);
+	await recordAccountPeriod(db, {
+		account_id: ACCOUNT,
+		...PERIOD,
+		anchor_kind: "subscription_renewal",
+		source: "test",
+		source_version: "test@1",
+		verified_at: PERIOD.period_start,
+	});
+	// The ledger's own dimensions still need operator baselines; only utc_day
+	// dimensions bootstrap themselves.
+	for (const key of ["d1.rows_read", "d1.rows_written"]) {
+		await recordBaseline(db, {
+			dimension_key: key,
+			period_key: PERIOD_KEY,
+			state: "VERIFIED",
+			used: 0,
+			unobserved_upper_bound: 0,
+			source: "test",
+			source_version: "test@1",
+			as_of: NOW.toISOString(),
+			coverage_end: NOW.toISOString(),
+		}, NOW);
+	}
+	// No operator-registered ai.neurons baseline: the deterministic utc_day
+	// bootstrap creates it on the first admission of the day.
+	const result = await admitOperation(
+		db,
+		request("op-utcday-bootstrap", [{ dimension_key: "ai.neurons", units: 940 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(result.status, "ADMITTED", JSON.stringify(result));
+	const dayKey = `utc-day:${NOW.toISOString().slice(0, 10)}`;
+	const row = await db
+		.prepare(
+			"SELECT state, used, unobserved_upper_bound FROM quota_period_baselines WHERE dimension_key='ai.neurons' AND period_key=?",
+		)
+		.bind(dayKey)
+		.first();
+	assert.equal(row?.state, "VERIFIED");
+	assert.equal(Number(row?.used), 0);
+	// Budget math: 9,500 threshold - 500 off-ledger headroom admits 9,000/day.
+	const overBudget = await admitOperation(
+		db,
+		request("op-utcday-over", [{ dimension_key: "ai.neurons", units: 9_000 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(overBudget.status, "DENIED");
+	assert.equal(overBudget.reason, "limit");
 });
 
 test("unknown dimensions and malformed requests fail closed as faults", async () => {
@@ -549,7 +602,7 @@ test("status reports CLOSED until a verified baseline exists and never claims a 
 	assert.equal(d1After.state, "OPEN");
 	assert.equal(d1After.threshold_95, dimension("d1.rows_read").threshold_95);
 	const neurons = after.dimensions.find((entry) => entry.dimension_key === "ai.neurons");
-	assert.equal(neurons.state, "CLOSED", "AI has no provable bound");
+	assert.equal(neurons.state, "OPEN", "daily-budget AI admits through the bootstrapped baseline");
 });
 
 test("no UTC calendar month, no month/31 divisor, and no timeout release exist in the SQL", () => {
@@ -563,7 +616,7 @@ test("no UTC calendar month, no month/31 divisor, and no timeout release exist i
 	assert.match(guard, /quota_period_baselines/);
 	assert.match(guard, /quota_dimension_catalog/);
 	assert.match(seal, /applied/);
-	assert.equal(QUOTA_CATALOG_VERSION.includes("2026-09-29"), true);
+	assert.equal(QUOTA_CATALOG_VERSION.includes("2026-09-30"), true);
 });
 
 // ---------------------------------------------------------------------------

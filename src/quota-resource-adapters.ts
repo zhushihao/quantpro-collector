@@ -300,13 +300,11 @@ export function createGuardedR2(
 }
 
 // ---------------------------------------------------------------------------
-// AI / Vectorize — CLOSED until a bound is provable
+// AI / Vectorize
 // ---------------------------------------------------------------------------
 
 /**
- * A provider-side token upper bound with tokenizer evidence.  There is no such
- * bound for the Collector's embedding path today (slice counts and characters are
- * not token counts), so `NEURON_BOUND` is `null` and Workers AI stays CLOSED.
+ * A provider-side token upper bound with tokenizer evidence.
  */
 export interface NeuronBoundProof {
 	readonly model: string;
@@ -321,7 +319,19 @@ export interface NeuronBoundProof {
  */
 export const VECTORIZE_QUERY_DIMENSIONS: number | null = null;
 
-export const NEURON_BOUND: NeuronBoundProof | null = null;
+/**
+ * Provider-side neuron bound with tokenizer evidence (owner approved the daily
+ * budget admission on 2026-09-30).  The embedding pipeline caps one document at
+ * `SEMANTIC_MAX_CHUNKS` (32) chunks of `SEMANTIC_CHUNK_CHARS` + overlap (1,350)
+ * characters; billing counts *input* tokens, and 1 char = 1 token is the worst
+ * case for bge-m3 (Chinese) and over-counts English ~4x:
+ * ceil(43_200 * 1_075 / 1e6) = 47 neurons per document call.
+ */
+export const NEURON_BOUND: NeuronBoundProof = {
+	model: "@cf/baai/bge-m3",
+	neurons_per_million_tokens: 1_075,
+	max_input_tokens: 43_200,
+};
 
 export function neuronUpperBound(proof: NeuronBoundProof | null = NEURON_BOUND): number | null {
 	if (!proof) return null;

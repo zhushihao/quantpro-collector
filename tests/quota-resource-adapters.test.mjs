@@ -201,9 +201,11 @@ test("R2 Class B operations are refused when only Class A is reserved", async ()
 	);
 });
 
-test("Workers AI stays CLOSED because no neuron bound can be proven", async () => {
-	assert.equal(NEURON_BOUND, null);
-	assert.equal(neuronUpperBound(null), null);
+test("Workers AI spends against the calibrated neuron bound and refuses over-budget calls", async () => {
+	// The owner-approved daily budget (2026-09-30) proves the document cap:
+	// 32 chunks x 1,350 chars at 1 char = 1 token => ceil(43_200 * 1_075 / 1e6).
+	assert.equal(NEURON_BOUND.model, "@cf/baai/bge-m3");
+	assert.equal(neuronUpperBound(), 47);
 	assert.equal(
 		neuronUpperBound({ model: "x", neurons_per_million_tokens: 0, max_input_tokens: 10 }),
 		null,
@@ -212,19 +214,27 @@ test("Workers AI stays CLOSED because no neuron bound can be proven", async () =
 		neuronUpperBound({ model: "x", neurons_per_million_tokens: 1075, max_input_tokens: 1000 }),
 		2,
 	);
+	const calls = [];
 	const ai = {
-		async run() {
-			throw new Error("must not be called");
+		async run(model, input) {
+			calls.push(model);
+			return { embeddings: [] };
 		},
 	};
-	const reserved = [{ dimension_key: "ai.neurons", units: 100 }];
+	const reserved = [{ dimension_key: "ai.neurons", units: 70 }];
 	const budget = new ReservationBudget(handle(reserved));
 	const guarded = createGuardedAi(ai, handle(reserved), budget);
+	const result = await guarded.run("@cf/baai/bge-m3", {});
+	assert.deepEqual(result, { embeddings: [] });
+	assert.deepEqual(calls, ["@cf/baai/bge-m3"]);
+	assert.equal(budget.spent("ai.neurons"), 47);
+	// A second document call would cross the 70-unit reservation and is refused
+	// before the provider call is made.
 	await assert.rejects(
-		guarded.run("model", {}),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
+		guarded.run("@cf/baai/bge-m3", {}),
+		(error) => error instanceof QuotaGuardError && error.error_code === "QUOTA_CIRCUIT_OPEN",
 	);
+	assert.deepEqual(calls, ["@cf/baai/bge-m3"], "the refused call never reached the provider");
 });
 
 test("Vectorize writes and queries stay CLOSED without verified stock semantics", async () => {

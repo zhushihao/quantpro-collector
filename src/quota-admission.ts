@@ -107,6 +107,14 @@ export function baselineCoverageAgeMs(periodKind: string): number {
 	return BASELINE_COVERAGE_AGE_MS[periodKind] ?? 0;
 }
 
+/**
+ * Conservative off-ledger headroom for the runtime-bootstrapped UTC-day
+ * baseline (ai.neurons): console playground calls and any non-Collector worker
+ * on the account are invisible to the ledger, so the daily budget admits at
+ * most 9,500 - 500 booked neurons for ledger traffic.
+ */
+export const UTC_DAY_OFF_LEDGER_HEADROOM = 500;
+
 function baselineCutoffFor(periodKind: string, now: Date): string {
 	return new Date(now.getTime() - baselineCoverageAgeMs(periodKind)).toISOString();
 }
@@ -692,6 +700,37 @@ export async function admitOperation(
 			units: dimension.units,
 			baseline_cutoff: baselineCutoffFor(specification.period, now),
 		});
+	}
+
+	// UTC-day baseline bootstrap (owner-approved daily budget admission,
+	// 2026-09-30): a utc_day period is defined by the provider (00:00 UTC reset),
+	// not by an operator-verified anchor, and the only AI caller on this account
+	// goes through this ledger.  The deterministic daily baseline therefore
+	// bootstraps itself: used = 0 (nothing off-ledger is known) plus a fixed
+	// conservative headroom for drift, with the freshness watermark refreshed on
+	// every admission.  Billing-cycle and storage dimensions are NOT bootstrapped.
+	const bootstrappedAt = now.toISOString();
+	for (const entry of entries) {
+		if (entry.period_kind !== "utc_day") continue;
+		await db
+			.prepare(
+				`INSERT INTO quota_period_baselines
+				 (dimension_key, period_key, state, used, unobserved_upper_bound, source, source_version, as_of, coverage_end, recorded_at)
+				 VALUES (?, ?, 'VERIFIED', 0, ?, 'runtime-bootstrap-utc-day', ?, ?, ?, ?)
+				 ON CONFLICT(dimension_key, period_key) DO UPDATE SET
+					as_of = excluded.as_of,
+					coverage_end = excluded.coverage_end`,
+			)
+			.bind(
+				entry.dimension_key,
+				entry.period_key,
+				UTC_DAY_OFF_LEDGER_HEADROOM,
+				catalogVersion,
+				bootstrappedAt,
+				bootstrappedAt,
+				bootstrappedAt,
+			)
+			.run();
 	}
 
 	const reservationId = crypto.randomUUID();

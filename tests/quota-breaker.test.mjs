@@ -78,14 +78,20 @@ test("dimensions without a provable bound are marked unprovable", () => {
 		"d1.storage_gb_month",
 		"kv.storage_gb_month",
 		"r2.storage_gb_month",
-		"ai.neurons",
 		"vectorize.stored_dims",
 		"r2.ia_class_a",
 		"r2.ia_storage_gb_month",
 	]) {
 		assert.equal(dimensionSpec(key)?.provable, false, `${key} must not claim a bound`);
 	}
-	for (const key of ["d1.rows_read", "d1.rows_written", "r2.class_a", "r2.class_b", "kv.reads"]) {
+	for (const key of [
+		"d1.rows_read",
+		"d1.rows_written",
+		"r2.class_a",
+		"r2.class_b",
+		"kv.reads",
+		"ai.neurons",
+	]) {
 		assert.equal(dimensionSpec(key)?.provable, true, `${key} must declare a provable bound`);
 	}
 });
@@ -164,7 +170,7 @@ test("storage risk is a time integral over the remaining cycle, not a flat capac
 });
 
 test("the catalog version is pinned and the guarantee boundary is stated in code", async () => {
-	assert.equal(QUOTA_CATALOG_VERSION, "quota-catalog/2026-09-29.3");
+	assert.equal(QUOTA_CATALOG_VERSION, "quota-catalog/2026-09-30.4");
 	assert.equal(QUOTA_DIMENSIONS.length, 19);
 	const { readFile } = await import("node:fs/promises");
 	const text = await readFile(new URL("../src/quota-breaker.ts", import.meta.url), "utf8");
