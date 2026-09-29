@@ -686,6 +686,85 @@ test("slot binding: an in-window envelope stores the schedule slot, out-of-windo
 	assert.equal(outOfWindow.slot_date, null);
 });
 
+test("run-v3 prompt_version records the envelope's actual MARKET production_ref (2026-09-29 repair)", async () => {
+	const db = createResearchWorkflowDb();
+	const { fetchImpl } = recordingFetch();
+	const marketEnvelope = (productionRef) => ({
+		task_name: "holding-assistant-intraday",
+		summary: "盘中轮次",
+		channel_payload: {
+			channel: "MARKET",
+			trading_date: "2026-09-28",
+			as_of: "2026-09-28T09:50:00+08:00",
+			scheduled_slot: "09:50",
+			production_ref: productionRef,
+			records: [{ subject_key: "CN:600000", holding_status: "ACTIVE" }],
+		},
+	});
+	const completed = await runEnvelope(db, marketEnvelope("a".repeat(40)), { fetchImpl });
+	assert.equal(completed.outcome, "COMPLETED");
+	const completedRow = (await countRunRows(db, "run_id=?1", completed.run_id))[0];
+	assert.equal(completedRow.prompt_version, "a".repeat(40));
+
+	// A BLOCKED chain outcome must not erase the version that was received:
+	// duplicate same-slot comments make the ledger conflict before the POST.
+	const conflictCheckpoint = (id, content) => ({
+		id,
+		html_url: `https://github.com/zhushihao/quantpro-collector/issues/2#issuecomment-${id}`,
+		url: `https://api.github.com/repos/zhushihao/quantpro-collector/issues/comments/${id}`,
+		created_at: "2026-09-28T01:50:00Z",
+		body:
+			"```json\n" +
+			JSON.stringify(
+				{
+					schema_version: "market_observation_batch_v1",
+					prompt_id: "holding-assistant",
+					production_ref: "a".repeat(40),
+					portfolio_version: "live:test",
+					event_id: content,
+					idempotency_key: "holding-assistant:2026-09-28:09:50",
+					trading_date: "2026-09-28",
+					as_of: "2026-09-28T09:50:00+08:00",
+					scheduled_slot: "09:50",
+					producer: "holding-assistant",
+					observation_type: "INTRADAY",
+					previous_checkpoint_comment_id: null,
+					preopen_comment_id: null,
+					live_universe_hash: "sha256:conflict",
+					source_task: "持仓助手",
+					records: [{ subject_key: content, holding_status: "ACTIVE" }],
+				},
+				null,
+				2,
+			) +
+			"\n```",
+	});
+	const conflicted = await runEnvelope(db, marketEnvelope("b".repeat(40)), {
+		fetchImpl: async () =>
+			jsonResponse([conflictCheckpoint(901, "x"), conflictCheckpoint(902, "y")]),
+	}).catch((error) => error);
+	assert.equal(conflicted.outcome, "BLOCKED");
+	assert.equal(conflicted.blockerCode, "STATE_CONFLICT:VALIDATE");
+	const blockedRow = (await countRunRows(db, "run_id=?1", conflicted.runId))[0];
+	// The version written at first receipt survives the terminal update.
+	assert.equal(blockedRow.prompt_version, "b".repeat(40));
+	assert.equal(blockedRow.outcome, "BLOCKED");
+
+	// Non-MARKET channels and heartbeats have no production ref: stay null.
+	const industryRun = await runEnvelope(db, industryEnvelope(), {
+		fetchImpl: recordingFetch().fetchImpl,
+	});
+	const industryRow = (await countRunRows(db, "run_id=?1", industryRun.run_id))[0];
+	assert.equal(industryRow.prompt_version, null);
+	const heartbeat = await runEnvelope(
+		db,
+		{ task_name: "ai-financing-rates", summary: "心跳" },
+		{ fetchImpl: async () => jsonResponse([]) },
+	);
+	const heartbeatRow = (await countRunRows(db, "run_id=?1", heartbeat.run_id))[0];
+	assert.equal(heartbeatRow.prompt_version, null);
+});
+
 test("512-record MARKET envelope smoke (spec §九 待验②, node-side): max-size payload processes end to end", async () => {
 	const db = createResearchWorkflowDb();
 	const { fetchImpl } = recordingFetch();

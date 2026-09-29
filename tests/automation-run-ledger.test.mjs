@@ -279,6 +279,7 @@ async function insertRunV3Row(db, overrides = {}) {
 		outcome: "COMPLETED",
 		blocker_code: null,
 		summary: "信封一轮",
+		prompt_version: null,
 		...overrides,
 	};
 	await db
@@ -288,7 +289,7 @@ async function insertRunV3Row(db, overrides = {}) {
 				received_at, slot, slot_date, fresh_delta_count, event_count,
 				outcome, blocker_code, summary, prompt_version,
 				collector_build_sha, cloudflare_version_id, created_at, updated_at
-			) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, NULL, 'build-x', 'cf-x', ?7, ?7)`,
+			) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'build-x', 'cf-x', ?7, ?7)`,
 		)
 		.bind(
 			row.task_name,
@@ -305,6 +306,7 @@ async function insertRunV3Row(db, overrides = {}) {
 			row.outcome,
 			row.blocker_code,
 			row.summary,
+			row.prompt_version,
 		)
 		.run();
 	return row;
@@ -316,6 +318,7 @@ test("run-v3 rows merge into get_automation_run_history with server-derived sema
 
 	const fresh = await insertRunV3Row(db, {
 		as_of: "2026-09-27T19:55:00+08:00",
+		prompt_version: "f".repeat(40),
 	});
 	const stale = await insertRunV3Row(db, {
 		run_id: "run_" + "d".repeat(32),
@@ -362,6 +365,10 @@ test("run-v3 rows merge into get_automation_run_history with server-derived sema
 	assert.equal(freshRow.result_semantics, "TERMINAL_RECORDED");
 	assert.equal(freshRow.fresh_delta_semantics, "SERVER_COUNTED");
 	assert.equal(freshRow.notification_required, true);
+	// Persisted run-v3 prompt_version projects through history (2026-09-29
+	// repair: it used to be hard-coded null); rows without a stored value keep
+	// null (asserted on staleRow below).
+	assert.equal(freshRow.prompt_version, "f".repeat(40));
 	assert.equal(freshRow.notification_semantics, "SERVER_DERIVED_FLOOR");
 	assert.equal(freshRow.delivery, "MODEL_DELIVERY_UNVERIFIED");
 	assert.equal(freshRow.event_count, 3);
@@ -374,6 +381,7 @@ test("run-v3 rows merge into get_automation_run_history with server-derived sema
 	assert.equal(staleRow.notification_required, false);
 	assert.equal(staleRow.as_of_stale, true);
 	assert.equal(staleRow.timeliness, "STALE");
+	assert.equal(staleRow.prompt_version, null);
 
 	const unknownRow = v3Rows.find((entry) => entry.run_id === unknown.run_id);
 	assert.equal(unknownRow.effective_status, "UNKNOWN");

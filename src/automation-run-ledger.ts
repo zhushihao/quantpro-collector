@@ -1071,7 +1071,8 @@ export async function getAutomationRunHistory(input: {
 					raw.collector_build_sha == null ? null : String(raw.collector_build_sha),
 				cloudflare_version_id:
 					raw.cloudflare_version_id == null ? null : String(raw.cloudflare_version_id),
-				prompt_version: null,
+				prompt_version:
+					raw.prompt_version == null ? null : String(raw.prompt_version),
 				safe_summary: raw.summary == null ? null : String(raw.summary),
 				as_of: asOf,
 				as_of_stale: asOf ? timeliness === "STALE" : null,

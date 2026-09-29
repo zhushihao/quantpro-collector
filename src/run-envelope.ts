@@ -448,6 +448,7 @@ async function insertUnknownRunRow(input: {
 	receivedAt: string;
 	slot: string | null;
 	slotDate: string | null;
+	promptVersion?: string | null;
 	collectorBuildSha?: string | null;
 	cloudflareVersionId?: string | null;
 }): Promise<"inserted" | "conflicted"> {
@@ -461,26 +462,27 @@ async function insertUnknownRunRow(input: {
 				task_name, run_id, envelope_key, channel, write_key, as_of,
 				received_at, slot, slot_date, fresh_delta_count, event_count,
 				outcome, blocker_code, summary, prompt_version,
-				collector_build_sha, cloudflare_version_id, created_at, updated_at
-			) VALUES (
-				?1, ?2, ?3, NULL, NULL, NULL,
-				?4, ?5, ?6, NULL, NULL,
-				'UNKNOWN', NULL, NULL, NULL,
-				?7, ?8, ?9, ?9
+					collector_build_sha, cloudflare_version_id, created_at, updated_at
+				) VALUES (
+					?1, ?2, ?3, NULL, NULL, NULL,
+					?4, ?5, ?6, NULL, NULL,
+					'UNKNOWN', NULL, NULL, ?7,
+					?8, ?9, ?10, ?10
+				)
+				ON CONFLICT(task_name, envelope_key) DO NOTHING`,
 			)
-			ON CONFLICT(task_name, envelope_key) DO NOTHING`,
-		)
-		.bind(
-			input.taskName,
-			input.runId,
-			input.envelopeKey,
-			input.receivedAt,
-			input.slot,
-			input.slotDate,
-			input.collectorBuildSha ?? null,
-			input.cloudflareVersionId ?? null,
-			new Date().toISOString(),
-		)
+			.bind(
+				input.taskName,
+				input.runId,
+				input.envelopeKey,
+				input.receivedAt,
+				input.slot,
+				input.slotDate,
+				input.promptVersion ?? null,
+				input.collectorBuildSha ?? null,
+				input.cloudflareVersionId ?? null,
+				new Date().toISOString(),
+			)
 		.run();
 	return Number((insert as { meta?: { changes?: number } }).meta?.changes ?? 0) > 0
 		? "inserted"
@@ -630,6 +632,10 @@ export async function processRunEnvelope(input: {
 			receivedAt,
 			slot: binding?.slot ?? null,
 			slotDate: binding?.slot_date ?? null,
+			// The first-receipt row carries the envelope's actual production_ref
+			// (MARKET only): a later BLOCKED/FAILED terminal must not erase which
+			// version was submitted. Non-MARKET channels/heartbeats keep null.
+			promptVersion: payload && payload.channel === "MARKET" ? payload.production_ref : null,
 			collectorBuildSha: input.collectorBuildSha,
 			cloudflareVersionId: input.cloudflareVersionId,
 		});
