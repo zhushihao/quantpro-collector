@@ -133,8 +133,8 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 		"http",
 		"http:/internal/research-semantic-index/run",
 		"heavy_bounded",
-		[aiNeurons(940), d1Read(2_000), d1Write(1_000)],
-		"embedding run with a daily neuron budget (owner approved 2026-09-30): handler clamps max_docs to SEMANTIC_BATCH_MAX_DOCS (10); 940 = 10 docs x 47-neuron document cap x 2x retry headroom; the daily booked ledger stops runs once the UTC-day 9,500 threshold would be crossed. Vectorize upserts grow stored dimensions (a stock dimension with no provable per-call bound, ~$0.01/month at this scale) and stay on the direct binding, as disclosed.",
+		[aiNeurons(940), d1Read(20_000), d1Write(4_000)],
+		"embedding run with a daily neuron budget (owner approved 2026-09-30): handler clamps max_docs to SEMANTIC_BATCH_MAX_DOCS (10); 940 = 10 docs x 47-neuron document cap x 2x retry headroom; the daily booked ledger stops runs once the UTC-day 9,500 threshold would be crossed. D1 caps cover the register page scan (200 docs across records/objects/links) and its writes. Vectorize upserts grow stored dimensions (a stock dimension with no provable per-call bound, ~$0.01/month at this scale) and stay on the direct binding, as disclosed.",
 	),
 	profile(
 		"http",

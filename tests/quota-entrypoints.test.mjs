@@ -169,8 +169,8 @@ test("cap-reserved routes admit through the ledger; unproven AI/vectorize/retent
 		run.dimensions.map((dimension) => [dimension.dimension_key, dimension.units]),
 		[
 			["ai.neurons", 940],
-			["d1.rows_read", 2_000],
-			["d1.rows_written", 1_000],
+			["d1.rows_read", 20_000],
+			["d1.rows_written", 4_000],
 		],
 		"run cap = 10 docs x 47 neurons x retry headroom plus ledger D1 costs",
 	);
