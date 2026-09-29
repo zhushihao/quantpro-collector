@@ -724,6 +724,19 @@ async function admitHeavyRouteForEnv(
 	);
 	if (result.status === "DENIED") {
 		const code = result.reason === "limit" ? "QUOTA_CIRCUIT_OPEN" : "QUOTA_GUARD_UNAVAILABLE";
+		// Operators can only fix what the logs name: the reason and refusing
+		// dimension carry no secrets and are the sole signal for baseline repair.
+		console.log(
+			JSON.stringify({
+				event: "quota_admission_denied",
+				timestamp: new Date().toISOString(),
+				route: args.route,
+				operation_id: args.operation_id,
+				reason: result.reason,
+				dimension: result.dimension_key ?? null,
+				detail: result.detail,
+			}),
+		);
 		throw new QuotaGuardError(code, `admission denied (${result.reason}) for ${args.route}`);
 	}
 	if (result.status === "REPLAY") {
