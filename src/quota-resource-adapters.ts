@@ -227,7 +227,9 @@ export function createGuardedD1(
 					const bind = target.bind as unknown as (
 						...values: unknown[]
 					) => D1PreparedStatement;
-					return (...values: unknown[]) => wrap(sql, bind(...values));
+					// D1's bind reads runtime session state off `this`; call it against
+					// the real statement or the guard proxy breaks the driver.
+					return (...values: unknown[]) => wrap(sql, bind.apply(target, values));
 				}
 				if (
 					property === "first" ||
