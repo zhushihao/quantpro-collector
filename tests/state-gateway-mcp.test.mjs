@@ -276,6 +276,7 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 			"end_run",
 			"get_gateway_status",
 			"get_automation_run_history",
+			"get_production_health_snapshot",
 			"get_state_snapshot",
 			"read_state_snapshot",
 			"read_state_snapshot_v2",

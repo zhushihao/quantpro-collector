@@ -122,6 +122,7 @@ import {
 	processRunEnvelope,
 } from "./run-envelope.ts";
 import { runScheduleReconciliation } from "./automation-schedule.ts";
+import { getProductionHealthSnapshot } from "./production-health.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
@@ -1895,6 +1896,53 @@ export function createServer(
 					taskName: task_name,
 					since,
 					limit,
+				});
+				return {
+					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+				};
+			} catch (error) {
+				return automationRunErrorResponse(error);
+			}
+		},
+	);
+
+	server.registerTool(
+		"get_production_health_snapshot",
+		{
+			description:
+				"#50 生产健康快照：一次只读调用覆盖六个固定生产任务（无 task_name/since/limit 参数），替代观察器每轮六次 history 扫描。字段为已存事实或既有槽位派生的观察投影，不新增资格判断；无可信数据时为 null。授权以 state:read 为准；D1 不可读时如实 STATE_UNAVAILABLE，不判任务失败。",
+			inputSchema: z.object({}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		async () => {
+			const denied = requireStateScope(STATE_READ_SCOPE, "get_production_health_snapshot");
+			if (denied) return denied;
+			if (!env?.RESEARCH_REPLICA) {
+				return {
+					content: [
+						{
+							type: "text" as const,
+							text: JSON.stringify(
+								{
+									status: "STATE_UNAVAILABLE",
+									message: "automation run storage is not configured",
+								},
+								null,
+								2,
+							),
+						},
+					],
+				};
+			}
+			try {
+				const result = await getProductionHealthSnapshot({
+					db: env.RESEARCH_REPLICA,
+					cloudflareVersionId: env.CF_VERSION_METADATA?.id ?? null,
 				});
 				return {
 					content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
