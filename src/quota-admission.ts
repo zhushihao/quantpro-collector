@@ -1022,18 +1022,34 @@ export async function settleReservation(
 		.bind(args.reservation_id)
 		.all<{ dimension_key: string; units: number }>();
 	const reserved = units.results ?? [];
-	if (reserved.length === 0)
+	const rejectLog = (detail: string): void => {
+		// Settlement refusals used to be swallowed by callers; name them so the
+		// operator can repair the ledger (ids truncated, no secrets).
+		console.log(
+			JSON.stringify({
+				event: "quota_settle_rejected",
+				timestamp: now.toISOString(),
+				reservation_id: args.reservation_id.slice(0, 8),
+				detail,
+			}),
+		);
+	};
+	if (reserved.length === 0) {
+		rejectLog("reservation has no live units");
 		return { status: "REJECTED", detail: "reservation has no live units" };
+	}
 	const observedByKey = new Map(args.observed.map((entry) => [entry.dimension_key, entry.units]));
 	for (const row of reserved) {
 		const observed = observedByKey.get(row.dimension_key as DimensionKey);
 		if (observed === undefined) {
+			rejectLog(`observed usage missing for ${row.dimension_key}`);
 			return {
 				status: "REJECTED",
 				detail: `observed usage missing for ${row.dimension_key}`,
 			};
 		}
 		if (!Number.isSafeInteger(observed) || observed < 0 || observed > row.units) {
+			rejectLog(`observed usage for ${row.dimension_key} exceeds the reservation`);
 			return {
 				status: "REJECTED",
 				detail: `observed usage for ${row.dimension_key} exceeds the reservation`,
@@ -1055,7 +1071,10 @@ export async function settleReservation(
 		)
 		.bind(args.reservation_id)
 		.first<{ operation_id: string; fingerprint: string; route: string }>();
-	if (!reservation) return { status: "REJECTED", detail: "reservation is not live" };
+	if (!reservation) {
+		rejectLog("reservation is not live");
+		return { status: "REJECTED", detail: "reservation is not live" };
+	}
 
 	try {
 		await db.batch(
@@ -1074,7 +1093,13 @@ export async function settleReservation(
 				}),
 			),
 		);
-	} catch {
+	} catch (error) {
+		rejectLog(
+			`settlement transaction failed: ${error instanceof Error ? error.message : String(error)}`.slice(
+				0,
+				280,
+			),
+		);
 		return { status: "REJECTED", detail: "settlement transaction failed; reservation kept" };
 	}
 	const remaining = await db
@@ -1082,6 +1107,7 @@ export async function settleReservation(
 		.bind(args.reservation_id)
 		.first<{ live: number }>();
 	if (Number(remaining?.live ?? 1) !== 0) {
+		rejectLog("settlement did not clear every reserved unit");
 		return { status: "REJECTED", detail: "settlement did not clear every reserved unit" };
 	}
 	return { status: "SETTLED", reservation_id: args.reservation_id };
