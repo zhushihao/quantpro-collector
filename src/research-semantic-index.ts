@@ -1064,7 +1064,7 @@ export async function runSemanticIndexBatch(
 				timestamp: new Date().toISOString(),
 				error_type: error instanceof Error ? error.name : typeof error,
 				error_message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-				error_stack: (error instanceof Error ? error.stack : "").slice(0, 600),
+				error_stack: ((error instanceof Error ? error.stack : "") ?? "").slice(0, 600),
 			}),
 		);
 		boundaryFailure(error);
