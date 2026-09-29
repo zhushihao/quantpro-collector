@@ -609,16 +609,6 @@ export async function appendMarketCheckpoint(input: {
 			"preopen_comment_id does not match the server-side ledger state",
 		);
 	}
-	if (
-		checkpoint.scheduled_slot !== "09:10" &&
-		state.preopen &&
-		checkpoint.production_ref !== state.preopen.payload.production_ref
-	) {
-		throw new MarketLedgerError(
-			"CHECKPOINT_CHAIN_MISMATCH",
-			"production_ref drifted from PREMARKET",
-		);
-	}
 
 	const fetchImpl = input.fetchImpl ?? fetch;
 	let createResponse: Response;

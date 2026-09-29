@@ -289,6 +289,75 @@ test("append_market_checkpoint appends fixed Issue #2 and verifies readback", as
 	);
 });
 
+test("append_market_checkpoint preserves the actual ref across a same-day version change", async () => {
+	const changedRef = "b".repeat(40);
+	const proposed = payload({
+		date: "2026-09-21",
+		slot: "11:50",
+		previous: "101",
+		preopen: "100",
+		productionRef: changedRef,
+	});
+	let created = null;
+	let writes = 0;
+	const fetchImpl = async (input, init) => {
+		const url = String(input);
+		if (init?.method === "POST") {
+			writes += 1;
+			assert.match(url, /\/issues\/2\/comments$/);
+			const posted = JSON.parse(init.body);
+			const persisted = JSON.parse(posted.body.match(/```json\s*([\s\S]*?)\s*```/)[1]);
+			assert.equal(persisted.production_ref, changedRef);
+			assert.equal(persisted.previous_checkpoint_comment_id, "101");
+			assert.equal(persisted.preopen_comment_id, "100");
+			assert.equal("version_transition" in persisted, false);
+			created = comment(102, persisted, "2026-09-21T03:50:05Z");
+			return jsonResponse(created, { status: 201 });
+		}
+		if (url.endsWith("/issues/comments/102")) return jsonResponse(created);
+		return jsonResponse([previousClose, preopen, firstIntraday, ...(created ? [created] : [])]);
+	};
+	const result = await appendMarketCheckpoint({
+		token: "fake-server-secret",
+		checkpoint: proposed,
+		fetchImpl,
+	});
+	assert.equal(result.status, "PERSISTED");
+	assert.equal(result.checkpoint.production_ref, changedRef);
+	assert.equal(writes, 1);
+	const replay = await appendMarketCheckpoint({
+		token: "fake-server-secret",
+		checkpoint: proposed,
+		fetchImpl,
+	});
+	assert.equal(replay.status, "IDEMPOTENT_REPLAY");
+	assert.equal(writes, 1);
+});
+
+test("version changes do not bypass existing checkpoint pointers", async () => {
+	for (const pointers of [
+		{ previous: "100", preopen: "100" },
+		{ previous: "101", preopen: "stale-comment-id" },
+	]) {
+		await assert.rejects(
+			appendMarketCheckpoint({
+				token: "fake-server-secret",
+				checkpoint: payload({
+					date: "2026-09-21",
+					slot: "11:50",
+					productionRef: "b".repeat(40),
+					...pointers,
+				}),
+				fetchImpl: async (_input, init) => {
+					assert.notEqual(init?.method, "POST");
+					return jsonResponse([previousClose, preopen, firstIntraday]);
+				},
+			}),
+			(error) => error instanceof MarketLedgerError && error.code === "CHECKPOINT_CHAIN_MISMATCH",
+		);
+	}
+});
+
 test("append_market_checkpoint fails closed when checkpoint chain is stale", async () => {
 	const proposed = payload({
 		date: "2026-09-21",
