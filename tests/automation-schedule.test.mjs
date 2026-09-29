@@ -156,19 +156,61 @@ test("MISSED_SLOT derivation: satisfied windows are excluded, v2 rows count duri
 		nowMs,
 	});
 	assert.equal(allMissed.truncated, false);
-	// Windows ending at or before 12:00: 10:45..11:25 and 11:45..12:25 is NOT
-	// complete yet (ends 12:25 > 12:00), so only one completed window missed.
+	// Each slot stays open until the next slot of the same table: 10:45..11:45
+	// is complete by 12:00 and missed; 11:45..13:45 (gap to the wrap-around next
+	// slot, capped at 120min) is still in progress.
 	assert.equal(allMissed.missed.length, 1);
 	assert.deepEqual(allMissed.missed[0], {
 		task_name: "industry-research",
 		effective_status: "MISSED_SLOT",
 		slot: "10:45",
 		slot_date: day,
-		window: "10:45..11:25",
-		window_end: new Date(shanghaiMs(day, "11:25")).toISOString(),
+		window: "10:45..11:45",
+		window_end: new Date(shanghaiMs(day, "11:45")).toISOString(),
 		derivation: "SCHEDULE_WINDOW",
 		source_contract: "schedule-derivation",
 	});
+
+	// Drifted deliveries resolve: an :00 hourly task whose delivery lands
+	// :36–:49 past the slot (2026-09-29 central-policy shape) is NOT a miss,
+	// while a slot with no delivery inside its cadence window still is.
+	const hourly = [
+		{
+			task_name: "central-policy",
+			slot_times: ["10:00", "11:00", "12:00"],
+			weekdays: [0, 1, 2, 3, 4, 5, 6],
+			window_minutes: 40,
+			enabled: true,
+		},
+	];
+	const drifted = deriveMissedSlotsFromRawRows({
+		scheduleRows: hourly,
+		v3Rows: [
+			rawV3Row("central-policy", new Date(shanghaiMs(day, "10:36")).toISOString()),
+			rawV3Row("central-policy", new Date(shanghaiMs(day, "11:49")).toISOString()),
+		],
+		v2Rows: [],
+		derivationStartMs: shanghaiMs(day, "09:00"),
+		nowMs: shanghaiMs(day, "12:30"),
+	});
+	assert.deepEqual(drifted.missed, []);
+	// Same shape but the 10:00 round truly never lands: only that slot reports.
+	const trulyMissed = deriveMissedSlotsFromRawRows({
+		scheduleRows: hourly,
+		v3Rows: [rawV3Row("central-policy", new Date(shanghaiMs(day, "11:49")).toISOString())],
+		v2Rows: [],
+		derivationStartMs: shanghaiMs(day, "09:00"),
+		nowMs: shanghaiMs(day, "12:30"),
+	});
+	assert.equal(trulyMissed.missed.length, 1);
+	assert.equal(trulyMissed.missed[0].slot, "10:00");
+	// A delivery drifting beyond the cadence window (12:05, past 12:00's next
+	// slot at 13:00 — beyond cap) still resolves the 11:00 slot via the 12:00
+	// boundary but must not retroactively satisfy 10:00.
+	assert.equal(
+		trulyMissed.missed.some((row) => row.slot === "11:00"),
+		false,
+	);
 });
 
 test("MISSED_SLOT derivation: since truncation and the 200-row earliest-truncation cap", () => {

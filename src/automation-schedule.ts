@@ -356,6 +356,44 @@ function isSatisfied(
 }
 
 /**
+ * Cap on the slot-to-slot gap used as a miss window. Hourly tables get their
+ * natural 60-minute cadence; sparse tables (4-hour, trading-day slots) fall
+ * back to this cap instead of a multi-hour window that would let the NEXT
+ * round's delivery mask a real miss.
+ */
+const MISSED_MAX_INTERVAL_MINUTES = 120;
+
+function sortedSlotMinutes(slotTimes: string[]): Array<{ slot: string; minutes: number }> {
+	const slots: Array<{ slot: string; minutes: number }> = [];
+	for (const slot of slotTimes) {
+		const [hour, minute] = slot.split(":").map(Number);
+		if (!Number.isFinite(hour) || !Number.isFinite(minute)) continue;
+		slots.push({ slot, minutes: hour * 60 + minute });
+	}
+	slots.sort((left, right) => left.minutes - right.minutes);
+	return slots;
+}
+
+/**
+ * Per-slot miss window: a slot stays open until the next slot of the same
+ * table (capped at MISSED_MAX_INTERVAL_MINUTES), never shorter than the row's
+ * window_minutes. Hourly deliveries drift minutes past the nominal slot (e.g.
+ * an hourly :00 task landing at :36–:49); the old fixed 40-minute window
+* turned that drift into false MISSED_SLOT rows on 2026-09-29.
+ */
+function forwardWindowMinutes(schedule: ScheduleRow, slot: string): number {
+	const slots = sortedSlotMinutes(schedule.slot_times);
+	const index = slots.findIndex((entry) => entry.slot === slot);
+	if (index < 0) return schedule.window_minutes;
+	const nextMinutes =
+		index + 1 < slots.length
+			? slots[index + 1].minutes
+			: slots[0].minutes + 1440; // wrap: cadence resumes next day
+	const gap = nextMinutes - slots[index].minutes;
+	return Math.min(Math.max(gap, schedule.window_minutes), MISSED_MAX_INTERVAL_MINUTES);
+}
+
+/**
  * Pure MISSED_SLOT derivation over pre-fetched rows (review F6: callers issue
  * at most one time-range SELECT per (task, table) and bucket in JS — never one
  * query per window). Windows count as satisfied by any v3 `received_at` or
@@ -386,14 +424,19 @@ export function deriveMissedSlotsFromRows(input: {
 				const windowStartMs =
 					Date.UTC(cursor.year, cursor.month - 1, cursor.day, hour, minute) -
 					8 * 60 * 60 * 1000;
-				const windowEndMs = windowStartMs + schedule.window_minutes * 60 * 1000;
+				const forwardMinutes = forwardWindowMinutes(schedule, slot);
+				const windowEndMs = windowStartMs + forwardMinutes * 60 * 1000;
 				// Only completed windows are judged; an in-progress window is not
 				// yet a miss.
 				if (windowStartMs < input.derivationStartMs) continue;
 				if (windowEndMs > input.nowMs) continue;
 				const satisfied = input.rowSources.some((rowSource) =>
 					rowSource.task_name === schedule.task_name
-						? isSatisfied(rowSource, windowStartMs, windowEndMs)
+						? isSatisfied(
+								rowSource,
+								windowStartMs - STALE_FUTURE_TOLERANCE_MINUTES * 60 * 1000,
+								windowEndMs,
+							)
 						: false,
 				);
 				if (satisfied) continue;
