@@ -262,11 +262,17 @@ export function applyLiveUniverse(snapshot: QuoteSnapshot, universe: StoredLiveU
 	const stocks: QuoteStock[] = [];
 	for (const original of snapshot.stocks) {
 		const key = liveInstrumentKey(original);
+		const held = active.has(key);
 		if (original.mapping_only || original.portfolio_group === "mapping") {
-			stocks.push({ ...original, is_position: false, position_qty: 0, holding_status: "MAPPING_ONLY" });
+			// #51（2026-09-29 实证）：mapping 组是 catalog 的 A/H 对照展示分类，
+			// 不是持仓事实；LIVE manifest 才是持仓权威。在 universe.active 命中的
+			// mapping 行必须按 ACTIVE 投影（在持 002466 曾被降级成 MAPPING_ONLY，
+			// 造成源 11 vs 投影 10 的身份矛盾）；未在仓行维持 MAPPING_ONLY 原语义。
+			stocks.push(held
+				? { ...original, is_position: true, position_qty: null, holding_status: "ACTIVE" }
+				: { ...original, is_position: false, position_qty: 0, holding_status: "MAPPING_ONLY" });
 			continue;
 		}
-		const held = active.has(key);
 		if (original.portfolio_group === "watch") {
 			stocks.push({
 				...original,

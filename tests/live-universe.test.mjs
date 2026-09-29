@@ -169,3 +169,28 @@ test("LIVE projection removes sold holdings, promotes held Watch, strips quantit
 	assert.equal(heldWatch?.is_position, true);
 	assert.equal(projected.stocks.find((row) => row.code === "03308")?.mapping_only, true);
 });
+
+test("held mapping-group row projects as ACTIVE — position fact outranks catalog display class (#51)", async () => {
+	const snapshot = snapshotOf([
+		makeStock("300308", "CN", "SZ", "core", "CORE", "ACTIVE", true),
+		makeStock("002466", "CN", "SZ", "mapping", null, "MAPPING_ONLY", false, true),
+		makeStock("03308", "HK", "HK", "mapping", null, "MAPPING_ONLY", false, true),
+	]);
+	const payload = await makeUniverse([
+		{ market: "CN", exchange: "SZ", code: "300308" },
+		{ market: "CN", exchange: "SZ", code: "002466" },
+	]);
+	const universe = { ...payload, received_at: "2026-09-29T06:30:07+08:00" };
+	assert.equal(getLiveUniverseCoverage(snapshot, universe).status, "COMPLETE");
+	const projected = applyLiveUniverse(snapshot, universe);
+	const heldMapping = projected.stocks.find((row) => row.code === "002466");
+	assert.equal(heldMapping?.holding_status, "ACTIVE");
+	assert.equal(heldMapping?.is_position, true);
+	assert.equal(heldMapping?.position_qty, null);
+	const unheldMapping = projected.stocks.find((row) => row.code === "03308");
+	assert.equal(unheldMapping?.holding_status, "MAPPING_ONLY");
+	assert.equal(unheldMapping?.is_position, false);
+	// 源 active=2 == 投影 is_position=2（09-29 曾为 11 vs 10 的矛盾不再出现）。
+	assert.equal(universe.active.length, 2);
+	assert.equal(projected.summary.active_holding_total, 2);
+});
