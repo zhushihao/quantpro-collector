@@ -940,15 +940,23 @@ export function buildSettleStatements(args: {
 			const unused = row.units - observedUnits;
 			if (unused <= 0) return [];
 			return [{
+				// One-shot release guard (replay/concurrency): the decrement is only
+				// applied while this exact settlement batch still owns the half-open
+				// window — the header row exists and the live units are already gone.
+				// A replayed (or racing) batch sees the header deleted by step 4 and
+				// writes no second decrement; journal replay receipts stay single.
 				sql: `UPDATE quota_booked_usage
 							 SET booked_units = MAX(0, booked_units - ?3),
 								 updated_at = ?4
-							 WHERE dimension_key = ?1 AND period_key = ?2`,
+							 WHERE dimension_key = ?1 AND period_key = ?2
+							   AND EXISTS (SELECT 1 FROM quota_reservations WHERE reservation_id = ?5)
+							   AND NOT EXISTS (SELECT 1 FROM quota_reservation_units WHERE reservation_id = ?5)`,
 				values: [
 					row.dimension_key,
 					row.period_key,
 					unused,
 					args.recorded_at,
+					args.reservation_id,
 				],
 			}];
 		}),

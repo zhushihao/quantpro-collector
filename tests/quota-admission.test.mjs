@@ -110,6 +110,105 @@ test("a replayed settlement batch can never write a second SETTLED journal recei
 	assert.equal(Number(headers.n), 0, "the settled header stays deleted");
 });
 
+test("a replayed settlement batch releases booked headroom exactly once", async () => {
+	// The release UPDATE must be as replay-safe as the journal INSERT: a second
+	// application of the same frozen batch may never decrement the booked
+	// accumulator again (reviewer repro: booked 100 -> 40 -> 0 on a replay).
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	const admitted = await admitOperation(
+		db,
+		request("op-release-replay", [{ dimension_key: "r2.class_b", units: 30 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(admitted.status, "ADMITTED");
+	const rows = await db
+		.prepare("SELECT dimension_key, units, period_key FROM quota_reservation_units WHERE reservation_id = ?")
+		.bind(admitted.reservation_id)
+		.all();
+	const reserved = (rows.results ?? []).map((row) => ({
+		dimension_key: row.dimension_key,
+		units: Number(row.units),
+		period_key: row.period_key,
+	}));
+	const target = reserved.find((row) => row.dimension_key === "r2.class_b");
+	const observed = reserved.map((row) => ({
+		dimension_key: row.dimension_key,
+		units: row.dimension_key === "r2.class_b" ? 10 : row.units,
+	}));
+	const specs = buildSettleStatements({
+		reservation_id: admitted.reservation_id,
+		operation_id: "op-release-replay",
+		fingerprint: "a".repeat(32),
+		route: "http:/internal/research-replica/v2/ingest",
+		reason: "release-replay",
+		expected_units_json: JSON.stringify(reserved),
+		observed_units_json: JSON.stringify(observed),
+		recorded_at: NOW.toISOString(),
+		observed,
+		reserved,
+	});
+	await db.batch(prepareStatements(db, specs));
+	assert.equal(
+		await readBookedUsage(db, "r2.class_b", target.period_key),
+		10,
+		"the first application releases exactly the unused 20",
+	);
+	await db.batch(prepareStatements(db, specs));
+	assert.equal(
+		await readBookedUsage(db, "r2.class_b", target.period_key),
+		10,
+		"a replay must never decrement the booked accumulator twice",
+	);
+});
+
+test("a concurrent settlement retry releases booked headroom exactly once", async () => {
+	// Two racing settles of the same reservation each read the live rows before
+	// either batch commits; only the batch that still owns the header may
+	// decrement booked (reviewer repro: booked 9 -> 4 -> 0 under Promise.all).
+	const pair = createSharedPair();
+	try {
+		await seed(pair.connections[0]);
+		const admitted = await admitOperation(
+			pair.connections[0],
+			request("op-release-concurrent", [{ dimension_key: "r2.class_b", units: 9 }]),
+			{ account_id: ACCOUNT, now: NOW },
+		);
+		assert.equal(admitted.status, "ADMITTED");
+		const live = await liveUnits(pair.connections[0], admitted.reservation_id);
+		const target = live.find((row) => row.dimension_key === "r2.class_b");
+		const observed = live.map((row) => ({
+			dimension_key: row.dimension_key,
+			units: row.dimension_key === "r2.class_b" ? 4 : Number(row.units),
+		}));
+		const results = await Promise.all([
+			settleReservation(pair.connections[0], {
+				reservation_id: admitted.reservation_id,
+				observed,
+				reason: "concurrent-release",
+				now: NOW,
+			}),
+			settleReservation(pair.connections[1], {
+				reservation_id: admitted.reservation_id,
+				observed,
+				reason: "concurrent-release",
+				now: NOW,
+			}),
+		]);
+		assert.deepEqual(results.map((result) => result.status), ["SETTLED", "SETTLED"]);
+		const periodRow = await pair.connections[0]
+			.prepare("SELECT period_key FROM quota_booked_usage WHERE dimension_key = 'r2.class_b' LIMIT 1")
+			.first();
+		assert.equal(
+			await readBookedUsage(pair.connections[0], "r2.class_b", periodRow.period_key),
+			4,
+			"booked must keep the observed spend and be released exactly once",
+		);
+	} finally {
+		pair.dispose();
+	}
+});
+
 test("the D1 shim executes a CTE write exactly once", async () => {
 	// migrate 0017/0018 build the settle batch from CTE statements
 	// ("WITH obs(...) AS ... DELETE ..."); a shim that ran the statement twice
