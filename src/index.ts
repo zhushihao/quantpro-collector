@@ -3380,7 +3380,7 @@ async function handleSemanticIndexRun(request: Request, env: Env, ctx?: Executio
 	}
 }
 
-export async function handleSemanticVectorIngest(
+async function handleSemanticVectorIngest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
@@ -3414,26 +3414,21 @@ export async function handleSemanticVectorIngest(
 			return quotaGuardResponse(error, requestId);
 		}
 	}
+	// Same discipline as the C5 ingest (40236a5, #48): every exit after an
+	// admission settles the reservation, or the global live-row cap (256) jams
+	// all heavy routes. The 2026-09-30 leak here was the vector ingest's
+	// REJECTED early-return (content-sha mismatch / stale version), which used
+	// to return without ever reaching settlement.
+	let admissionSettled = false;
+	const settleDeclaredOnLeak = (): Promise<void> =>
+		admission && !admissionSettled
+			? chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined)
+			: Promise.resolve();
 	let payload: unknown;
-	let parseFailed = false;
 	try {
 		payload = JSON.parse(await request.text());
 	} catch {
-		parseFailed = true;
-	}
-	// Every admitted request settles: a REJECTED body, a malformed 400 or a
-	// thrown error must never keep its reservation live (the live-row cap is
-	// shared with ingest, and leaks here starve the whole ledger).
-	const settle = async () => {
-		if (!admission) return;
-		await settleReservation(env.RESEARCH_REPLICA!, {
-			reservation_id: admission.result.reservation_id as string,
-			observed: admission.budget.snapshot(),
-			reason: "semantic_vector_ingest",
-		}).catch(() => undefined);
-	};
-	if (parseFailed) {
-		await settle();
+		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	try {
@@ -3447,10 +3442,21 @@ export async function handleSemanticVectorIngest(
 			{ index: deps.index },
 			payload as Parameters<typeof ingestPrecomputedVectors>[2],
 		);
-		await settle();
+		if (admission && handle && budget) {
+			const settleOutcome = await settleReservation(env.RESEARCH_REPLICA!, {
+				reservation_id: admission.result.reservation_id as string,
+				observed: budget.snapshot(),
+				reason: "semantic_vector_ingest",
+			}).catch(() => undefined);
+			if (settleOutcome?.status === "SETTLED") admissionSettled = true;
+		}
+		// REJECTED results (shape/version/content failures) never spent the
+		// guarded budget; charge the declared bound so the slot is freed even
+		// when the row was refused before any D1 write.
+		await settleDeclaredOnLeak();
 		return jsonResponse(result);
 	} catch (error) {
-		await settle();
+		await settleDeclaredOnLeak();
 		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
