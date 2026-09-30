@@ -323,6 +323,7 @@ export async function ingestResearchReplicaRecord(
 		};
 	} catch (error) {
 		if (error instanceof ResearchBoundaryError) throw error;
+		console.log("RAW_INGEST_MASKED:", error?.name, String(error?.message).slice(0, 200), String(error?.stack ?? "").split(String.fromCharCode(10))[1]?.trim().slice(0, 120));
 		try {
 			await storage.db
 				.prepare(

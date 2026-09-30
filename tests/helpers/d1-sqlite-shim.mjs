@@ -66,12 +66,31 @@ class ShimStatement {
 	}
 
 	execBound() {
+		const isRead = /^\s*(select|with|pragma|explain)/i.test(this.sql);
 		const info = this.sqlite.prepare(this.sql).run(...this.params);
-		return { meta: { changes: Number(info.changes ?? 0) } };
+		const changes = Number(info.changes ?? 0);
+		return {
+			meta: isRead
+				? { changes, rows_read: 1, rows_written: 0 }
+				: { changes, rows_read: 1, rows_written: changes },
+		};
+	}
+
+	execAll() {
+		const rows = toRows(this.sqlite.prepare(this.sql).iterate(...this.params));
+		// Real D1 reports usage metadata on every result; the guarded adapter
+		// bills against it, so the shim must carry the same shape.
+		const isRead = /^\s*(select|with|pragma|explain)/i.test(this.sql);
+		const meta = isRead
+			? { rows_read: rows.length, rows_written: 0 }
+			: { rows_read: 0, rows_written: Number(this.sqlite.prepare(this.sql).run(...this.params).changes ?? 0) };
+		return { results: rows, meta };
 	}
 
 	async run() {
-		return this.execBound();
+		const { meta } = this.execAll();
+		const info = this.sqlite.prepare(this.sql).run(...this.params);
+		return { meta: { ...meta, changes: Number(info.changes ?? 0) } };
 	}
 
 	async first() {
@@ -80,7 +99,7 @@ class ShimStatement {
 	}
 
 	async all() {
-		return { results: toRows(this.sqlite.prepare(this.sql).iterate(...this.params)) };
+		return this.execAll();
 	}
 }
 

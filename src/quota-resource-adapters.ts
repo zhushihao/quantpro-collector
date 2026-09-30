@@ -231,8 +231,27 @@ export function createGuardedD1(
 					// the real statement or the guard proxy breaks the driver.
 					return (...values: unknown[]) => wrap(sql, bind.apply(target, values));
 				}
+				if (property === "first") {
+					// D1's first() returns the row itself and never carries usage
+					// metadata, so guarding result.meta here would fail closed on
+					// EVERY bounded read (the 2026-09-30 C5 outage): run the
+					// bounded .all() instead, guard on its meta, then project the
+					// first row — preserving the optional column-name variant.
+					return async (...args: unknown[]) => {
+						const all = target.all as unknown as (
+							...inner: unknown[]
+						) => Promise<{ results?: Array<Record<string, unknown>>; meta?: unknown }>;
+						const result = await all.apply(target, args);
+						await guard(sql, result?.meta);
+						const rows = result?.results ?? [];
+						const firstRow = (rows[0] ?? null) as Record<string, unknown> | null;
+						if (typeof args[0] === "string") {
+							return firstRow === null ? null : (firstRow[args[0] as string] ?? null);
+						}
+						return firstRow;
+					};
+				}
 				if (
-					property === "first" ||
 					property === "run" ||
 					property === "all" ||
 					property === "raw"
