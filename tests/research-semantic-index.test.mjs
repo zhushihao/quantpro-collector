@@ -519,6 +519,31 @@ test("REPLAY and duplicate delivery never reset a READY row", async () => {
 /* Indexing chain                                                   */
 /* ---------------------------------------------------------------- */
 
+test("pending semantic version listing is state-filtered and cursor bounded", async () => {
+	const store = storage();
+	for (let i = 0; i < 23; i += 1) {
+		const n = String(i).padStart(2, "0");
+		await seedVersionRow(store, documentVersionPayload({ documentId: `doc_queue_${n}`, versionId: `ver_queue_${n}` }));
+	}
+	await semantic.registerMissingPublicVersions(store, NOW, 50);
+	const fake = fakes();
+	await runBatch(store, fake, { maxDocs: 1 });
+	const first = await semantic.listPendingSemanticVersions(store, { limit: 50, state: "PENDING" });
+	assert.equal(first.items.length, 20, "page clamps at 20");
+	assert.ok(first.next);
+	// Mutate the first page's state and updated_at as a successful upload would.
+	// The immutable-ID cursor must still reach every remaining PENDING version.
+	for (const item of first.items) {
+		await store.db.prepare("UPDATE research_semantic_index_state SET state='READY', updated_at='2026-09-30T12:00:00Z' WHERE document_id=? AND version_id=?")
+			.bind(item.document_id, item.version_id).run();
+	}
+	const second = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING", after: first.next });
+	assert.equal(first.items.length + second.items.length, 22);
+	assert.equal(new Set([...first.items, ...second.items].map((item) => item.version_id)).size, 22);
+	const ready = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "READY" });
+	assert.equal(ready.items.length, 20, "the mutated first page is now READY");
+});
+
 test("pending registration -> index -> READY with deterministic ids and PUBLIC-only metadata", async () => {
 	const store = storage();
 	const fake = fakes();

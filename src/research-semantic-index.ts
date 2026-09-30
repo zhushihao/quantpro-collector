@@ -139,7 +139,7 @@ export type SemanticPendingVersion = {
 
 export type SemanticPendingPage = {
 	items: SemanticPendingVersion[];
-	next: { updated_at: string; document_id: string; version_id: string } | null;
+	next: { document_id: string; version_id: string } | null;
 };
 
 type SemanticFailureCode =
@@ -524,7 +524,7 @@ async function claimPendingRow(
  */
 export async function listPendingSemanticVersions(
 	storage: SemanticIndexStorage,
-	options: { limit?: number; state?: "PENDING" | "READY"; after?: { updated_at: string; document_id: string; version_id: string } | null } = {},
+	options: { limit?: number; state?: "PENDING" | "READY"; after?: { document_id: string; version_id: string } | null } = {},
 ): Promise<SemanticPendingPage> {
 	const limit = clampInt(options.limit, 20, 1, 20);
 	const state = options.state === "READY" ? "READY" : "PENDING";
@@ -535,16 +535,13 @@ export async function listPendingSemanticVersions(
 			 FROM research_semantic_index_state s
 			 WHERE visibility='PUBLIC' AND state=? AND retired_at IS NULL
 			   AND NOT EXISTS (SELECT 1 FROM research_document_retention ret WHERE ret.document_id=s.document_id AND ret.status='EXPIRED')
-			   AND (? IS NULL OR updated_at>? OR (updated_at=? AND document_id>?) OR (updated_at=? AND document_id=? AND version_id>?))
-			 ORDER BY updated_at, document_id, version_id LIMIT ?`,
+			   AND (? IS NULL OR document_id>? OR (document_id=? AND version_id>?))
+			 ORDER BY document_id, version_id LIMIT ?`,
 		)
 		.bind(
 			state,
-			after?.updated_at ?? null,
-			after?.updated_at ?? "",
-			after?.updated_at ?? "",
+			after?.document_id ?? null,
 			after?.document_id ?? "",
-			after?.updated_at ?? "",
 			after?.document_id ?? "",
 			after?.version_id ?? "",
 			limit + 1,
@@ -556,7 +553,7 @@ export async function listPendingSemanticVersions(
 	return {
 		items,
 		next: fetched.length > limit && last
-			? { updated_at: last.updated_at, document_id: last.document_id, version_id: last.version_id }
+			? { document_id: last.document_id, version_id: last.version_id }
 			: null,
 	};
 }
