@@ -23,10 +23,12 @@ import {
 	buildDiagnosisSql,
 	buildGuardSql,
 	buildSealSql,
+	buildSettleStatements,
 	ledgerLifecycleReads,
 	ledgerLifecycleWrites,
 	ledgerSelfReads,
 	ledgerSelfWrites,
+	prepareStatements,
 	quotaStatus,
 	readBookedUsage,
 	recordAccountPeriod,
@@ -36,7 +38,7 @@ import {
 	syncDimensionCatalog,
 	withLedgerSelfCost,
 } from "../src/quota-breaker.ts";
-import { createResearchWorkflowDb } from "./helpers/d1-sqlite-shim.mjs";
+import { createResearchWorkflowDb, createSharedPair } from "./helpers/d1-sqlite-shim.mjs";
 
 const ACCOUNT = "test-account";
 const PERIOD = {
@@ -45,6 +47,83 @@ const PERIOD = {
 };
 const PERIOD_KEY = `cycle:${PERIOD.period_start}..${PERIOD.period_end}`;
 const NOW = new Date("2026-09-20T00:00:00.000Z");
+
+test("a replayed settlement batch can never write a second SETTLED journal receipt", async () => {
+	// The 17 historical duplicate journal pairs came from running the settlement
+	// statements twice for one reservation. The frozen batch must make the
+	// second replay a no-op: the header row is already gone, so the guarded
+	// INSERT writes nothing (the shim executes each statement exactly once,
+	// so this exercises the SQL guard itself, not shim double-execution).
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	const admitted = await admitOperation(
+		db,
+		request("op-settle-replay", [{ dimension_key: "r2.class_b", units: 12 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(admitted.status, "ADMITTED");
+	const units = await liveUnits(db, admitted.reservation_id);
+	const observed = units.map((row) => ({
+		dimension_key: row.dimension_key,
+		units: Number(row.units),
+	}));
+	const specs = buildSettleStatements({
+		reservation_id: admitted.reservation_id,
+		operation_id: "op-settle-replay",
+		fingerprint: "a".repeat(32),
+		route: "http:/internal/research-replica/v2/ingest",
+		reason: "replay-safety",
+		expected_units_json: JSON.stringify(observed),
+		observed_units_json: JSON.stringify(observed),
+		recorded_at: NOW.toISOString(),
+		observed,
+	});
+	await db.batch(prepareStatements(db, specs));
+	const first = await db
+		.prepare("SELECT COUNT(*) AS n FROM quota_reservation_journal WHERE reservation_id = ?")
+		.bind(admitted.reservation_id)
+		.first();
+	assert.equal(Number(first.n), 1, "the first application writes exactly one receipt");
+	await db.batch(prepareStatements(db, specs));
+	const second = await db
+		.prepare("SELECT COUNT(*) AS n FROM quota_reservation_journal WHERE reservation_id = ?")
+		.bind(admitted.reservation_id)
+		.first();
+	assert.equal(Number(second.n), 1, "a replay must never duplicate the immutable receipt");
+	const headers = await db
+		.prepare("SELECT COUNT(*) AS n FROM quota_reservations WHERE reservation_id = ?")
+		.bind(admitted.reservation_id)
+		.first();
+	assert.equal(Number(headers.n), 0, "the settled header stays deleted");
+});
+
+test("the D1 shim executes a CTE write exactly once", async () => {
+	// migrate 0017/0018 build the settle batch from CTE statements
+	// ("WITH obs(...) AS ... DELETE ..."); a shim that ran the statement twice
+	// (or classified a CTE write as a read) would double-apply them.
+	const db = createResearchWorkflowDb();
+	await db.prepare("CREATE TABLE shim_cte (id INTEGER PRIMARY KEY)").run();
+	await db.prepare("INSERT INTO shim_cte(id) VALUES (1)").run();
+	await db.prepare("INSERT INTO shim_cte(id) VALUES (2)").run();
+	await db
+		.prepare("WITH obs(x) AS (VALUES (1)) DELETE FROM shim_cte WHERE id IN (SELECT x FROM obs)")
+		.run();
+	const left = await db.prepare("SELECT COUNT(*) AS n FROM shim_cte").first();
+	assert.equal(Number(left.n), 1, "a CTE write must apply exactly once");
+	const first = await db.prepare("SELECT id FROM shim_cte").first();
+	assert.equal(Number(first.id), 2, "first() returns the row, not a projection");
+});
+
+test("the D1 shim binds first() column parameters and executes run() exactly once", async () => {
+	const db = createResearchWorkflowDb();
+	const selected = await db.prepare("SELECT ? AS selected_value").bind("bound-value").first();
+	assert.equal(selected.selected_value, "bound-value");
+
+	await db.prepare("CREATE TABLE shim_once (value TEXT NOT NULL)").run();
+	await db.prepare("INSERT INTO shim_once(value) VALUES (?)").bind("one-write").run();
+	const count = await db.prepare("SELECT COUNT(*) AS n FROM shim_once").first();
+	assert.equal(Number(count.n), 1, "run() must not repeat a bound write");
+});
 
 function dimension(key) {
 	return QUOTA_DIMENSIONS.find((entry) => entry.key === key);
@@ -460,6 +539,48 @@ test("settlement only accepts observed usage within the reservation and frees th
 	);
 	assert.equal(replay.status, "REPLAY");
 	assert.equal(replay.outcome, "SETTLED");
+});
+
+test("concurrent settlement retries write one immutable SETTLED journal receipt", async () => {
+	const pair = createSharedPair();
+	try {
+		await seed(pair.connections[0]);
+		const admitted = await admitOperation(
+			pair.connections[0],
+			request("op-concurrent-settle", [{ dimension_key: "r2.class_b", units: 9 }]),
+			{ account_id: ACCOUNT, now: NOW },
+		);
+		assert.equal(admitted.status, "ADMITTED");
+		const units = await liveUnits(pair.connections[0], admitted.reservation_id);
+		const observed = units.map((row) => ({
+			dimension_key: row.dimension_key,
+			units: Number(row.units),
+		}));
+
+		const results = await Promise.all([
+			settleReservation(pair.connections[0], {
+				reservation_id: admitted.reservation_id,
+				observed,
+				reason: "concurrent-replay",
+				now: NOW,
+			}),
+			settleReservation(pair.connections[1], {
+				reservation_id: admitted.reservation_id,
+				observed,
+				reason: "concurrent-replay",
+				now: NOW,
+			}),
+		]);
+		assert.deepEqual(results.map((result) => result.status), ["SETTLED", "SETTLED"]);
+		const journal = await pair.connections[0]
+			.prepare("SELECT outcome FROM quota_reservation_journal WHERE reservation_id = ?")
+			.bind(admitted.reservation_id)
+			.all();
+		assert.equal(journal.results.length, 1, "same reservation may produce only one settlement receipt");
+		assert.equal(journal.results[0].outcome, "SETTLED");
+	} finally {
+		pair.dispose();
+	}
 });
 
 /** Settle a reservation at its full reserved amount (the conservative observed value). */

@@ -920,7 +920,8 @@ export function buildSettleStatements(args: {
 			sql: `INSERT INTO quota_reservation_journal
 					 (reservation_id, operation_id, fingerprint, route, outcome, outcome_reason, expected_units_json, observed_units_json, recorded_at)
 					 SELECT ?1, ?2, ?3, ?4, 'SETTLED', ?5, ?6, ?7, ?8
-					 WHERE NOT EXISTS (SELECT 1 FROM quota_reservation_units WHERE reservation_id = ?1)`,
+					 WHERE EXISTS (SELECT 1 FROM quota_reservations WHERE reservation_id = ?1)
+					   AND NOT EXISTS (SELECT 1 FROM quota_reservation_units WHERE reservation_id = ?1)`,
 			values: [
 				args.reservation_id,
 				args.operation_id,

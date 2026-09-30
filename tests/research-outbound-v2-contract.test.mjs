@@ -21,26 +21,39 @@ async function fixture(name) {
 	return JSON.parse(await readFile(path.join(fixtureDir, name), "utf8"));
 }
 
-async function fixtureV3(name) {
-	return JSON.parse(await readFile(path.join(fixtureV3Dir, name), "utf8"));
-}
-
-test("C4 fixture directory exactly matches Research 55f2493 manifest", async () => {
-	const names = (await readdir(fixtureDir)).sort();
-	const manifest = await readFile(path.join(fixtureDir, "MANIFEST.sha256"), "utf8");
-	const listed = new Map(
+function manifestEntries(manifest) {
+	return new Map(
 		manifest
 			.trim()
-			.split("\n")
+			.split(/\r?\n/)
 			.map((line) => {
 				const [digest, name] = line.split("  ");
 				return [name, digest];
 			}),
 	);
+}
+
+async function v3Fixture(name) {
+	return JSON.parse(await readFile(path.join(fixtureV3Dir, name), "utf8"));
+}
+
+
+test("manifest entries accept CRLF without retaining carriage returns", () => {
+	const digest = "a".repeat(64);
+	assert.deepEqual([...manifestEntries(`${digest}  object.json\r\n`)], [
+		["object.json", digest],
+	]);
+});
+
+test("C4 fixture directory exactly matches Research 55f2493 manifest", async () => {
+	const names = (await readdir(fixtureDir)).sort();
+	const manifest = await readFile(path.join(fixtureDir, "MANIFEST.sha256"), "utf8");
+	const listed = manifestEntries(manifest);
 	assert.deepEqual(names, ["MANIFEST.sha256", ...[...listed.keys()].sort()]);
 	for (const [name, digest] of listed) {
 		const bytes = await readFile(path.join(fixtureDir, name));
-		assert.equal(createHash("sha256").update(bytes).digest("hex"), digest, name);
+		const content = Buffer.from(bytes.toString("utf8").replace(/\r\n/g, "\n"));
+		assert.equal(createHash("sha256").update(content).digest("hex"), digest, name);
 	}
 });
 
@@ -85,11 +98,10 @@ test("C4 accepts every frozen outbound-v3 envelope without changing v2", async (
 		}
 	}
 	const manifest = await readFile(path.join(fixtureV3Dir, "MANIFEST.sha256"), "utf8");
-	for (const line of manifest.trim().split("\n")) {
-		const [digest, name] = line.split("  ");
+	for (const [name, digest] of manifestEntries(manifest)) {
 		assert.equal(
 			createHash("sha256")
-				.update(await readFile(path.join(fixtureV3Dir, name)))
+				.update(Buffer.from((await readFile(path.join(fixtureV3Dir, name))).toString("utf8").replace(/\r\n/g, "\n")))
 				.digest("hex"),
 			digest,
 			name,
@@ -185,32 +197,21 @@ test("C9 accepts v4 Evidence only with its complete immutable source reference a
 // per schema version; the v3 negatives pin the source_health whitelist and
 // the v2 freeze.
 // ---------------------------------------------------------------------------
-const v3FixtureDir = path.join(
-	path.dirname(fileURLToPath(import.meta.url)),
-	"fixtures",
-	"outbound_v3",
-);
+const v3FixtureDir = path.join(fixtureDir, "..", "outbound_v3");
 
-async function v3Fixture(name) {
+async function fixtureV3(name) {
 	return JSON.parse(await readFile(path.join(v3FixtureDir, name), "utf8"));
 }
 
 test("#5 fixture directory exactly matches the frozen outbound_v3 MANIFEST", async () => {
 	const names = (await readdir(v3FixtureDir)).sort();
 	const manifest = await readFile(path.join(v3FixtureDir, "MANIFEST.sha256"), "utf8");
-	const listed = new Map(
-		manifest
-			.trim()
-			.split("\n")
-			.map((line) => {
-				const [digest, name] = line.split("  ");
-				return [name, digest];
-			}),
-	);
+	const listed = manifestEntries(manifest);
 	assert.deepEqual(names, ["MANIFEST.sha256", ...[...listed.keys()].sort()]);
 	for (const [name, digest] of listed) {
 		const bytes = await readFile(path.join(v3FixtureDir, name));
-		assert.equal(createHash("sha256").update(bytes).digest("hex"), digest, name);
+		const content = Buffer.from(bytes.toString("utf8").replace(/\r\n/g, "\n"));
+		assert.equal(createHash("sha256").update(content).digest("hex"), digest, name);
 	}
 });
 

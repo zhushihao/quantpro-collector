@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+function sourceLines(text) {
+	return text.replace(/\r\n?/g, "\n");
+}
+
 async function source(path) {
-	return readFile(new URL(path, import.meta.url), "utf8");
+	return sourceLines(await readFile(new URL(path, import.meta.url), "utf8"));
 }
 
 test("OAuth state is stored in an isolated D1 table instead of account-wide Workers KV", async () => {
