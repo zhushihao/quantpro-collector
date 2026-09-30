@@ -70,6 +70,7 @@ import {
 } from "./research-retention.ts";
 import {
 	ingestPrecomputedVectors,
+	listPendingSemanticVersions,
 	indexSemanticDocument,
 	probeSemanticIndex,
 	readSemanticIndexCoverage,
@@ -3465,6 +3466,81 @@ export async function handleSemanticVectorIngest(
 	}
 }
 
+async function handleSemanticPending(request: Request, env: Env): Promise<Response> {
+	if (request.method !== "POST") {
+		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
+	}
+	const storage = researchReplicaStorage(env);
+	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
+		return researchBoundaryResponse(new ResearchBoundaryError("STORE_UNAVAILABLE"), 503);
+	}
+	if (!researchReplicaAuthorized(request, env)) {
+		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
+	}
+	const requestId = crypto.randomUUID().replaceAll("-", "");
+	let admission: {
+		handle: ReturnType<typeof admissionHandle>;
+		budget: ReservationBudget;
+		result: { status: string; reservation_id?: string };
+	} | null = null;
+	if (admissionMode(env) === "enforce") {
+		try {
+			admission = await admitHeavyRouteForEnv(env, {
+				route: "http:/internal/research-semantic-index/pending",
+				operation_id: `semantic-pending:${requestId}`,
+				fingerprint: crypto.randomUUID().replaceAll("-", ""),
+			});
+		} catch (error) {
+			return quotaGuardResponse(error, requestId);
+		}
+	}
+	let body: unknown = {};
+	try {
+		const raw = await request.text();
+		body = raw ? JSON.parse(raw) : {};
+	} catch {
+		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	const options = body as Record<string, unknown>;
+	if (Object.keys(options).some((key) => !["limit", "after", "state"].includes(key))) {
+		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	if (options.state !== undefined && options.state !== "PENDING" && options.state !== "READY") {
+		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
+		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
+	}
+	const limit = typeof options.limit === "number" && Number.isInteger(options.limit)
+		? Math.max(1, Math.min(options.limit, 20)) : 20;
+	const after = options.after && typeof options.after === "object" ? options.after as {
+		updated_at: string; document_id: string; version_id: string;
+	} : null;
+	try {
+		const result = await listPendingSemanticVersions(
+			admission?.handle
+				? { ...storage, db: createGuardedD1(storage.db, admission.handle, admission.budget) }
+				: storage,
+				{ limit, after, state: options.state === "READY" ? "READY" : "PENDING" },
+		);
+		if (admission) {
+			await settleReservation(env.RESEARCH_REPLICA!, {
+				reservation_id: admission.result.reservation_id as string,
+				observed: admission.budget.snapshot(),
+				reason: "semantic_pending_list",
+			}).catch(() => undefined);
+		}
+		return jsonResponse(result);
+	} catch (error) {
+		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
+		return researchBoundaryResponse(error, error instanceof ResearchBoundaryError && error.retryable ? 503 : 400);
+	}
+}
+
 async function handleSemanticIndexStatus(request: Request, env: Env): Promise<Response> {
 	if (request.method !== "GET") {
 		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
@@ -4004,6 +4080,9 @@ export default {
 		// 部署探针。语义检索本身只经 MCP `search_documents_semantic`。
 		if (url.pathname === "/internal/research-semantic-index/ingest-vectors") {
 			return handleSemanticVectorIngest(request, env);
+		}
+		if (url.pathname === "/internal/research-semantic-index/pending") {
+			return handleSemanticPending(request, env);
 		}
 		if (url.pathname === "/internal/research-semantic-index/run") {
 			return handleSemanticIndexRun(request, env);

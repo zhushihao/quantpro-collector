@@ -130,6 +130,18 @@ export type SemanticBatchReport = {
 	vectors_deleted: number;
 };
 
+export type SemanticPendingVersion = {
+	document_id: string;
+	version_id: string;
+	updated_at: string;
+	content_sha256: string | null;
+};
+
+export type SemanticPendingPage = {
+	items: SemanticPendingVersion[];
+	next: { updated_at: string; document_id: string; version_id: string } | null;
+};
+
 type SemanticFailureCode =
 	| "EMBEDDING_UNAVAILABLE"
 	| "INDEX_UNAVAILABLE"
@@ -510,6 +522,45 @@ async function claimPendingRow(
  * version id), so repeated bounded runs advance past already-registered rows
  * and the tail of a 10k+ set can never be permanently outside a window.
  */
+export async function listPendingSemanticVersions(
+	storage: SemanticIndexStorage,
+	options: { limit?: number; state?: "PENDING" | "READY"; after?: { updated_at: string; document_id: string; version_id: string } | null } = {},
+): Promise<SemanticPendingPage> {
+	const limit = clampInt(options.limit, 20, 1, 20);
+	const state = options.state === "READY" ? "READY" : "PENDING";
+	const after = options.after ?? null;
+	const rows = await storage.db
+		.prepare(
+			`SELECT document_id, version_id, updated_at, content_sha256
+			 FROM research_semantic_index_state s
+			 WHERE visibility='PUBLIC' AND state=? AND retired_at IS NULL
+			   AND NOT EXISTS (SELECT 1 FROM research_document_retention ret WHERE ret.document_id=s.document_id AND ret.status='EXPIRED')
+			   AND (? IS NULL OR updated_at>? OR (updated_at=? AND document_id>?) OR (updated_at=? AND document_id=? AND version_id>?))
+			 ORDER BY updated_at, document_id, version_id LIMIT ?`,
+		)
+		.bind(
+			state,
+			after?.updated_at ?? null,
+			after?.updated_at ?? "",
+			after?.updated_at ?? "",
+			after?.document_id ?? "",
+			after?.updated_at ?? "",
+			after?.document_id ?? "",
+			after?.version_id ?? "",
+			limit + 1,
+		)
+		.all<SemanticPendingVersion>();
+	const fetched = rows.results ?? [];
+	const items = fetched.slice(0, limit);
+	const last = items.length > 0 ? items[items.length - 1] : null;
+	return {
+		items,
+		next: fetched.length > limit && last
+			? { updated_at: last.updated_at, document_id: last.document_id, version_id: last.version_id }
+			: null,
+	};
+}
+
 export async function registerMissingPublicVersions(
 	storage: SemanticIndexStorage,
 	now: string,
@@ -1391,7 +1442,7 @@ export type PrecomputedVectorIngestPayload = {
 export type PrecomputedVectorIngestResult =
 	| { status: "READY"; upserted: number }
 	| { status: "REPLAY"; upserted: 0 }
-	| { status: "CONSISTENCY"; score: number | null; matches: number }
+	| { status: "CONSISTENCY"; score: number | null; matches: number; missing: number }
 	| { status: "REJECTED"; reason: string };
 
 function precomputedPayloadError(payload: unknown): string | null {
@@ -1477,22 +1528,35 @@ export async function ingestPrecomputedVectors(
 	}
 
 	if (payload.consistency_check) {
-		// Bounded read-only query, then filter by the exact indexed metadata.
-		const matches = await deps.index.query(payload.vectors[0].values, {
-			topK: 50,
-			returnMetadata: SEMANTIC_METADATA_RETRIEVAL,
-		});
-		const sameVersion = (matches.matches ?? []).filter((match) => {
-			const meta = match.metadata as Record<string, unknown> | undefined;
-			return meta?.document_id === payload.document_id && meta?.version_id === payload.version_id;
-		});
-		const score = sameVersion.length
-			? Math.max(...sameVersion.map((match) => Number(match.score ?? -1)))
-			: null;
+		// Fetch deterministic IDs directly; unlike approximate topK this cannot
+		// miss the vector just because the candidate embedding differs.
+		const comparisons: number[] = [];
+		let missing = 0;
+		for (const local of payload.vectors) {
+			const vectorId = await semanticVectorId(payload.document_id, payload.version_id, local.ordinal);
+			const existing = await deps.index.getByIds([vectorId]);
+			const stored = existing[0]?.values;
+			if (!stored || stored.length !== local.values.length) {
+				missing += 1;
+				continue;
+			}
+			let dot = 0;
+			let localNorm = 0;
+			let cloudNorm = 0;
+			for (let i = 0; i < stored.length; i += 1) {
+				const left = Number(local.values[i]);
+				const right = Number(stored[i]);
+				dot += left * right;
+				localNorm += left * left;
+				cloudNorm += right * right;
+			}
+			if (localNorm > 0 && cloudNorm > 0) comparisons.push(dot / Math.sqrt(localNorm * cloudNorm));
+		}
 		return {
 			status: "CONSISTENCY",
-			score: score !== null && score >= 0 ? score : null,
-			matches: sameVersion.length,
+			score: comparisons.length ? Math.min(...comparisons) : null,
+			matches: comparisons.length,
+			missing,
 		};
 	}
 

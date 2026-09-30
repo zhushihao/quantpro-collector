@@ -121,6 +121,13 @@ class FakeVectorize {
 		for (const id of ids) this.vectors.delete(id);
 	}
 
+	async getByIds(ids) {
+		return ids.flatMap((id) => {
+			const value = this.vectors.get(id);
+			return value ? [{ id, values: value.values, metadata: value.metadata }] : [];
+		});
+	}
+
 	async describe() {
 		return {
 			dimensions: 1024,
@@ -549,6 +556,26 @@ test("pending registration -> index -> READY with deterministic ids and PUBLIC-o
 		[...fake.index.vectors.keys()],
 		[await semantic.semanticVectorId("doc_chain", "ver_chain", 0)],
 	);
+});
+
+test("registered pending queue is state-filtered, cursor-stable, and capped at 20", async () => {
+	const store = storage();
+	for (let i = 0; i < 23; i += 1) {
+		const built = documentVersionPayload({ documentId: `doc_queue_${String(i).padStart(2,"0")}`, versionId: `ver_queue_${String(i).padStart(2,"0")}` });
+		await seedVersionRow(store, built);
+	}
+	await semantic.registerMissingPublicVersions(store, NOW, 50);
+	// Leave one row READY so state filtering is meaningful.
+	const fake = fakes();
+	await runBatch(store, fake, { maxDocs: 1 });
+	const first = await semantic.listPendingSemanticVersions(store, { limit: 50, state: "PENDING" });
+	assert.equal(first.items.length, 20, "page size clamps to 20");
+	assert.ok(first.next, "a continuation cursor is returned");
+	const second = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING", after: first.next });
+	assert.equal(first.items.length + second.items.length, 22);
+	assert.deepEqual(new Set([...first.items, ...second.items].map((x) => x.version_id)).size, 22);
+	const ready = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "READY" });
+	assert.equal(ready.items.length, 1);
 });
 
 test("metadata before object stays PENDING without spending retries, then converges", async () => {
@@ -1573,6 +1600,9 @@ test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency
 	);
 	assert.equal((await gap.json()).status, "REJECTED", "ordinals must be dense");
 
+	const firstVectorId = await semantic.semanticVectorId("doc_search", "ver_search", 0);
+	const storedFirstVector = fake.index.vectors.get(firstVectorId);
+	assert.ok(storedFirstVector, "fixture must already contain cloud vector chunk 0");
 	const consistency = await worker.fetch(
 		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
 			method: "POST",
@@ -1581,7 +1611,7 @@ test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency
 				document_id: "doc_search",
 				version_id: "ver_search",
 				content_sha256: contentSha,
-				vectors: [vector(0)],
+				vectors: [{ ordinal: 0, values: storedFirstVector.values }],
 				consistency_check: true,
 			}),
 		}),

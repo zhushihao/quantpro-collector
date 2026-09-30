@@ -138,6 +138,13 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 	),
 	profile(
 		"http",
+		"http:/internal/research-semantic-index/pending",
+		"heavy_bounded",
+		[d1Read(2_000), d1Write(100)],
+		"read-only cursor page of at most 20 already-registered PENDING versions; admission meters its D1 ledger and bounded state scan",
+	),
+	profile(
+		"http",
 		"http:/internal/research-semantic-index/ingest-vectors",
 		"heavy_bounded",
 		[d1Read(500), d1Write(300)],
