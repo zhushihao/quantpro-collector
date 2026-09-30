@@ -1477,9 +1477,7 @@ export async function ingestPrecomputedVectors(
 	}
 
 	if (payload.consistency_check) {
-		// Query a bounded candidate set without relying on provider-side metadata
-		// filtering (index schemas can omit a filterable flag); identify the exact
-		// version in Collector using the indexed metadata returned with each hit.
+		// Bounded read-only query, then filter by the exact indexed metadata.
 		const matches = await deps.index.query(payload.vectors[0].values, {
 			topK: 50,
 			returnMetadata: SEMANTIC_METADATA_RETRIEVAL,
@@ -1488,10 +1486,12 @@ export async function ingestPrecomputedVectors(
 			const meta = match.metadata as Record<string, unknown> | undefined;
 			return meta?.document_id === payload.document_id && meta?.version_id === payload.version_id;
 		});
-		const top = sameVersion.sort((a, b) => (b.score ?? 0) - (a.score ?? 0))[0];
+		const score = sameVersion.length
+			? Math.max(...sameVersion.map((match) => Number(match.score ?? -1)))
+			: null;
 		return {
 			status: "CONSISTENCY",
-			score: typeof top?.score === "number" ? top.score : null,
+			score: score !== null && score >= 0 ? score : null,
 			matches: sameVersion.length,
 		};
 	}
