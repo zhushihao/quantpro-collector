@@ -3380,7 +3380,7 @@ async function handleSemanticIndexRun(request: Request, env: Env, ctx?: Executio
 	}
 }
 
-async function handleSemanticVectorIngest(
+export async function handleSemanticVectorIngest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
