@@ -55,8 +55,14 @@ import {
 // EINVAL on Windows, and this keeps the script shell-free.
 const WRANGLER = join(process.cwd(), "node_modules", "wrangler", "bin", "wrangler.js");
 const DATABASE = "quantpro-collector-research-replica";
+const SEMANTIC_STATE_MIGRATION = join(process.cwd(), "migrations", "0012_research_semantic_index.sql");
 const MIGRATIONS = ["0017_quota_admission.sql", "0018_quota_booked_usage.sql"].map((name) =>
 	join(process.cwd(), "migrations", name),
+);
+const SEMANTIC_QUEUE_INDEX_MIGRATION = join(
+	process.cwd(),
+	"migrations",
+	"0020_research_semantic_pending_cursor.sql",
 );
 const ACCOUNT = "local-check-account";
 const PERIOD = {
@@ -298,7 +304,10 @@ function check(name, condition, detail) {
 const persistTo = mkdtempSync(join(tmpdir(), "quota-d1-local-"));
 console.log(`local D1 persist dir: ${persistTo}`);
 
-// 1. Apply the real migration chain.
+// 1. Apply the semantic-state table needed by migration 0019, then the quota chain.
+const semanticStateSchema = applyMigrationFile(SEMANTIC_STATE_MIGRATION, persistTo);
+check("0012 semantic-state schema applies on a fresh local D1", semanticStateSchema.ok,
+	semanticStateSchema.ok ? "" : semanticStateSchema.output.trim().slice(0, 300));
 for (const migration of MIGRATIONS) {
 	const applied = applyMigrationFile(migration, persistTo);
 	check(
@@ -622,6 +631,10 @@ check(
 	JSON.stringify({ ok: capped.ok, rows: unitRowCount("res-cap", persistTo) }),
 );
 
+const semanticQueueSchema = applyMigrationFile(SEMANTIC_QUEUE_INDEX_MIGRATION, persistTo);
+check("0019 semantic pending cursor index applies on local D1", semanticQueueSchema.ok,
+	semanticQueueSchema.ok ? "" : semanticQueueSchema.output.trim().slice(0, 300));
+
 // 8b. Access-path evidence for the guard's own read bound.  The per-dimension
 //     `COUNT(*)` is charged the whole live-table cap in the declaration, and
 //     `INDEXED BY` additionally pins the plan to the (dimension_key, period_key)
@@ -646,6 +659,16 @@ check(
 	"EXPLAIN QUERY PLAN shows the booking reading the reservation's own unit rows by primary key",
 	bookedPlanDetails.some((detail) => /quota_reservation_units/.test(detail)),
 	JSON.stringify(bookedPlanDetails.slice(0, 6)),
+);
+const semanticQueuePlan = selectRows(
+	`EXPLAIN QUERY PLAN SELECT s.document_id, s.version_id, s.updated_at, s.content_sha256 FROM research_semantic_index_state s INDEXED BY research_semantic_index_state_cursor WHERE s.visibility='PUBLIC' AND s.state='PENDING' AND s.retired_at IS NULL AND (NULL IS NULL OR s.document_id>'' OR (s.document_id='' AND s.version_id>'')) ORDER BY s.state, s.document_id, s.version_id LIMIT 21;`,
+	persistTo,
+);
+const semanticQueueDetails = (semanticQueuePlan ?? []).map((row) => String(row.detail ?? ""));
+check(
+	"semantic pending cursor scan uses its covering state/document/version index",
+	semanticQueueDetails.some((detail) => /research_semantic_index_state_cursor/.test(detail)),
+	JSON.stringify(semanticQueueDetails.slice(0, 8)),
 );
 
 // 9. Migration 0018 backfills live rows that predate it (`live <= booked` across an upgrade).

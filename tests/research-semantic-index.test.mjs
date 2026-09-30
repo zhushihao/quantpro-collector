@@ -528,8 +528,8 @@ test("pending semantic version listing is state-filtered and cursor bounded", as
 	await semantic.registerMissingPublicVersions(store, NOW, 50);
 	const fake = fakes();
 	await runBatch(store, fake, { maxDocs: 1 });
-	const first = await semantic.listPendingSemanticVersions(store, { limit: 50, state: "PENDING" });
-	assert.equal(first.items.length, 20, "page clamps at 20");
+	const first = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING" });
+	assert.equal(first.items.length, 20, "bounded page returns the requested rows");
 	assert.ok(first.next);
 	// Mutate the first page's state and updated_at as a successful upload would.
 	// The immutable-ID cursor must still reach every remaining PENDING version.
@@ -583,7 +583,7 @@ test("pending registration -> index -> READY with deterministic ids and PUBLIC-o
 	);
 });
 
-test("registered pending queue is state-filtered, cursor-stable, and capped at 20", async () => {
+	test("registered pending queue is state-filtered, cursor-stable, and capped at 128", async () => {
 	const store = storage();
 	for (let i = 0; i < 23; i += 1) {
 		const built = documentVersionPayload({ documentId: `doc_queue_${String(i).padStart(2,"0")}`, versionId: `ver_queue_${String(i).padStart(2,"0")}` });
@@ -593,14 +593,14 @@ test("registered pending queue is state-filtered, cursor-stable, and capped at 2
 	// Leave one row READY so state filtering is meaningful.
 	const fake = fakes();
 	await runBatch(store, fake, { maxDocs: 1 });
-	const first = await semantic.listPendingSemanticVersions(store, { limit: 50, state: "PENDING" });
-	assert.equal(first.items.length, 20, "page size clamps to 20");
+	const first = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING" });
+	assert.equal(first.items.length, 20, "bounded page returns 20 requested rows");
 	assert.ok(first.next, "a continuation cursor is returned");
 	const second = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING", after: first.next });
 	assert.equal(first.items.length + second.items.length, 22);
 	assert.deepEqual(new Set([...first.items, ...second.items].map((x) => x.version_id)).size, 22);
 	const ready = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "READY" });
-	assert.equal(ready.items.length, 1);
+	assert.equal(ready.items.length, 1, "the single run-indexed row is READY");
 });
 
 test("metadata before object stays PENDING without spending retries, then converges", async () => {

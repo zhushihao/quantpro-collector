@@ -526,17 +526,17 @@ export async function listPendingSemanticVersions(
 	storage: SemanticIndexStorage,
 	options: { limit?: number; state?: "PENDING" | "READY"; after?: { document_id: string; version_id: string } | null } = {},
 ): Promise<SemanticPendingPage> {
-	const limit = clampInt(options.limit, 20, 1, 20);
+	const limit = clampInt(options.limit, 128, 1, 128);
 	const state = options.state === "READY" ? "READY" : "PENDING";
 	const after = options.after ?? null;
 	const rows = await storage.db
 		.prepare(
-			`SELECT document_id, version_id, updated_at, content_sha256
-			 FROM research_semantic_index_state s
-			 WHERE visibility='PUBLIC' AND state=? AND retired_at IS NULL
+			`SELECT s.document_id, s.version_id, s.updated_at, s.content_sha256
+			 FROM research_semantic_index_state s INDEXED BY research_semantic_index_state_cursor
+			 WHERE s.visibility='PUBLIC' AND s.state=? AND s.retired_at IS NULL
 			   AND NOT EXISTS (SELECT 1 FROM research_document_retention ret WHERE ret.document_id=s.document_id AND ret.status='EXPIRED')
-			   AND (? IS NULL OR document_id>? OR (document_id=? AND version_id>?))
-			 ORDER BY document_id, version_id LIMIT ?`,
+			   AND (? IS NULL OR s.document_id>? OR (s.document_id=? AND s.version_id>?))
+			 ORDER BY s.state, s.document_id, s.version_id LIMIT ?`,
 		)
 		.bind(
 			state,

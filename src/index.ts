@@ -3516,7 +3516,7 @@ async function handleSemanticPending(request: Request, env: Env): Promise<Respon
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	const limit = typeof options.limit === "number" && Number.isInteger(options.limit)
-		? Math.max(1, Math.min(options.limit, 20)) : 20;
+		? Math.max(1, Math.min(options.limit, 128)) : 128;
 	const after = options.after && typeof options.after === "object" ? options.after as {
 		updated_at: string; document_id: string; version_id: string;
 	} : null;
