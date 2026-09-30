@@ -63,6 +63,18 @@ test("a replayed settlement batch can never write a second SETTLED journal recei
 	);
 	assert.equal(admitted.status, "ADMITTED");
 	const units = await liveUnits(db, admitted.reservation_id);
+	// 31fc15d made `reserved` a required statement input (settlement now releases
+	// unused booked headroom from the reserved rows), so the replay test passes the
+	// same rows the production settleReservation call reads.
+	const reservedRows = await db
+		.prepare("SELECT dimension_key, units, period_key FROM quota_reservation_units WHERE reservation_id = ?")
+		.bind(admitted.reservation_id)
+		.all();
+	const reserved = (reservedRows.results ?? []).map((row) => ({
+		dimension_key: row.dimension_key,
+		units: Number(row.units),
+		period_key: row.period_key,
+	}));
 	const observed = units.map((row) => ({
 		dimension_key: row.dimension_key,
 		units: Number(row.units),
@@ -77,6 +89,7 @@ test("a replayed settlement batch can never write a second SETTLED journal recei
 		observed_units_json: JSON.stringify(observed),
 		recorded_at: NOW.toISOString(),
 		observed,
+		reserved,
 	});
 	await db.batch(prepareStatements(db, specs));
 	const first = await db
