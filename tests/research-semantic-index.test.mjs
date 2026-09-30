@@ -35,7 +35,8 @@ const semantic = await import("../src/research-semantic-index.ts");
 const replica = await import("../src/research-replica.ts");
 const outbound = await import("../src/research-outbound-v2.ts");
 const remote = await import("../src/research-remote-adapter.ts");
-const worker = (await import("../src/index.ts")).default;
+const indexModule = await import("../src/index.ts");
+const worker = indexModule.default;
 const { createServer } = await import("../src/index.ts");
 const { createResearchWorkflowDb } = await import("./helpers/d1-sqlite-shim.mjs");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -1634,4 +1635,85 @@ test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency
 		{},
 	);
 	assert.equal((await drifted.json()).status, "REJECTED", "stale content must not attach");
+});
+
+test("vector ingest settles its reservation on every post-admission path", async () => {
+	const { createResearchWorkflowDb } = await import("./helpers/d1-sqlite-shim.mjs");
+	const {
+		QUOTA_DIMENSIONS,
+		QUOTA_ACCOUNT_TAG,
+		syncDimensionCatalog,
+		recordAccountPeriod,
+		recordBaseline,
+	} = await import("../src/quota-breaker.ts");
+	const fake = fakes();
+	const store = await searchableStore(fake);
+	const db = store.db;
+	await syncDimensionCatalog(db, QUOTA_DIMENSIONS);
+	const now = new Date();
+	const PK = `cycle:${now.toISOString().slice(0, 10)}T00:00:00.000Z..2099-01-01T00:00:00.000Z`;
+	await recordAccountPeriod(db, {
+		account_id: QUOTA_ACCOUNT_TAG,
+		period_start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z`,
+		period_end: "2099-01-01T00:00:00.000Z",
+		anchor_kind: "subscription_renewal",
+		source: "test",
+		source_version: "test@1",
+		verified_at: `${now.toISOString().slice(0, 10)}T00:00:00.000Z`,
+	});
+	for (const key of ["d1.rows_read", "d1.rows_written"]) {
+		await recordBaseline(db, {
+			dimension_key: key,
+			period_key: PK,
+			state: "VERIFIED",
+			used: 0,
+			unobserved_upper_bound: 0,
+			source: "test",
+			source_version: "test@1",
+			as_of: now.toISOString(),
+			coverage_end: now.toISOString(),
+		});
+	}
+	const env = {
+		RESEARCH_REPLICA: db,
+		RESEARCH_OBJECTS: store.objects,
+		RESEARCH_REPLICA_INGEST_TOKEN: "internal-token",
+		AI: fake.ai,
+		RESEARCH_PUBLIC_INDEX: fake.index,
+		QUOTA_ADMISSION_MODE: "enforce",
+	};
+	const post = (body) =>
+		indexModule.handleSemanticVectorIngest(
+			new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
+				method: "POST",
+				headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
+				body,
+			}),
+			env,
+		);
+	// 1) rejected business path (stale content hash)
+	await post(JSON.stringify({
+		document_id: "doc_search",
+		version_id: "ver_search",
+		content_sha256: "f".repeat(64),
+		vectors: [{ ordinal: 0, values: Array.from({ length: 1024 }, (_, i) => i / 1000) }],
+	}));
+	let live = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
+	assert.equal(Number(live.n), 0, "a REJECTED ingest must not keep its reservation live");
+	// 2) malformed JSON after admission
+	await post("{not json");
+	live = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
+	assert.equal(Number(live.n), 0, "a 400 body must not keep its reservation live");
+	// 3) success path settles too
+	await post(JSON.stringify({
+		document_id: "doc_search",
+		version_id: "ver_search",
+		content_sha256: null,
+		vectors: [{ ordinal: 0, values: Array.from({ length: 1024 }, (_, i) => i / 1000) }],
+	}));
+	live = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
+	assert.equal(Number(live.n), 0, "a READY ingest settles");
+	const journal = await db.prepare("SELECT outcome, COUNT(*) AS n FROM quota_reservation_journal GROUP BY outcome").all();
+	assert.ok((journal.results ?? []).some((row) => row.outcome === "SETTLED" && Number(row.n) >= 3),
+		JSON.stringify(journal.results));
 });

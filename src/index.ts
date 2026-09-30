@@ -3380,7 +3380,7 @@ async function handleSemanticIndexRun(request: Request, env: Env, ctx?: Executio
 	}
 }
 
-async function handleSemanticVectorIngest(
+export async function handleSemanticVectorIngest(
 	request: Request,
 	env: Env,
 ): Promise<Response> {
@@ -3415,9 +3415,25 @@ async function handleSemanticVectorIngest(
 		}
 	}
 	let payload: unknown;
+	let parseFailed = false;
 	try {
 		payload = JSON.parse(await request.text());
 	} catch {
+		parseFailed = true;
+	}
+	// Every admitted request settles: a REJECTED body, a malformed 400 or a
+	// thrown error must never keep its reservation live (the live-row cap is
+	// shared with ingest, and leaks here starve the whole ledger).
+	const settle = async () => {
+		if (!admission) return;
+		await settleReservation(env.RESEARCH_REPLICA!, {
+			reservation_id: admission.result.reservation_id as string,
+			observed: admission.budget.snapshot(),
+			reason: "semantic_vector_ingest",
+		}).catch(() => undefined);
+	};
+	if (parseFailed) {
+		await settle();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	try {
@@ -3431,15 +3447,10 @@ async function handleSemanticVectorIngest(
 			{ index: deps.index },
 			payload as Parameters<typeof ingestPrecomputedVectors>[2],
 		);
-		if (admission && handle && budget) {
-			await settleReservation(env.RESEARCH_REPLICA!, {
-				reservation_id: admission.result.reservation_id as string,
-				observed: budget.snapshot(),
-				reason: "semantic_vector_ingest",
-			}).catch(() => undefined);
-		}
+		await settle();
 		return jsonResponse(result);
 	} catch (error) {
+		await settle();
 		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
