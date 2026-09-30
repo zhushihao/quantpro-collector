@@ -177,8 +177,10 @@ function settleStatements(
 	operationId,
 	observed,
 	fingerprint,
+	persistTo,
 	reason = "local-check-settle",
 ) {
+	const units = liveUnits(reservationId, persistTo);
 	const specs = buildSettleStatements({
 		reservation_id: reservationId,
 		operation_id: operationId,
@@ -186,11 +188,14 @@ function settleStatements(
 		route: ROUTE,
 		reason,
 		expected_units_json: JSON.stringify(
-			observed.map(({ dimension_key, units }) => ({ dimension_key, units })),
+			units.map(({ dimension_key, units }) => ({ dimension_key, units })),
 		),
 		observed_units_json: JSON.stringify(observed),
 		recorded_at: NOW,
 		observed,
+		reserved: units.map(({ dimension_key, units, period_key }) => ({
+			dimension_key, units, period_key,
+		})),
 	});
 	return specs.map((spec) => `${renderWithLiterals(spec.sql, spec.values)};`).join("\n");
 }
@@ -220,7 +225,7 @@ function admissionBatch(
 function liveUnits(reservationId, persistTo) {
 	return (
 		selectRows(
-			`SELECT dimension_key, units FROM quota_reservation_units WHERE reservation_id = ${lit(reservationId)};`,
+			`SELECT dimension_key, units, period_key FROM quota_reservation_units WHERE reservation_id = ${lit(reservationId)};`,
 			persistTo,
 		) ?? []
 	);
@@ -440,7 +445,7 @@ const settleCycle = (reservationId, operationId, units) => {
 		units: Number(row.units),
 	}));
 	const settled = run(
-		settleStatements(reservationId, operationId, observed, fingerprint),
+		settleStatements(reservationId, operationId, observed, fingerprint, persistTo),
 		persistTo,
 	);
 	return {

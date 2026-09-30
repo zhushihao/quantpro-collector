@@ -432,6 +432,68 @@ test("utc_day ai.neurons bootstraps its daily baseline and admits through the bu
 	assert.equal(overBudget.reason, "limit");
 });
 
+test("settlement releases unused booked headroom (crashed-before-embed books nothing)", async () => {
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	const admitted = await admitOperation(
+		db,
+		request("op-ai-crashed", [{ dimension_key: "ai.neurons", units: 940 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(admitted.status, "ADMITTED");
+	// Admission booked the full cap against the UTC day.
+	const dayKey = `utc-day:${NOW.toISOString().slice(0, 10)}`;
+	assert.equal(await readBookedUsage(db, "ai.neurons", dayKey), 940);
+	// The batch crashed before any embedding: the ledger's own D1 self-cost was
+	// genuinely spent, but the AI neurons were not, so settlement must release
+	// the whole booked AI amount instead of stranding it.
+	const live = await liveUnits(db, admitted.reservation_id);
+	const observed = live.map((row) => ({
+		dimension_key: row.dimension_key,
+		units: row.dimension_key === "ai.neurons" ? 0 : Number(row.units),
+	}));
+	const settled = await settleReservation(db, {
+		reservation_id: admitted.reservation_id,
+		observed,
+		reason: "crashed before embed",
+	});
+	assert.equal(settled.status, "SETTLED");
+	assert.equal(await readBookedUsage(db, "ai.neurons", dayKey), 0,
+		"phantom spend must not exhaust the day's real budget");
+	// The released budget admits a fresh batch of the same size.
+	const retry = await admitOperation(
+		db,
+		request("op-ai-retry", [{ dimension_key: "ai.neurons", units: 940 }], "b".repeat(32)),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(retry.status, "ADMITTED");
+});
+
+test("partial settlement books only the observed usage", async () => {
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	const admitted = await admitOperation(
+		db,
+		request("op-ai-partial", [{ dimension_key: "ai.neurons", units: 940 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(admitted.status, "ADMITTED");
+	const dayKey = `utc-day:${NOW.toISOString().slice(0, 10)}`;
+	const live = await liveUnits(db, admitted.reservation_id);
+	const observed = live.map((row) => ({
+		dimension_key: row.dimension_key,
+		units: row.dimension_key === "ai.neurons" ? 100 : Number(row.units),
+	}));
+	const settled = await settleReservation(db, {
+		reservation_id: admitted.reservation_id,
+		observed,
+		reason: "embedded a fraction of the batch",
+	});
+	assert.equal(settled.status, "SETTLED");
+	// The unused 840 returns; the 100 actually observed stays booked.
+	assert.equal(await readBookedUsage(db, "ai.neurons", dayKey), 100);
+});
+
 test("unknown dimensions and malformed requests fail closed as faults", async () => {
 	const db = createResearchWorkflowDb();
 	await seed(db);

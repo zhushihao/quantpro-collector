@@ -894,6 +894,7 @@ export function buildSettleStatements(args: {
 	observed_units_json: string;
 	recorded_at: string;
 	observed: readonly ObservedDimension[];
+	reserved: readonly { dimension_key: string; units: number; period_key: string }[];
 }): StatementSpec[] {
 	const observedValues = args.observed
 		.map((_, index) => `(?${2 + index * 2}, ?${3 + index * 2})`)
@@ -933,6 +934,24 @@ export function buildSettleStatements(args: {
 				args.recorded_at,
 			],
 		},
+		...args.reserved.flatMap((row) => {
+			const observedUnits =
+				args.observed.find((o) => o.dimension_key === row.dimension_key)?.units ?? 0;
+			const unused = row.units - observedUnits;
+			if (unused <= 0) return [];
+			return [{
+				sql: `UPDATE quota_booked_usage
+							 SET booked_units = MAX(0, booked_units - ?3),
+								 updated_at = ?4
+							 WHERE dimension_key = ?1 AND period_key = ?2`,
+				values: [
+					row.dimension_key,
+					row.period_key,
+					unused,
+					args.recorded_at,
+				],
+			}];
+		}),
 		{
 			sql: `DELETE FROM quota_reservations WHERE reservation_id = ?1
 					 AND EXISTS (
@@ -1018,10 +1037,10 @@ export async function settleReservation(
 	const now = args.now ?? new Date();
 	const units = await db
 		.prepare(
-			`SELECT dimension_key, units FROM quota_reservation_units WHERE reservation_id = ?`,
+			`SELECT dimension_key, units, period_key FROM quota_reservation_units WHERE reservation_id = ?`,
 		)
 		.bind(args.reservation_id)
-		.all<{ dimension_key: string; units: number }>();
+		.all<{ dimension_key: string; units: number; period_key: string }>();
 	const reserved = units.results ?? [];
 	const rejectLog = (detail: string): void => {
 		// Settlement refusals used to be swallowed by callers; name them so the
@@ -1091,6 +1110,7 @@ export async function settleReservation(
 					observed_units_json: observedJson,
 					recorded_at: now.toISOString(),
 					observed: args.observed,
+					reserved,
 				}),
 			),
 		);
@@ -1153,10 +1173,10 @@ export async function releaseReservation(
 	if (!reservation) return { status: "REJECTED", detail: "reservation is not live" };
 	const units = await db
 		.prepare(
-			`SELECT dimension_key, units FROM quota_reservation_units WHERE reservation_id = ?`,
+			`SELECT dimension_key, units, period_key FROM quota_reservation_units WHERE reservation_id = ?`,
 		)
 		.bind(args.reservation_id)
-		.all<{ dimension_key: string; units: number }>();
+		.all<{ dimension_key: string; units: number; period_key: string }>();
 	const expectedJson = JSON.stringify(units.results ?? []);
 	try {
 		await db.batch(
