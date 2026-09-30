@@ -65,41 +65,38 @@ class ShimStatement {
 		return this;
 	}
 
-	execBound() {
+	// Execute exactly once, then project: real D1 carries usage metadata on
+	// every result shape (run/first/all/batch), and the quota-guarded adapter
+	// bills against it — the shim must run statements a single time or
+	// non-idempotent writes would apply repeatedly.
+	execute() {
 		const isRead = /^\s*(select|with|pragma|explain)/i.test(this.sql);
+		if (isRead) {
+			const rows = toRows(this.sqlite.prepare(this.sql).iterate(...this.params));
+			return { rows, meta: { rows_read: rows.length, rows_written: 0 } };
+		}
 		const info = this.sqlite.prepare(this.sql).run(...this.params);
 		const changes = Number(info.changes ?? 0);
-		return {
-			meta: isRead
-				? { changes, rows_read: 1, rows_written: 0 }
-				: { changes, rows_read: 1, rows_written: changes },
-		};
+		return { rows: [], meta: { rows_read: 0, rows_written: changes, changes } };
 	}
 
-	execAll() {
-		const rows = toRows(this.sqlite.prepare(this.sql).iterate(...this.params));
-		// Real D1 reports usage metadata on every result; the guarded adapter
-		// bills against it, so the shim must carry the same shape.
-		const isRead = /^\s*(select|with|pragma|explain)/i.test(this.sql);
-		const meta = isRead
-			? { rows_read: rows.length, rows_written: 0 }
-			: { rows_read: 0, rows_written: Number(this.sqlite.prepare(this.sql).run(...this.params).changes ?? 0) };
-		return { results: rows, meta };
+	execBound() {
+		return { meta: this.execute().meta };
 	}
 
 	async run() {
-		const { meta } = this.execAll();
-		const info = this.sqlite.prepare(this.sql).run(...this.params);
-		return { meta: { ...meta, changes: Number(info.changes ?? 0) } };
+		const { meta } = this.execute();
+		return { meta };
 	}
 
 	async first() {
-		const rows = toRows(this.sqlite.prepare(this.sql).iterate(...this.params));
+		const { rows } = this.execute();
 		return rows.length > 0 ? rows[0] : null;
 	}
 
 	async all() {
-		return this.execAll();
+		const { rows, meta } = this.execute();
+		return { results: rows, meta };
 	}
 }
 
