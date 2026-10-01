@@ -157,13 +157,14 @@ Current Version ID: e6f593ba-0355-404e-9c19-5f6b55364a47
 ## 4. 生产实测：空心跳 100% 放行
 
 对**最终部署版本**（`e6f593ba` / `eadc961`）执行 `submit_run_envelope`
-（enforce 模式、仅 `task_name` + `summary`、无 `channel_payload`）：
+（enforce 模式、仅 `task_name` + `summary`、无 `channel_payload`）。
+以下为最终版本上的那份回执：
 
 ```json
 {
   "status": "ENVELOPE_RECORDED",
-  "run_id": "run_1584525b5f564dd7b6a382cc619acf17",
-  "task_name": "company-facts",
+  "run_id": "run_65df71626c8145b9b9ee53eac8261c5d",
+  "task_name": "holding-assistant-preclose",
   "outcome": "SILENT",
   "blocker_code": null,
   "envelope_key": "HB:2026-10-01T18",
@@ -179,22 +180,27 @@ Current Version ID: e6f593ba-0355-404e-9c19-5f6b55364a47
 
 - **无 `isError`、无 `QUOTA_GUARD_UNAVAILABLE`** —— 与 2026-10-01 事故现场
   （`request_id=5cc21320931e4024806341cca7df0ed5` 被拒）形成直接对照。
-- 回执定位键：**`run_id = run_1584525b5f564dd7b6a382cc619acf17`** 与
+- 回执定位键：**`run_id = run_65df71626c8145b9b9ee53eac8261c5d`** 与
   **`envelope_key = HB:2026-10-01T18`**（MCP 回执本身不含 `request_id` 字段，故以
   run_id + envelope_key 作为可追溯标识）。
 - 落库核对（生产 D1 实读，两次心跳并列）：
 
 ```
-run_id                = run_1584525b5f564dd7b6a382cc619acf17   (最终版本)
-task_name             = company-facts
+run_id                = run_65df71626c8145b9b9ee53eac8261c5d   (最终版本)
+task_name             = holding-assistant-preclose
 outcome               = SILENT
 envelope_key          = HB:2026-10-01T18
 fresh_delta_count     = 0
-created_at            = 2026-10-01T18:53:15.873Z
-collector_build_sha   = 6cd919990a58966206425dfe184ad05d3cefc70a   (= 部署 SHA)
+created_at            = 2026-10-01T18:55:18.505Z
+collector_build_sha   = eadc96119c6add7fcc434dfc5d50c03421363abe   (= 部署 SHA)
+cloudflare_version_id = e6f593ba-0355-404e-9c19-5f6b55364a47
+
+run_id                = run_1584525b5f564dd7b6a382cc619acf17   (中止版本)
+task_name             = company-facts
+collector_build_sha   = 6cd919990a58966206425dfe184ad05d3cefc70a
 cloudflare_version_id = a1ae5b45-5bdc-4046-b9b3-427b03689e17
 
-run_id                = run_8aa7c9f330d141f4baba1d45e61cca24   (前一版本)
+run_id                = run_8aa7c9f330d141f4baba1d45e61cca24   (最早一次)
 task_name             = industry-research
 collector_build_sha   = cdb9d5c129d53e81f466690b81281cf537036508
 cloudflare_version_id = a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84
