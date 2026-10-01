@@ -1,50 +1,30 @@
 /**
- * Quota admission contract owner for the Collector.
+ * Quota module facade for the Collector.
  *
- * This module is the single import surface for the multi-dimension 95% admission
- * system.  It replaces the staged D1 daily prototype whose rules were:
- *   - a UTC-day line computed as `included * 0.95 / 31` (repealed: the paid
- *     allowance resets on the account subscription renewal anchor, not on a UTC
- *     calendar month, and a month/31 proportion is not a 95% guarantee);
- *   - a local D1 watermark treated as a spending cap (repealed: local counters are
- *     not an account baseline);
- *   - a "retry after UTC day reset" message (repealed: no automated recovery
- *     instant can be proven).
- *
- * The prototype files were never deployed and QUOTA_BREAKER_ENABLED was never
- * enabled in production; `legacyBreakerFlag()` exists only to report that a
- * leftover flag must not be mistaken for protection.
+ * 2026-10-02 quota redesign (spec section 1.1): every front gate is removed.
+ * There is no admission switch, no reservation ledger in the request path, no
+ * 26h baseline hard timeout (`BASELINE_COVERAGE_AGE_MS` abolished) and no
+ * "missing baseline = CLOSED" path.  Business requests pass after
+ * authorization; paid-resource usage is observed post-hoc by pure observers and
+ * will be persisted by the accounting middleware; the 12h official-meter
+ * reconcile (Phase 3) and the 95% circuit table (Phase 4) build on that.
  *
  * Contract, in one line each:
- *   - `quota-dimensions.ts`  catalog + natural periods (renewal anchor / UTC day / storage integral);
+ *   - `quota-dimensions.ts`  dimension catalog + natural periods (renewal anchor
+ *     / UTC day / storage integral);
  *   - `quota-billing.ts`     strict read-only baseline interpretation (403/empty/partial = not zero);
- *   - `quota-admission.ts`   atomic multi-dimension reservation ledger in D1, with the
- *     monotonic per-(dimension, period) booked upper bound that keeps settled spend
- *     counting against the 95% ceiling until the period rolls (audit S1 repair);
- *   - `quota-resource-adapters.ts`  guarded D1/R2/AI/Vectorize proxies;
- *   - `quota-entrypoints.ts` entrypoint catalog + HTTP/MCP/Cron refusal contract.
+ *   - `quota-admission.ts`   legacy ledger read + operator-record surface (tables retained read-only;
+ *     CLOSED only after a real 95% threshold breach);
+ *   - `quota-resource-adapters.ts`  pure D1/R2 observers (never throw, never re-judge);
+ *   - `quota-entrypoints.ts` entrypoint catalog reused by the accounting
+ *     middleware for per-route dimension aggregation.
  *
- * Guarantee boundary (spec §"问题定义"): this is a stop-loss for the *controllable
- * increment* of heavy Collector work.  It is NOT a physical spending cap: the
- * inbound request that reaches the Worker is already billed, CPU has an
- * unpredictable tail, and stored data keeps billing as a time integral.  The
- * system deliberately reports `UNKNOWN` (never zero) when it cannot prove a
- * baseline, and stays CLOSED in that state.
+ * Guarantee boundary: nothing here gates work any more.  The old admission mode
+ * (`QUOTA_ADMISSION_MODE`) is inert: setting it changes no behavior anywhere.
  */
 
 export const QUOTA_ACCOUNT_TAG = "4b0901ceeeef89ac3b8414d56c50c946";
 export const QUOTA_D1_DATABASE_ID = "0e20aca4-c394-4f41-aa46-d98831b81836";
-
-export type QuotaAdmissionMode = "off" | "enforce";
-
-/**
- * Admission switch.  `off` (default) performs no gating; `enforce` requires an
- * ADMITTED reservation for every heavy route.  With no verified account baseline
- * `enforce` refuses heavy work by construction (`QUOTA_GUARD_UNAVAILABLE`).
- */
-export function admissionMode(env?: { QUOTA_ADMISSION_MODE?: string }): QuotaAdmissionMode {
-	return env?.QUOTA_ADMISSION_MODE === "enforce" ? "enforce" : "off";
-}
 
 export interface LegacyFlagReport {
 	readonly flag: "QUOTA_BREAKER_ENABLED";
@@ -86,49 +66,15 @@ export {
 } from "./quota-dimensions.ts";
 
 export {
-	MAX_BOOKED_UNITS,
-	MAX_DIMENSIONS_PER_ADMISSION,
-	QUOTA_GUARD_SCAN_CAP,
-	QUOTA_LIVE_UNITS_CAP,
-	admitOperation,
-	baselineStaleAfterMs,
-	baselineWarnings,
-	bookedParameterValues,
-	buildBookedSql,
-	buildDiagnosisSql,
-	buildGuardSql,
-	buildReleaseStatements,
-	buildSealSql,
-	buildSettleStatements,
-	guardParameterValues,
-	ledgerLifecycleReads,
-	ledgerLifecycleWrites,
-	ledgerSelfReads,
-	ledgerSelfWrites,
-	mergeDimensions,
-	prepareStatements,
-	quotaStatus,
-	readBookedUsage,
 	recordAccountPeriod,
 	recordBaseline,
-	releaseReservation,
-	sealParameterValues,
-	settleReservation,
+	quotaStatus,
+	readBookedUsage,
 	syncDimensionCatalog,
-	withLedgerSelfCost,
-	type AdmissionContext,
-	type AdmissionDenialReason,
-	type BaselineWarning,
-	type AdmissionDimension,
-	type AdmissionRequest,
-	type AdmissionResult,
+	type AnchorRow,
 	type DimensionStatus,
-	type ObservedDimension,
 	type QuotaStatus,
 	type RawQuotaDb,
-	type ReleaseResult,
-	type SettleResult,
-	type StatementSpec,
 } from "./quota-admission.ts";
 
 export {
@@ -145,20 +91,11 @@ export {
 } from "./quota-billing.ts";
 
 export {
-	NEURON_BOUND,
-	QuotaGuardError,
-	VECTORIZE_QUERY_DIMENSIONS,
-	ReservationBudget,
-	admissionHandle,
-	createGuardedAi,
-	createGuardedD1,
-	createGuardedR2,
-	createGuardedVectorize,
-	neuronUpperBound,
-	type NeuronBoundProof,
+	UsageObserver,
+	createObservedD1,
+	createObservedR2,
+	type ObservedDimension,
 	type QuotaObservationSink,
-	type QuotaRefusalCode,
-	type ReservationHandle,
 } from "./quota-resource-adapters.ts";
 
 export {
@@ -166,18 +103,11 @@ export {
 	QUOTA_ENTRYPOINTS,
 	QUOTA_HTTP_ROUTES,
 	QUOTA_MCP_TOOLS,
-	cronQuotaOutcome,
 	missingEntrypoints,
-	quotaHttpRefusal,
-	quotaMcpRefusal,
-	quotaRefusalBody,
 	routeCostProfile,
 	unclassifiedEntrypoints,
-	type CronQuotaOutcome,
 	type EntrypointKind,
-	type QuotaRefusalBody,
-	type QuotaRefusalErrorCode,
 	type RouteCostClass,
 	type RouteCostProfile,
-	type SafeHttpRefusal,
+	type RouteDimension,
 } from "./quota-entrypoints.ts";

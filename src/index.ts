@@ -859,7 +859,6 @@ export function createServer(
 	 * The implementation is cast back to the SDK signature so call sites keep the
 	 * schema-derived handler typing.
 	 */
-	 */
 	const registerToolImplementation = (
 		name: string,
 		config: unknown,
@@ -2330,26 +2329,6 @@ export function createServer(
 				let quota: unknown = null;
 				if (env?.RESEARCH_REPLICA) {
 					try {
-						const status = await quotaStatus(env.RESEARCH_REPLICA, {
-							account_id: quotaAccountId(),
-							dimensions: QUOTA_DIMENSIONS,
-						});
-						// Issue #54 §2: aging is a WARNING. Surface it explicitly and
-						// separately from `state`, so an observer can never read a
-						// stale-but-admitting dimension as closed.
-						const staleWarnings = status.dimensions
-							.filter((dimension) => dimension.warnings.includes("STALE_BASELINE"))
-							.map((dimension) => dimension.dimension_key);
-						if (staleWarnings.length > 0) {
-							console.log(
-								JSON.stringify({
-									event: "quota_baseline_stale",
-									timestamp: new Date().toISOString(),
-									dimensions: staleWarnings,
-									informing: "warning_only_admission_unaffected",
-								}),
-							);
-						}
 						quota = {
 							...(await quotaStatus(env.RESEARCH_REPLICA, {
 								account_id: quotaAccountId(),
@@ -2357,13 +2336,6 @@ export function createServer(
 							})),
 							legacy: legacyBreakerFlag(env),
 							quantified_guarantee: false,
-							// Warning-only view (never a gate); empty array = all fresh.
-							stale_baseline_warnings: staleWarnings,
-							lifeline: {
-								tools: ["mcp:submit_run_envelope (no channel_payload)"],
-								maintenance_reserve: LIFELINE_MAINTENANCE_RESERVE,
-								budget_kind: "reported_not_deducted",
-							},
 							uncovered: [
 								"inbound Workers requests and CPU are billed before this code runs",
 								"stored D1/KV/R2 GB-month keeps billing without any new write",
