@@ -422,6 +422,77 @@ export const QUOTA_ENTRYPOINTS: readonly RouteCostProfile[] = [
 	...QUOTA_CRONS,
 ];
 
+// ---------------------------------------------------------------------------
+// Lifeline classification (issue #54, owner ruling 2026-10-01)
+// ---------------------------------------------------------------------------
+
+/** Tools that accept the run-envelope shape and therefore need lifeline split. */
+export const LIFELINE_TOOL = "submit_run_envelope";
+
+/** The benign bare-run fields (issue #47) that carry no channel_payload. */
+export interface LifelineProbeInput {
+	readonly channel_payload?: unknown;
+	readonly blocked_by?: unknown;
+	readonly observations?: unknown;
+}
+
+/**
+ * An envelope is a *lifeline* — a run-registration/status report with no
+ * business content — exactly when it carries no `channel_payload`.  A bare
+ * heartbeat, a `blocked_by` pre-write refusal report and an `observations`
+ * read-only report all qualify: their whole job is to make the run's outcome
+ * visible, and killing them with the quota gate is what turned a stale-baseline
+ * warning into a platform-wide observability outage on 2026-10-01.
+ *
+ * The classification is deliberately structural (absence of the payload field):
+ * a caller cannot smuggle business content through by naming a benign field,
+ * because the schema makes the trio mutually exclusive and the heavy path is
+ * only skipped when there is nothing to write.
+ */
+export function isLifelineEnvelope(input: LifelineProbeInput | null | undefined): boolean {
+	if (!input || typeof input !== "object") return false;
+	return input.channel_payload === undefined || input.channel_payload === null;
+}
+
+/**
+ * Resolve the admission route for one `submit_run_envelope` call.
+ *
+ * A lifeline envelope is exempt from the heavy multi-dimension gate: it is a
+ * run-registration/status report whose spend is a fixed, small, COLLECTOR-owned
+ * D1 write, and the 2026-10-01 incident showed that gating it converts any
+ * baseline problem into a platform-wide observability outage.  Every envelope
+ * that DOES carry business content keeps the existing `heavy_bounded` route and
+ * its full multi-dimension reservation.
+ */
+export function runEnvelopeAdmissionRoute(
+	route: string,
+	envelope: LifelineProbeInput | null | undefined,
+): { readonly route: string; readonly envelope_has_payload: boolean; readonly exempt: boolean } {
+	if (route !== `mcp:${LIFELINE_TOOL}`) {
+		return { route, envelope_has_payload: false, exempt: false };
+	}
+	const exempt = isLifelineEnvelope(envelope);
+	return { route, envelope_has_payload: !exempt, exempt };
+}
+
+/**
+ * Fixed per-period D1 write budget the Collector reserves for its own
+ * run-registration / status surface (issue #54 §1 `maintenance_reserve`).
+ *
+ * Reported, not deducted: the lifeline path's real cost is one run row per
+ * call, every admission already books its units into `quota_booked_usage`, and
+ * silently lowering `threshold_95` for the business routes would shrink the
+ * platform allowance instead of bounding the lifeline.  Operators read this
+ * number on `get_gateway_status` to see how much of the write ceiling the
+ * lifeline may consume before business traffic would have to yield.
+ */
+export const LIFELINE_MAINTENANCE_RESERVE = {
+	dimension_key: "d1.rows_written",
+	units: 1_000_000,
+	period: "billing_cycle",
+	note: "run registration / heartbeat / blocked_by / observations write budget",
+} as const;
+
 const BY_ROUTE = new Map(QUOTA_ENTRYPOINTS.map((entry) => [entry.route, entry]));
 
 export function routeCostProfile(route: string): RouteCostProfile | null {

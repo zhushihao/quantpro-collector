@@ -151,6 +151,11 @@ import {
 	createGuardedR2,
 	QUOTA_DIMENSIONS,
 } from "./quota-breaker.ts";
+import {
+	LIFELINE_MAINTENANCE_RESERVE,
+	runEnvelopeAdmissionRoute,
+	type LifelineProbeInput,
+} from "./quota-entrypoints.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
@@ -733,6 +738,11 @@ async function admitHeavyRouteForEnv(
 		{ account_id: quotaAccountId() },
 	);
 	if (result.status === "DENIED") {
+		// Error-code decoupling (issue #54): `limit` is the REAL 95% ceiling (or
+		// the unobserved-tail reserve) and is the only reason that may report
+		// `QUOTA_CIRCUIT_OPEN`.  The ledger read-bound reason (`cap`) and every
+		// proof/plumbing failure report `QUOTA_GUARD_UNAVAILABLE`, so an operator
+		// never reads "circuit open" while the account has headroom.
 		const code = result.reason === "limit" ? "QUOTA_CIRCUIT_OPEN" : "QUOTA_GUARD_UNAVAILABLE";
 		// Operators can only fix what the logs name: the reason and refusing
 		// dimension carry no secrets and are the sole signal for baseline repair.
@@ -875,6 +885,18 @@ export function createServer(
 	 *     unguarded; the route catalog does not establish account-wide quota
 	 *     coverage.
 	 *
+	 * Lifeline split (issue #54, owner ruling 2026-10-01): a
+	 * `submit_run_envelope` call that carries NO `channel_payload` is a run
+	 * registration / status report (bare heartbeat, `blocked_by` pre-write
+	 * refusal, or `observations`).  It is exempt from the heavy multi-dimension
+	 * gate so the monitoring and run-audit surface can never be killed by the
+	 * spend circuit — that coupling turned a stale-baseline warning into a
+	 * platform-wide observability outage on 2026-10-01.  The exemption is
+	 * auditable: every skip emits `quota_lifeline_exempt`, and the spend it
+	 * carries is the fixed, Collector-owned run-row write budgeting under the
+	 * maintenance reserve reported by `get_gateway_status`.  An envelope WITH
+	 * business content keeps the full `heavy_bounded` admission.
+	 *
 	 * A caller with no scope basis is refused before admission. A caller with
 	 * insufficient tool-specific scope could otherwise reserve before the handler
 	 * checks authorization; heavy admission therefore runs only for callers that
@@ -896,6 +918,23 @@ export function createServer(
 			const requestId = crypto.randomUUID().replaceAll("-", "");
 			if (!profile) {
 				return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
+			}
+			const split = runEnvelopeAdmissionRoute(route, args[0] as LifelineProbeInput);
+			if (split.exempt) {
+				// Lifeline: no heavy admission.  The handler still performs its own
+				// scope/state checks, and the run row it writes is the bounded,
+				// Collector-owned cost the maintenance reserve budgets for.
+				console.log(
+					JSON.stringify({
+						event: "quota_lifeline_exempt",
+						timestamp: new Date().toISOString(),
+						route,
+						request_id: requestId,
+						envelope_has_payload: split.envelope_has_payload,
+						maintenance_reserve: `${LIFELINE_MAINTENANCE_RESERVE.dimension_key} ${LIFELINE_MAINTENANCE_RESERVE.units}/period`,
+					}),
+				);
+				return handler(...args);
 			}
 			let admission: Awaited<ReturnType<typeof admitHeavyRoute>> | null = null;
 			if (admissionMode(env) === "enforce") {
@@ -2439,14 +2478,38 @@ export function createServer(
 				let quota: unknown = null;
 				if (env?.RESEARCH_REPLICA) {
 					try {
+						const status = await quotaStatus(env.RESEARCH_REPLICA, {
+							account_id: quotaAccountId(),
+							dimensions: QUOTA_DIMENSIONS,
+						});
+						// Issue #54 §2: aging is a WARNING. Surface it explicitly and
+						// separately from `state`, so an observer can never read a
+						// stale-but-admitting dimension as closed.
+						const staleWarnings = status.dimensions
+							.filter((dimension) => dimension.warnings.includes("STALE_BASELINE"))
+							.map((dimension) => dimension.dimension_key);
+						if (staleWarnings.length > 0) {
+							console.log(
+								JSON.stringify({
+									event: "quota_baseline_stale",
+									timestamp: new Date().toISOString(),
+									dimensions: staleWarnings,
+									informing: "warning_only_admission_unaffected",
+								}),
+							);
+						}
 						quota = {
-							...(await quotaStatus(env.RESEARCH_REPLICA, {
-								account_id: quotaAccountId(),
-								dimensions: QUOTA_DIMENSIONS,
-							})),
+							...status,
 							mode: admissionMode(env),
 							legacy: legacyBreakerFlag(env),
 							quantified_guarantee: false,
+							// Warning-only view (never a gate); empty array = all fresh.
+							stale_baseline_warnings: staleWarnings,
+							lifeline: {
+								tools: ["mcp:submit_run_envelope (no channel_payload)"],
+								maintenance_reserve: LIFELINE_MAINTENANCE_RESERVE,
+								budget_kind: "reported_not_deducted",
+							},
 							uncovered: [
 								"inbound Workers requests and CPU are billed before this code runs",
 								"stored D1/KV/R2 GB-month keeps billing without any new write",

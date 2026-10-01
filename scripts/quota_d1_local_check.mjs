@@ -146,17 +146,15 @@ function renderWithLiterals(sql, values) {
 }
 
 function guardStatement(entries, reservationId) {
+	// Baseline freshness is no longer a guard parameter (issue #54: coverage age
+	// is a warning, not a gate), so the statement binds only the request rows,
+	// the catalog version and the two read caps.
 	const values = guardParameterValues({
 		reservation_id: reservationId,
-		entries: entries.map((entry) => ({
-			...entry,
-			// Match the production per-period window (26h for cycle/storage).
-			baseline_cutoff: new Date(Date.parse(NOW) - 26 * 60 * 60 * 1000).toISOString(),
-		})),
+		entries,
 		catalog_version: QUOTA_CATALOG_VERSION,
 		scan_cap: QUOTA_GUARD_SCAN_CAP,
 		live_cap: 4096,
-		now: NOW,
 	});
 	return `${renderWithLiterals(buildGuardSql(entries.length), values)};`;
 }
@@ -646,7 +644,7 @@ check("0019 semantic pending cursor index applies on local D1", semanticQueueSch
 //     index, which is what makes the 256-row per-period invariant a real scan
 //     bound rather than a planner assumption.  D1 bills scanned rows.
 const guardPlan = selectRows(
-	`EXPLAIN QUERY PLAN ${renderWithLiterals(buildGuardSql(2), guardParameterValues({ reservation_id: "plan-probe", entries: [entry("d1.rows_read", 0), entry("r2.class_a", 0)].map((item) => ({ ...item, baseline_cutoff: new Date(Date.parse(NOW) - 26 * 60 * 60 * 1000).toISOString() })), catalog_version: QUOTA_CATALOG_VERSION, scan_cap: QUOTA_GUARD_SCAN_CAP, live_cap: 4096, now: NOW }))};`,
+	`EXPLAIN QUERY PLAN ${renderWithLiterals(buildGuardSql(2), guardParameterValues({ reservation_id: "plan-probe", entries: [entry("d1.rows_read", 0), entry("r2.class_a", 0)], catalog_version: QUOTA_CATALOG_VERSION, scan_cap: QUOTA_GUARD_SCAN_CAP, live_cap: 4096 }))};`,
 	persistTo,
 );
 const guardPlanDetails = (guardPlan ?? []).map((row) => String(row.detail ?? ""));

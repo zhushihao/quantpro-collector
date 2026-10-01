@@ -19,6 +19,7 @@ import {
 	QUOTA_GUARD_SCAN_CAP,
 	QUOTA_LIVE_UNITS_CAP,
 	admitOperation,
+	baselineWarnings,
 	buildBookedSql,
 	buildDiagnosisSql,
 	buildGuardSql,
@@ -327,41 +328,87 @@ test("admission is denied when the dimension has no VERIFIED baseline (absence i
 	assert.match(result.detail, /no VERIFIED baseline/);
 });
 
-test("missing, stale or future baseline coverage cannot admit an operation", async () => {
-	for (const coverageEnd of [null, "2026-09-18T20:00:00.000Z", "2026-09-20T00:01:00.000Z"]) {
-		const db = createResearchWorkflowDb();
-		await seed(db);
-		await recordBaseline(db, {
-			dimension_key: "d1.rows_read",
-			period_key: PERIOD_KEY,
-			state: "VERIFIED",
-			used: 0,
-			unobserved_upper_bound: 0,
-			source: "test",
-			source_version: "test@1",
-			as_of: NOW.toISOString(),
-			coverage_end: coverageEnd,
-		}, NOW);
-		const result = await admitOperation(
-			db,
-			request("op-expired-baseline", [{ dimension_key: "d1.rows_written", units: 1 }]),
-			{ account_id: ACCOUNT, now: NOW },
-		);
-		assert.equal(result.status, "DENIED", coverageEnd);
-		assert.equal(result.reason, "baseline", coverageEnd);
-		const status = await quotaStatus(db, { account_id: ACCOUNT, now: NOW });
-		assert.equal(status.dimensions.find((entry) => entry.dimension_key === "d1.rows_read").state, "CLOSED");
-		const units = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
-		assert.equal(Number(units.n), 0);
-	}
-});
-
-test("a cycle baseline inside the 26h guard window still admits (ledger covers the gap)", async () => {
+test("a stale baseline admits and reports STALE_BASELINE as a warning-only marker (#54)", async () => {
 	const db = createResearchWorkflowDb();
 	await seed(db);
-	// 24h old: outside the repealed 5-minute window, inside the daily-source
-	// window.  Every unit this guard admits is booked, so the window only bounds
-	// off-ledger drift, not the 95% invariant.
+	// Issue #54, owner ruling 2026-10-01: coverage age is a WARNING.  A VERIFIED
+	// row for the exact period is the compliance start of that period; the ledger
+	// itself (booked + used + tail + units <= threshold) is what enforces the 95%
+	// invariant.  The former `coverage_end BETWEEN cutoff AND now` conjunct turned
+	// a missed operator refresh into a platform-wide outage on 2026-10-01.
+	const staleCoverage = "2026-09-15T00:00:00.000Z"; // 5 days before NOW (>26h)
+	await recordBaseline(db, {
+		dimension_key: "d1.rows_read",
+		period_key: PERIOD_KEY,
+		state: "VERIFIED",
+		used: 0,
+		unobserved_upper_bound: 0,
+		source: "test",
+		source_version: "test@1",
+		as_of: staleCoverage,
+		coverage_end: staleCoverage,
+	}, NOW);
+	const result = await admitOperation(
+		db,
+		request("op-stale-baseline", [{ dimension_key: "d1.rows_written", units: 1 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(result.status, "ADMITTED", "a stale watermark must not close the dimension");
+	const status = await quotaStatus(db, { account_id: ACCOUNT, now: NOW });
+	const d1 = status.dimensions.find((entry) => entry.dimension_key === "d1.rows_read");
+	assert.equal(d1.state, "OPEN", "aging must not change the admission decision");
+	assert.deepEqual(d1.warnings, ["STALE_BASELINE"]);
+	assert.match(d1.reason, /STALE_BASELINE/);
+	const units = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
+	assert.equal(Number(units.n) > 0, true, "the stale-but-verified row still admits");
+});
+
+test("a never-covered baseline still admits but reports BASELINE_COVERAGE_UNKNOWN (#54)", async () => {
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	await recordBaseline(db, {
+		dimension_key: "d1.rows_read",
+		period_key: PERIOD_KEY,
+		state: "VERIFIED",
+		used: 0,
+		unobserved_upper_bound: 0,
+		source: "test",
+		source_version: "test@1",
+		as_of: NOW.toISOString(),
+		coverage_end: null,
+	}, NOW);
+	const status = await quotaStatus(db, { account_id: ACCOUNT, now: NOW });
+	const d1 = status.dimensions.find((entry) => entry.dimension_key === "d1.rows_read");
+	assert.equal(d1.state, "OPEN", "a missing watermark is a warning, not a closure");
+	assert.deepEqual(d1.warnings, ["BASELINE_COVERAGE_UNKNOWN"]);
+});
+
+test("a future-dated coverage watermark admits but reports BASELINE_COVERAGE_FUTURE (#54)", async () => {
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	await recordBaseline(db, {
+		dimension_key: "d1.rows_read",
+		period_key: PERIOD_KEY,
+		state: "VERIFIED",
+		used: 0,
+		unobserved_upper_bound: 0,
+		source: "test",
+		source_version: "test@1",
+		as_of: "2026-09-21T00:00:00.000Z",
+		coverage_end: "2026-09-21T00:00:00.000Z", // 1 day AFTER NOW
+	}, NOW);
+	const status = await quotaStatus(db, { account_id: ACCOUNT, now: NOW });
+	const d1 = status.dimensions.find((entry) => entry.dimension_key === "d1.rows_read");
+	assert.equal(d1.state, "OPEN", "a future watermark is operator data error, not a closure");
+	assert.deepEqual(d1.warnings, ["BASELINE_COVERAGE_FUTURE"]);
+});
+
+test("a fresh cycle baseline admits with no warnings (ledger covers the gap)", async () => {
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	// 24h old: inside the daily-source warning window.  Every unit this guard
+	// admits is booked, so the window only bounds off-ledger drift, not the 95%
+	// invariant.
 	await recordBaseline(db, {
 		dimension_key: "d1.rows_read",
 		period_key: PERIOD_KEY,
@@ -379,6 +426,10 @@ test("a cycle baseline inside the 26h guard window still admits (ledger covers t
 		{ account_id: ACCOUNT, now: NOW },
 	);
 	assert.equal(result.status, "ADMITTED");
+	const status = await quotaStatus(db, { account_id: ACCOUNT, now: NOW });
+	const d1 = status.dimensions.find((entry) => entry.dimension_key === "d1.rows_read");
+	assert.deepEqual(d1.warnings, []);
+	assert.equal(d1.reason, "verified baseline with headroom");
 });
 
 test("admission reserves every dimension atomically and includes the ledger's own cost", async () => {
@@ -856,7 +907,7 @@ test("release requires the no-call proof; anything else keeps the reservation", 
 	assert.equal((await liveUnits(db, admitted.reservation_id)).length, 0);
 });
 
-test("the per-dimension scan cap bounds the guard's own reads and denies at the cap", async () => {
+test("the per-dimension scan cap bounds the guard's own reads and denies with reason cap", async () => {
 	const db = createResearchWorkflowDb();
 	await seed(db);
 	// Fill the live table for one dimension/period to the cap with settled-less rows.
@@ -877,7 +928,9 @@ test("the per-dimension scan cap bounds the guard's own reads and denies at the 
 		{ account_id: ACCOUNT, now: NOW },
 	);
 	assert.equal(denied.status, "DENIED");
-	assert.equal(denied.reason, "limit");
+	// Issue #54 decoupling: a live-row read bound is NOT the 95% ceiling, so it
+	// must never be reported as `limit` (which maps to QUOTA_CIRCUIT_OPEN).
+	assert.equal(denied.reason, "cap");
 	assert.match(denied.detail, /live-row cap|scan bound/);
 });
 
@@ -912,6 +965,30 @@ test("no UTC calendar month, no month/31 divisor, and no timeout release exist i
 	assert.match(guard, /quota_dimension_catalog/);
 	assert.match(seal, /applied/);
 	assert.equal(QUOTA_CATALOG_VERSION.includes("2026-09-30"), true);
+});
+
+test("#54 the guard has no coverage-age conjunct: VERIFIED is the only baseline condition", () => {
+	const guard = buildGuardSql(2);
+	const diagnosis = buildDiagnosisSql(2);
+	for (const sql of [guard, diagnosis]) {
+		assert.doesNotMatch(
+			sql,
+			/coverage_end\s+BETWEEN/i,
+			"coverage age must not gate admission (issue #54 soft aging)",
+		);
+		assert.doesNotMatch(sql, /baseline_cutoff/i, "the cutoff parameter must be gone");
+		assert.doesNotMatch(
+			sql,
+			/b\.as_of\s+BETWEEN/i,
+			"the as_of watermark must not gate admission",
+		);
+	}
+	assert.match(guard, /b\.state = 'VERIFIED'/, "VERIFIED remains the baseline condition");
+	// Aging still has a first-class warning surface, and it never returns a state.
+	assert.deepEqual(baselineWarnings("2026-09-15T00:00:00.000Z", "billing_cycle", NOW), [
+		"STALE_BASELINE",
+	]);
+	assert.deepEqual(baselineWarnings(NOW.toISOString(), "billing_cycle", NOW), []);
 });
 
 // ---------------------------------------------------------------------------
@@ -1453,4 +1530,78 @@ test("quota status reports the booked bound, not just the live reservations", as
 	);
 	assert.equal(refused.status, "DENIED");
 	assert.equal(refused.reason, "limit");
+});
+
+test("#54 a stale baseline still hits the REAL ceiling: over-95% stays a limit denial", async () => {
+	// The two changes must not blur: soft aging relaxes freshness, never the
+	// ceiling.  With a stale-but-VERIFIED row the step past the threshold is still
+	// refused with the SPEND reason (which maps to QUOTA_CIRCUIT_OPEN), not with a
+	// proof/coverage reason.  The edge is expressed in terms of the ledger's own
+	// self-cost, because one admission also reserves `ledgerSelfWrites(2)` units of
+	// this same d1.rows_written dimension.
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	const entry = dimension("d1.rows_written");
+	const staleCoverage = "2026-09-15T00:00:00.000Z"; // >26h: would have closed pre-#54
+	// The request below declares only r2.class_a, so the ledger's own write cost
+	// is ledgerSelfWrites(3) (r2.class_a + the two D1 dimensions it bills).
+	const selfWrites = ledgerSelfWrites(3);
+	await recordBaseline(db, {
+		dimension_key: "d1.rows_written",
+		period_key: PERIOD_KEY,
+		state: "VERIFIED",
+		used: entry.threshold_95 - selfWrites,
+		unobserved_upper_bound: 0,
+		source: "test",
+		source_version: "test@1",
+		as_of: staleCoverage,
+		coverage_end: staleCoverage,
+	}, NOW);
+	const atLine = await admitOperation(
+		db,
+		request("op-stale-at-line", [{ dimension_key: "r2.class_a", units: 0 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(
+		atLine.status,
+		"ADMITTED",
+		"headroom covering the ledger's own write cost is still exact",
+	);
+	const over = await admitOperation(
+		db,
+		request("op-stale-over", [{ dimension_key: "d1.rows_written", units: 1 }], "b".repeat(32)),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(over.status, "DENIED");
+	assert.equal(over.reason, "limit", "the real ceiling must still deny after soft aging");
+	const leftovers = await db
+		.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units WHERE reservation_id = ?")
+		.bind("op-stale-over")
+		.first();
+	assert.equal(Number(leftovers.n), 0, "no partial reservation may survive a ceiling denial");
+});
+
+test("#54 a cap denial is attributed to the read bound, never to the ceiling", async () => {
+	const db = createResearchWorkflowDb();
+	await seed(db);
+	const statements = [];
+	for (let index = 0; index < QUOTA_GUARD_SCAN_CAP; index += 1) {
+		statements.push(
+			db
+				.prepare(
+					"INSERT INTO quota_reservation_units (reservation_id, dimension_key, period_key, units, state) VALUES (?, 'r2.class_a', ?, 0, 'ADMITTED')",
+				)
+				.bind(`cap-filler-${index}`, PERIOD_KEY),
+		);
+	}
+	await db.batch(statements);
+	const denied = await admitOperation(
+		db,
+		request("op-cap-attribution", [{ dimension_key: "r2.class_a", units: 0 }]),
+		{ account_id: ACCOUNT, now: NOW },
+	);
+	assert.equal(denied.status, "DENIED");
+	assert.equal(denied.reason, "cap", "a live-row read bound is not the spend circuit");
+	assert.notEqual(denied.reason, "limit");
+	assert.match(denied.detail, /live-row cap|scan bound/);
 });

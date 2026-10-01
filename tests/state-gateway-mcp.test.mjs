@@ -458,3 +458,97 @@ test("get_gateway_status.registered_tools never drifts from the real MCP registr
 		await server.server.close();
 	}
 });
+
+test("#54 a bare heartbeat envelope is admitted by the lifeline split even in enforce mode", async () => {
+	const db = createResearchWorkflowDb();
+	const server = createServer(
+		{ GITHUB_TOKEN: "fake-token", RESEARCH_REPLICA: db, QUOTA_ADMISSION_MODE: "enforce" },
+		"ENABLED",
+		new Set(["market:read", "state:read", "state:write"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "lifeline-heartbeat-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		// Enforce mode with NO catalog/baseline rows at all: the heavy path would
+		// deny by construction (`QUOTA_GUARD_UNAVAILABLE`), which is exactly the
+		// 2026-10-01 outage.  A payload-free envelope must still land.
+		const heartbeat = await client.callTool({
+			name: "submit_run_envelope",
+			arguments: { task_name: "industry-research", summary: "空心跳：本轮无新增" },
+		});
+		assert.notEqual(heartbeat.isError, true, "a bare heartbeat must never be quota-refused");
+		const receipt = JSON.parse(heartbeat.content[0].text);
+		assert.equal(receipt.outcome, "SILENT");
+		assert.equal(receipt.ledger.status, "SKIPPED_HEARTBEAT");
+
+		// A blocked_by pre-write refusal report rides the same lifeline.
+		const blocked = await client.callTool({
+			name: "submit_run_envelope",
+			arguments: {
+				task_name: "industry-research",
+				summary: "业务门禁拦下：组合未确认",
+				blocked_by: "PORTFOLIO_NOT_CONFIRMED",
+			},
+		});
+		assert.notEqual(blocked.isError, true, "a blocked_by report must never be quota-refused");
+		const blockedReceipt = JSON.parse(blocked.content[0].text);
+		assert.equal(blockedReceipt.outcome, "BLOCKED");
+		assert.equal(blockedReceipt.blocker_code, "PRE_WRITE:PORTFOLIO_NOT_CONFIRMED");
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});
+
+test("#54 an envelope WITH channel_payload still takes the heavy gate in enforce mode", async () => {
+	const db = createResearchWorkflowDb();
+	const server = createServer(
+		{ GITHUB_TOKEN: "fake-token", RESEARCH_REPLICA: db, QUOTA_ADMISSION_MODE: "enforce" },
+		"ENABLED",
+		new Set(["market:read", "state:read", "state:write"]),
+		"chatgpt-production",
+		"https://cn-hk-quotes-mcp.zhushihao710.workers.dev",
+	);
+	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+	const client = new Client({ name: "lifeline-heavy-test", version: "0.0.0" });
+	await Promise.all([server.server.connect(serverTransport), client.connect(clientTransport)]);
+	try {
+		// No VERIFIED baseline exists in this database, so business content must be
+		// refused: the lifeline exemption is structural (payload absent), never a
+		// blanket bypass a caller could reach by naming a benign field.
+		const withPayload = await client.callTool({
+			name: "submit_run_envelope",
+			arguments: {
+				task_name: "industry-research",
+				summary: "本轮产业新增一条",
+				channel_payload: {
+					channel: "INDUSTRY",
+					as_of: "2026-09-28T10:45:00+08:00",
+					events: [
+						{
+							symbol: "CN:300308",
+							event_type: "EVIDENCE_ADD",
+							research_priority: "P0",
+							industry_thesis: "lifeline split probe",
+							r_proposal: "R1",
+							evidence_types: ["D"],
+							evidence_keys: ["20260928|TEST|FACT"],
+							counter_evidence: [],
+							confidence: 0.9,
+							next_validation: "next",
+						},
+					],
+				},
+			},
+		});
+		assert.equal(withPayload.isError, true);
+		const body = JSON.parse(withPayload.content[0].text);
+		assert.equal(body.error_code, "QUOTA_GUARD_UNAVAILABLE");
+	} finally {
+		await client.close();
+		await server.server.close();
+	}
+});

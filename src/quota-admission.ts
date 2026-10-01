@@ -87,25 +87,44 @@ export const QUOTA_LIVE_UNITS_CAP = 4096;
 export const MAX_BOOKED_UNITS = 9_007_199_254_740_991;
 
 /**
- * How long a provider coverage watermark may keep admitting new work, **per
- * period kind**.  This window does NOT weaken the 95% invariant: every unit this
- * guard admits is booked into `quota_booked_usage` and charged against the
- * baseline inside the same atomic transaction, so the window only bounds
- * off-ledger drift (console actions, other workers on the account).  The values
- * match the evidence cadence of the sources an operator registers from:
- * monthly-cycle dimensions come from the daily Billable Usage feed (≤1 day lag
- * plus a 2h buffer), and the official GraphQL analytics used for daily products
- * has sub-hour granularity.
+ * How old a provider coverage watermark may get before the *status* surface
+ * marks the dimension with a `STALE_BASELINE` warning, **per period kind**
+ * (issue #54, owner ruling 2026-10-01: soft aging).
+ *
+ * This is a WARNING threshold, never an admission gate.  Until 2026-10-01 the
+ * same numbers hard-blocked admission (`coverage_end BETWEEN cutoff AND now`),
+ * so a missed operator refresh closed every billing-cycle dimension platform
+ * wide — including bare heartbeats — while the real account usage was nowhere
+ * near the ceiling (2026-10-01 incident, `QUOTA_GUARD_UNAVAILABLE` on
+ * `submit_run_envelope`).  Aging now only feeds
+ * `DimensionStatus.warnings` / the `quota_baseline_stale` log line; the 95%
+ * invariant is enforced by the ledger itself (`booked + used +
+ * unobserved_upper_bound + units <= threshold`), which every admitted unit is
+ * charged against inside the same atomic transaction.
+ *
+ * The values still match the evidence cadence of the registered sources:
+ * monthly-cycle dimensions come from the daily Billable Usage feed (<=1 day lag
+ * plus a 2h buffer); the official GraphQL analytics used for daily products has
+ * sub-hour granularity.
  */
-const BASELINE_COVERAGE_AGE_MS: Record<string, number> = {
+const BASELINE_STALE_AFTER_MS: Record<string, number> = {
 	billing_cycle: 26 * 60 * 60 * 1000,
 	storage_integral: 26 * 60 * 60 * 1000,
 	utc_day: 2 * 60 * 60 * 1000,
 };
 
-export function baselineCoverageAgeMs(periodKind: string): number {
-	return BASELINE_COVERAGE_AGE_MS[periodKind] ?? 0;
+export function baselineStaleAfterMs(periodKind: string): number {
+	return BASELINE_STALE_AFTER_MS[periodKind] ?? 0;
 }
+
+/** Warning vocabulary on `DimensionStatus.warnings`; none of these block work. */
+export type BaselineWarning =
+	/** VERIFIED, but the coverage watermark is older than the warning window. */
+	| "STALE_BASELINE"
+	/** VERIFIED, but the row carries no coverage watermark at all. */
+	| "BASELINE_COVERAGE_UNKNOWN"
+	/** VERIFIED, but the watermark is in the future (operator data error). */
+	| "BASELINE_COVERAGE_FUTURE";
 
 /**
  * Conservative off-ledger headroom for the runtime-bootstrapped UTC-day
@@ -115,8 +134,21 @@ export function baselineCoverageAgeMs(periodKind: string): number {
  */
 export const UTC_DAY_OFF_LEDGER_HEADROOM = 200;
 
-function baselineCutoffFor(periodKind: string, now: Date): string {
-	return new Date(now.getTime() - baselineCoverageAgeMs(periodKind)).toISOString();
+/**
+ * Classify a VERIFIED baseline's coverage watermark for the warning surface.
+ * Never returns an admission decision; callers must not turn these into gates.
+ */
+export function baselineWarnings(
+	coverageEnd: string | null | undefined,
+	periodKind: string,
+	now: Date,
+): BaselineWarning[] {
+	if (!coverageEnd) return ["BASELINE_COVERAGE_UNKNOWN"];
+	const ageMs = now.getTime() - Date.parse(coverageEnd);
+	if (!Number.isFinite(ageMs)) return ["BASELINE_COVERAGE_UNKNOWN"];
+	if (ageMs < 0) return ["BASELINE_COVERAGE_FUTURE"];
+	if (ageMs > baselineStaleAfterMs(periodKind)) return ["STALE_BASELINE"];
+	return [];
 }
 
 /**
@@ -202,7 +234,10 @@ export interface AdmissionRequest {
 }
 
 export type AdmissionDenialReason =
+	/** The real 95% ceiling (or the unobserved-tail reserve) would be exceeded. */
 	| "limit"
+	/** A live-row read bound (scan cap / global cap) is reached: not a spend limit. */
+	| "cap"
 	| "baseline"
 	| "bound"
 	| "storage"
@@ -296,11 +331,20 @@ export function withLedgerSelfCost(
 // SQL builders (exported for tests and for the local real-D1 check script)
 // ---------------------------------------------------------------------------
 
-function valuesRows(dimensions: readonly AdmissionDimension[], firstParam: number): string {
+/**
+ * Render the `VALUES` request list for one guard statement.  `columns` is the
+ * width of one row in the requester block (the guard and the diagnosis share
+ * the same four-column shape: dimension_key, period_key, period_kind, units).
+ */
+function valuesRows(
+	dimensions: readonly AdmissionDimension[],
+	firstParam: number,
+	columns: number,
+): string {
 	return dimensions
 		.map((_, index) => {
-			const base = firstParam + index * 5;
-			return `(?${base}, ?${base + 1}, ?${base + 2}, ?${base + 3}, ?${base + 4})`;
+			const base = firstParam + index * columns;
+			return `(${Array.from({ length: columns }, (_, column) => `?${base + column}`).join(", ")})`;
 		})
 		.join(", ");
 }
@@ -313,17 +357,28 @@ function valuesRows(dimensions: readonly AdmissionDimension[], firstParam: numbe
  * number of settled operations — plus the verified baseline's own
  * `used + unobserved_upper_bound`.  Live rows are still counted for the row caps
  * (bounded reads), never for the spend.
+ *
+ * Baseline freshness (issue #54, owner ruling 2026-10-01): a VERIFIED row for
+ * the exact period is the compliance start of that period.  The former
+ * `coverage_end BETWEEN cutoff AND now` conjunct is gone: coverage age is now a
+ * status warning (`baselineWarnings`), not an admission gate.  The 95% invariant
+ * is unaffected because every admitted unit is booked against this same ceiling
+ * inside this same transaction; a stale watermark can only understate
+ * *off-ledger* drift, which is exactly what `unobserved_upper_bound` bounds.
+ * The period-rollover rule is unchanged: a new `period_key` still needs its own
+ * VERIFIED row, so a rollover is never opened by forgetting the old spend.
  */
 export function buildGuardSql(dimensionCount: number): string {
 	const values = valuesRows(
 		Array.from(
 			{ length: dimensionCount },
-			() => ({ dimension_key: "d1.rows_read", units: 0, baseline_cutoff: "" }),
+			() => ({ dimension_key: "d1.rows_read", units: 0 }),
 		),
 		2,
+		4,
 	);
 	const rid = "?1";
-	return `WITH req(dimension_key, period_key, period_kind, units, baseline_cutoff) AS (VALUES ${values})
+	return `WITH req(dimension_key, period_key, period_kind, units) AS (VALUES ${values})
 INSERT INTO quota_reservation_units (reservation_id, dimension_key, period_key, units, state)
 SELECT ${rid}, r.dimension_key, r.period_key, r.units, 'ADMITTED'
 FROM req r
@@ -334,36 +389,34 @@ WHERE (SELECT COUNT(DISTINCT dimension_key) FROM req) = (SELECT COUNT(*) FROM re
 			AND c.provable = 1
 			AND c.threshold_95 IS NOT NULL
 			AND c.period_kind = r.period_kind
-			AND c.catalog_version = ?${2 + dimensionCount * 5}
+			AND c.catalog_version = ?${2 + dimensionCount * 4}
 	)
 	AND EXISTS (
 		SELECT 1 FROM quota_period_baselines b
 		WHERE b.dimension_key = r.dimension_key
 			AND b.period_key = r.period_key
-				AND b.state = 'VERIFIED'
-				AND b.coverage_end BETWEEN r.baseline_cutoff AND ?${5 + dimensionCount * 5}
-				AND b.as_of BETWEEN b.coverage_end AND ?${5 + dimensionCount * 5}
-		)
-		AND COALESCE((
-			SELECT bu.booked_units FROM quota_booked_usage bu
-			WHERE bu.dimension_key = r.dimension_key
-				AND bu.period_key = r.period_key
-		), 0)
-		+ (
-			SELECT b.used + b.unobserved_upper_bound FROM quota_period_baselines b
-			WHERE b.dimension_key = r.dimension_key AND b.period_key = r.period_key
-		)
-		+ r.units <= (
-			SELECT c.threshold_95 FROM quota_dimension_catalog c
-			WHERE c.dimension_key = r.dimension_key
-		)
+			AND b.state = 'VERIFIED'
+	)
+	AND COALESCE((
+		SELECT bu.booked_units FROM quota_booked_usage bu
+		WHERE bu.dimension_key = r.dimension_key
+			AND bu.period_key = r.period_key
+	), 0)
+	+ (
+		SELECT b.used + b.unobserved_upper_bound FROM quota_period_baselines b
+		WHERE b.dimension_key = r.dimension_key AND b.period_key = r.period_key
+	)
+	+ r.units <= (
+		SELECT c.threshold_95 FROM quota_dimension_catalog c
+		WHERE c.dimension_key = r.dimension_key
+	)
 	AND (
 		SELECT COUNT(*) FROM quota_reservation_units AS u INDEXED BY quota_reservation_units_guard
 		WHERE u.dimension_key = r.dimension_key AND u.period_key = r.period_key
-	) + 1 <= ?${3 + dimensionCount * 5}
+	) + 1 <= ?${3 + dimensionCount * 4}
 	AND (
 		SELECT COUNT(*) FROM quota_reservation_units
-	) + (SELECT COUNT(*) FROM req) <= ?${4 + dimensionCount * 5}`;
+	) + (SELECT COUNT(*) FROM req) <= ?${4 + dimensionCount * 4}`;
 }
 
 export interface GuardParams {
@@ -373,26 +426,18 @@ export interface GuardParams {
 		period_key: string;
 		period_kind: string;
 		units: number;
-		baseline_cutoff: string;
 	}[];
 	readonly catalog_version: string;
 	readonly scan_cap: number;
 	readonly live_cap: number;
-	readonly now: string;
 }
 
 export function guardParameterValues(params: GuardParams): unknown[] {
 	const values: unknown[] = [params.reservation_id];
 	for (const entry of params.entries) {
-		values.push(
-			entry.dimension_key,
-			entry.period_key,
-			entry.period_kind,
-			entry.units,
-			entry.baseline_cutoff,
-		);
+		values.push(entry.dimension_key, entry.period_key, entry.period_kind, entry.units);
 	}
-	values.push(params.catalog_version, params.scan_cap, params.live_cap, params.now);
+	values.push(params.catalog_version, params.scan_cap, params.live_cap);
 	return values;
 }
 
@@ -465,30 +510,36 @@ export function bookedParameterValues(args: {
  * refusal to a specific dimension and cause. Read-only and bounded by the
  * request size plus one catalog/baseline/booked row per dimension and the two
  * live-row cap scans.
+ *
+ * Verdicts mirror the guard conjuncts exactly (same order), so a refusal is
+ * attributed to the conjunct that actually failed: `catalog` (missing/stale
+ * catalog row), `baseline` (no VERIFIED row for the exact period), `limit`
+ * (the 95% ceiling or the unobserved-tail reserve would be exceeded) or `cap`
+ * (a live-row read bound).  Coverage age is deliberately NOT a verdict here
+ * (issue #54): aging is a warning, never a denial.
  */
 export function buildDiagnosisSql(dimensionCount: number): string {
 	const values = valuesRows(
 		Array.from(
 			{ length: dimensionCount },
-			() => ({ dimension_key: "d1.rows_read", units: 0, baseline_cutoff: "" }),
+			() => ({ dimension_key: "d1.rows_read", units: 0 }),
 		),
 		1,
+		4,
 	);
-	return `WITH req(dimension_key, period_key, period_kind, units, baseline_cutoff) AS (VALUES ${values})
+	return `WITH req(dimension_key, period_key, period_kind, units) AS (VALUES ${values})
 SELECT r.dimension_key AS dimension_key,
 	CASE
 		WHEN NOT EXISTS (
 			SELECT 1 FROM quota_dimension_catalog c
 			WHERE c.dimension_key = r.dimension_key AND c.provable = 1
 				AND c.threshold_95 IS NOT NULL AND c.period_kind = r.period_kind
-				AND c.catalog_version = ?${1 + dimensionCount * 5}
+				AND c.catalog_version = ?${1 + dimensionCount * 4}
 		) THEN 'catalog'
 		WHEN NOT EXISTS (
 			SELECT 1 FROM quota_period_baselines b
 			WHERE b.dimension_key = r.dimension_key AND b.period_key = r.period_key
-					AND b.state = 'VERIFIED'
-					AND b.coverage_end BETWEEN r.baseline_cutoff AND ?${4 + dimensionCount * 5}
-					AND b.as_of BETWEEN b.coverage_end AND ?${4 + dimensionCount * 5}
+				AND b.state = 'VERIFIED'
 			) THEN 'baseline'
 		WHEN COALESCE((
 				SELECT bu.booked_units FROM quota_booked_usage bu
@@ -505,10 +556,10 @@ SELECT r.dimension_key AS dimension_key,
 		WHEN (
 			SELECT COUNT(*) FROM quota_reservation_units AS u INDEXED BY quota_reservation_units_guard
 			WHERE u.dimension_key = r.dimension_key AND u.period_key = r.period_key
-		) + 1 > ?${2 + dimensionCount * 5} THEN 'cap'
+		) + 1 > ?${2 + dimensionCount * 4} THEN 'cap'
 		WHEN (
 			SELECT COUNT(*) FROM quota_reservation_units
-		) + (SELECT COUNT(*) FROM req) > ?${3 + dimensionCount * 5} THEN 'cap'
+		) + (SELECT COUNT(*) FROM req) > ?${3 + dimensionCount * 4} THEN 'cap'
 		ELSE 'ok'
 	END AS verdict
 FROM req r`;
@@ -671,7 +722,6 @@ export async function admitOperation(
 		period_key: string;
 		period_kind: string;
 		units: number;
-		baseline_cutoff: string;
 	}> = [];
 	for (const dimension of selfCosted) {
 		const specification = dimensionSpec(dimension.dimension_key)!;
@@ -698,7 +748,6 @@ export async function admitOperation(
 			period_key: period.period_key,
 			period_kind: specification.period,
 			units: dimension.units,
-			baseline_cutoff: baselineCutoffFor(specification.period, now),
 		});
 	}
 
@@ -748,10 +797,8 @@ export async function admitOperation(
 					reservation_id: reservationId,
 					entries,
 					catalog_version: catalogVersion,
-						scan_cap: QUOTA_GUARD_SCAN_CAP,
-						live_cap: QUOTA_LIVE_UNITS_CAP,
-						now: admittedAt,
-
+					scan_cap: QUOTA_GUARD_SCAN_CAP,
+					live_cap: QUOTA_LIVE_UNITS_CAP,
 				}),
 			),
 			db.prepare(buildSealSql()).bind(
@@ -800,7 +847,6 @@ async function classifyAdmissionFailure(
 		period_key: string;
 		period_kind: string;
 		units: number;
-		baseline_cutoff: string;
 	}[],
 	catalogVersion: string,
 	admittedAt: string,
@@ -823,12 +869,10 @@ async function classifyAdmissionFailure(
 					entry.period_key,
 					entry.period_kind,
 					entry.units,
-					entry.baseline_cutoff,
 				]),
 				catalogVersion,
-					QUOTA_GUARD_SCAN_CAP,
-					QUOTA_LIVE_UNITS_CAP,
-					admittedAt,
+				QUOTA_GUARD_SCAN_CAP,
+				QUOTA_LIVE_UNITS_CAP,
 			)
 			.all<{ dimension_key: string; verdict: string }>();
 		const results = rows.results ?? [];
@@ -846,8 +890,10 @@ async function classifyAdmissionFailure(
 			return denied("bound", key, "dimension catalog row is missing, stale or not provable");
 		}
 		if (verdict === "cap") {
+			// A live-row read bound, not a spend limit: the caller must not be told
+			// "circuit open" when the account has headroom (issue #54 decoupling).
 			return denied(
-				"limit",
+				"cap",
 				key,
 				"ledger live-row cap reached; refusing to widen the scan bound",
 			);
@@ -1358,6 +1404,12 @@ export interface DimensionStatus {
 	 */
 	readonly booked: number | null;
 	readonly threshold_95: number | null;
+	/**
+	 * Soft aging / coverage warnings (issue #54).  ALWAYS non-blocking: a
+	 * `STALE_BASELINE` here must never be read as a closed dimension.  The
+	 * admission decision lives in `state` + the live ledger.
+	 */
+	readonly warnings: readonly BaselineWarning[];
 	readonly reason: string;
 }
 
@@ -1409,8 +1461,6 @@ export async function quotaStatus(
 ): Promise<QuotaStatus> {
 	const now = context.now ?? new Date();
 	const catalog = context.dimensions ?? QUOTA_DIMENSIONS;
-	const statusAt = now.toISOString();
-	const cutoffFor = (periodKind: string): string => baselineCutoffFor(periodKind, now);
 	const anchor = await readAnchor(db, context.account_id).catch(() => null);
 	const anchorVerified = Boolean(
 		resolvePeriod(dimensionSpec("d1.rows_read")!, { anchor, now }),
@@ -1430,10 +1480,11 @@ export async function quotaStatus(
 				used: null,
 				unobserved_upper_bound: null,
 				reserved: null,
-				booked: null,
-				threshold_95: null,
-				reason: "dimension is not in the billing catalog",
-			});
+					booked: null,
+					threshold_95: null,
+					warnings: [],
+					reason: "dimension is not in the billing catalog",
+				});
 			continue;
 		}
 		const period = resolvePeriod(specification, { anchor, now });
@@ -1444,11 +1495,12 @@ export async function quotaStatus(
 				period_key: null,
 				used: null,
 				unobserved_upper_bound: null,
-				reserved: null,
-				booked: null,
-				threshold_95: specification.threshold_95,
-				reason: "account billing period anchor is not verified",
-			});
+					reserved: null,
+					booked: null,
+					threshold_95: specification.threshold_95,
+					warnings: [],
+					reason: "account billing period anchor is not verified",
+				});
 			continue;
 		}
 		const row = await db
@@ -1475,29 +1527,27 @@ export async function quotaStatus(
 		);
 		const committed =
 			Number(row?.used ?? 0) + Number(row?.unobserved_upper_bound ?? 0) + Number(booked ?? 0);
-			const baselineFresh = Boolean(
-				row?.coverage_end &&
-					row.coverage_end >= cutoffFor(specification.period) &&
-					row.coverage_end <= statusAt &&
-					row.as_of >= row.coverage_end &&
-					row.as_of <= statusAt,
-			);
-			const baselineReason =
-				row && row.state === "VERIFIED"
-					? !baselineFresh
-						? "baseline coverage is missing, stale or future-dated"
-						: committed >= Number(specification.threshold_95)
-							? "verified headroom exhausted (baseline plus booked)"
-							: "verified baseline with headroom"
-					: `baseline state is ${row ? row.state : "missing"}`;
+		// Aging is a warning, never a gate (issue #54): only a VERIFIED row with
+		// real headroom can be OPEN, and a stale watermark does not change that.
+		const warnings: readonly BaselineWarning[] =
+			row && row.state === "VERIFIED"
+				? baselineWarnings(row.coverage_end, specification.period, now)
+				: [];
+		const baselineReason =
+			row && row.state === "VERIFIED"
+				? committed >= Number(specification.threshold_95)
+					? "verified headroom exhausted (baseline plus booked)"
+					: warnings.length > 0
+						? `verified baseline with headroom; ${warnings.join(", ")}`
+						: "verified baseline with headroom"
+				: `baseline state is ${row ? row.state : "missing"}`;
 		dimensions.push({
 			dimension_key: dimension.key,
 			state:
 				row &&
 					row.state === "VERIFIED" &&
-					baselineFresh &&
 					specification.provable &&
-				committed < Number(specification.threshold_95)
+					committed < Number(specification.threshold_95)
 					? "OPEN"
 					: "CLOSED",
 			period_key: period.period_key,
@@ -1506,6 +1556,7 @@ export async function quotaStatus(
 			reserved: reserved ? Number(reserved.reserved) : null,
 			booked,
 			threshold_95: specification.threshold_95,
+			warnings,
 			reason:
 				row && row.state === "VERIFIED" && !specification.provable
 					? "dimension has no provable per-operation bound"
