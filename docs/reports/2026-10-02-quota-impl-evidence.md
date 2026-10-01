@@ -162,7 +162,7 @@ $ cd D:/quantpro-collector && npm test
 ℹ duration_ms 36039.16
 ```
 
-对照基线（同一命令、`git stash` 掉本次全部改动后）：
+对照基线（`git worktree add D:/qp-pristine-wt 9ef7d6a` 建独立工作树，跑同一命令）：
 
 ```
 ℹ tests 457
@@ -172,10 +172,22 @@ $ cd D:/quantpro-collector && npm test
 
 即：**净增 10 项测试，0 回归**。
 
-> 说明：首次全量运行曾出现 `tests/oauth-local-lifecycle.test.mjs` 一次失败
-> （`local D1 setup must succeed`，workerd 冷启动/临时目录竞争）。隔离复跑该文件
-> （`npx node --experimental-strip-types --test tests/oauth-local-lifecycle.test.mjs`）
-> 3 项全绿，随后全量复跑 467 全绿；该文件未被本次改动触及。
+复现次数统计（同一台机器、同一命令）：
+
+| 树 | 运行次数 | 通过 | 失败 | 备注 |
+|---|---|---|---|---|
+| 本改动（467 项） | 27 | 25 | **2** | 两次失败均为 `oauth-local-lifecycle.test.mjs` 的 workerd 冷启动超时 |
+| 改动前（457 项，`9ef7d6a`） | 23 | 23 | 0 | 未观察到该超时 |
+
+**如实记录这个不一致**：该文件未被本次改动触及，其 3 项在隔离复跑时全绿
+（`npx node --experimental-strip-types --test tests/oauth-local-lifecycle.test.mjs` × 3 次全绿），
+且失败形态是 `local Worker did not become ready: fetch failed`（`tests/oauth-local-lifecycle.test.mjs:49`
+的 120×250ms 固定等待窗超时），不是断言失败。两次失败时全量用时为 57.0s / 43.4s，
+而干净通过时为 27–38s —— 与机器负载相关（`wrangler dev` 冷启动被拖长）。
+
+本改动确实让全量套件变长（新增 10 项测试 + 更大的 guard SQL 文本），因此在同一负载下更靠近
+那个固定等待窗。**结论：这是既有的负载敏感型测试脆弱性被放大概率，不是本次改动引入的功能缺陷；
+但依据当前证据无法完全排除本改动有贡献，故不改其超时，仅如实记录。**
 
 ### 4.3 类型检查
 
