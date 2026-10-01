@@ -160,7 +160,27 @@ async function startWorker({
 	};
 }
 
+// nodejs/node#64322: Node 24 on Windows can fast-fail inside libuv teardown
+// (exit code 3221226505 = 0xC0000409, stderr "Assertion failed: !(handle->flags
+// & UV_HANDLE_CLOSING) ... src\win\async.c") AFTER the wrangler command has
+// already finished its work; no released Node ships the fix.  Retry only that
+// exact crash signature, at most 2 times; every other failure still fails the
+// test.  "d1 migrations apply" is idempotent so a retry is safe, and a
+// re-executed INSERT after a teardown crash is backstopped by the strong
+// assertions later in the test.
 async function runLocalD1(stateDir, command, args = []) {
+	for (let attempt = 1; ; attempt += 1) {
+		const { exitCode, output } = await runLocalD1Once(stateDir, command, args);
+		if (exitCode === 0) return;
+		const libuvTeardownCrash =
+			exitCode === 3221226505 && output.join("").includes("Assertion failed");
+		if (!libuvTeardownCrash || attempt > 2) {
+			assert.equal(exitCode, 0, `local D1 setup must succeed: ${output.join("").slice(-4_000)}`);
+		}
+	}
+}
+
+async function runLocalD1Once(stateDir, command, args = []) {
 	const output = [];
 	const child = spawn(
 		process.execPath,
@@ -180,7 +200,7 @@ async function runLocalD1(stateDir, command, args = []) {
 	child.stdout.on("data", (chunk) => output.push(String(chunk)));
 	child.stderr.on("data", (chunk) => output.push(String(chunk)));
 	const exitCode = await new Promise((resolve) => child.once("exit", resolve));
-	assert.equal(exitCode, 0, `local D1 setup must succeed: ${output.join("").slice(-4_000)}`);
+	return { exitCode, output };
 }
 
 function pkceChallenge(verifier = VERIFIER) {
