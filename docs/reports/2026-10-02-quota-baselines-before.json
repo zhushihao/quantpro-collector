@@ -1,0 +1,177 @@
+[
+  {
+    "results": [
+      {
+        "dimension_key": "ai.neurons",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 500,
+        "as_of": "2026-09-29T20:44:17.705Z",
+        "coverage_end": "2026-09-29T20:44:17.705Z",
+        "recorded_at": "2026-09-29T17:38:28.944Z"
+      },
+      {
+        "dimension_key": "ai.neurons",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 200,
+        "as_of": "2026-09-30T22:25:10.306Z",
+        "coverage_end": "2026-09-30T22:25:10.306Z",
+        "recorded_at": "2026-09-30T01:03:43.108Z"
+      },
+      {
+        "dimension_key": "ai.neurons",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 200,
+        "as_of": "2026-10-01T15:29:38.065Z",
+        "coverage_end": "2026-10-01T15:29:38.065Z",
+        "recorded_at": "2026-10-01T01:05:31.283Z"
+      },
+      {
+        "dimension_key": "d1.rows_read",
+        "state": "VERIFIED",
+        "used": 491844015,
+        "unobserved_upper_bound": 131000000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "d1.rows_written",
+        "state": "VERIFIED",
+        "used": 10686563,
+        "unobserved_upper_bound": 1570000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "d1.storage_gb_month",
+        "state": "VERIFIED",
+        "used": 35,
+        "unobserved_upper_bound": 270,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "kv.deletes",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 10000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "kv.lists",
+        "state": "VERIFIED",
+        "used": 2,
+        "unobserved_upper_bound": 500,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "kv.reads",
+        "state": "VERIFIED",
+        "used": 2624,
+        "unobserved_upper_bound": 26600,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "kv.storage_gb_month",
+        "state": "VERIFIED",
+        "used": 1,
+        "unobserved_upper_bound": 10,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "kv.writes",
+        "state": "VERIFIED",
+        "used": 2279,
+        "unobserved_upper_bound": 23100,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "r2.class_a",
+        "state": "VERIFIED",
+        "used": 96504,
+        "unobserved_upper_bound": 153000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "r2.class_b",
+        "state": "VERIFIED",
+        "used": 39648,
+        "unobserved_upper_bound": 3700,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "r2.storage_gb_month",
+        "state": "VERIFIED",
+        "used": 160,
+        "unobserved_upper_bound": 900,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "vectorize.queried_dims",
+        "state": "VERIFIED",
+        "used": 824320,
+        "unobserved_upper_bound": 2125000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "workers.cpu_ms",
+        "state": "VERIFIED",
+        "used": 1148306,
+        "unobserved_upper_bound": 3014000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      },
+      {
+        "dimension_key": "workers.requests",
+        "state": "VERIFIED",
+        "used": 101409,
+        "unobserved_upper_bound": 266000,
+        "as_of": "2026-09-30T03:30:51Z",
+        "coverage_end": "2026-09-30T03:30:51Z",
+        "recorded_at": "2026-09-30T03:30:51Z"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "APAC",
+      "served_by_colo": "HKG",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.4568
+      },
+      "duration": 0.4568,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 84803584,
+      "rows_read": 17,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

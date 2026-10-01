@@ -1,0 +1,211 @@
+[
+  {
+    "results": [
+      {
+        "dimension_key": "ai.neurons",
+        "period_key": "utc-day:2026-09-29",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 500,
+        "source_version": "quota-catalog/2026-09-30.4",
+        "as_of": "2026-09-29T20:44:17.705Z",
+        "coverage_end": "2026-09-29T20:44:17.705Z",
+        "recorded_at": "2026-09-29T17:38:28.944Z"
+      },
+      {
+        "dimension_key": "ai.neurons",
+        "period_key": "utc-day:2026-09-30",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 200,
+        "source_version": "quota-catalog/2026-09-30.5",
+        "as_of": "2026-09-30T22:25:10.306Z",
+        "coverage_end": "2026-09-30T22:25:10.306Z",
+        "recorded_at": "2026-09-30T01:03:43.108Z"
+      },
+      {
+        "dimension_key": "ai.neurons",
+        "period_key": "utc-day:2026-10-01",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 200,
+        "source_version": "quota-catalog/2026-09-30.5",
+        "as_of": "2026-10-01T16:40:22.685Z",
+        "coverage_end": "2026-10-01T16:40:22.685Z",
+        "recorded_at": "2026-10-01T01:05:31.283Z"
+      },
+      {
+        "dimension_key": "d1.rows_read",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 491844015,
+        "unobserved_upper_bound": 131000000,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "d1.rows_written",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 10686563,
+        "unobserved_upper_bound": 2671641,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "d1.storage_gb_month",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 50,
+        "unobserved_upper_bound": 270,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "kv.deletes",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 0,
+        "unobserved_upper_bound": 10000,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "kv.lists",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 2,
+        "unobserved_upper_bound": 500,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "kv.reads",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 2680,
+        "unobserved_upper_bound": 26600,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "kv.storage_gb_month",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 1,
+        "unobserved_upper_bound": 10,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "kv.writes",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 2279,
+        "unobserved_upper_bound": 23100,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "r2.class_a",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 96504,
+        "unobserved_upper_bound": 153000,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "r2.class_b",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 39648,
+        "unobserved_upper_bound": 9912,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "r2.storage_gb_month",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 335,
+        "unobserved_upper_bound": 900,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "vectorize.queried_dims",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 4517888,
+        "unobserved_upper_bound": 8472117,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "workers.cpu_ms",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 1570302,
+        "unobserved_upper_bound": 3014000,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      },
+      {
+        "dimension_key": "workers.requests",
+        "period_key": "cycle:2026-09-13T15:01:34Z..2026-10-13T00:00:00Z",
+        "state": "VERIFIED",
+        "used": 130092,
+        "unobserved_upper_bound": 266000,
+        "source_version": "reconcile_usage_20261001T1650Z (docs/reports/2026-10-02-quota-unblock-raw.json)",
+        "as_of": "2026-10-01T16:50:06.636Z",
+        "coverage_end": "2026-10-01T16:50:06.636Z",
+        "recorded_at": "2026-10-01T16:50:06.636Z"
+      }
+    ],
+    "success": true,
+    "meta": {
+      "served_by": "v3-prod",
+      "served_by_region": "APAC",
+      "served_by_colo": "HKG",
+      "served_by_primary": true,
+      "timings": {
+        "sql_duration_ms": 0.3279
+      },
+      "duration": 0.3279,
+      "changes": 0,
+      "last_row_id": 0,
+      "changed_db": false,
+      "size_after": 84803584,
+      "rows_read": 17,
+      "rows_written": 0,
+      "total_attempts": 1
+    }
+  }
+]

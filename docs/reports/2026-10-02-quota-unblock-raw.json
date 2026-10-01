@@ -1,0 +1,70 @@
+{
+ "as_of": "2026-10-01T16:50:06.636Z",
+ "cycle": {
+  "start": "2026-09-13T15:01:34Z",
+  "end": "2026-10-13T00:00:00Z"
+ },
+ "anchor_reverified": true,
+ "billable_usage": {
+  "R2 Storage Class B Operations (First 10M included)": 2490.0,
+  "R2 Storage Class A Operations (First 1M included)": 72678.0,
+  "R2 Data Storage (First 10GB-Month included)": 0.21435362640000002,
+  "D1 - Storage GB-mo (first 5GB included)": 0.004424527658333333,
+  "Workers CPU ms (first 30M are included)": 426085.0,
+  "Vectorize - Stored Dimensions (First 10 million dimension-month included)": 1373265.0666666667,
+  "Regular Twitch Neurons (RTN)": 3819.0,
+  "KV Read Operations (First 10M is included)": 41.0,
+  "D1 - Rows Read (first 25 billion included)": 20955425.0,
+  "D1 - Rows Written (first 50 million included)": 802909.0,
+  "Vectorize - Queried Dimensions (First 50 million included)": 1008640.0,
+  "Worker Build Minutes (6000 minutes included per month)": 11.0,
+  "KV Storage (GB, First GB is included)": 1.3027777777777778e-08,
+  "Workers Standard Requests (first 10M are included)": 30751.0
+ },
+ "workers_day_grain": {
+  "requests": 130092,
+  "cpu_ms": 1570302
+ },
+ "d1_day_grain": {
+  "rows_read": 67900807,
+  "rows_written": 1419652
+ },
+ "d1_queries_dataset": {
+  "rows_read": 67414196,
+  "rows_written": 1419652
+ },
+ "d1_storage_bytes_max": 84803580,
+ "kv_ops_day_grain": {
+  "write": 2279,
+  "read": 2680,
+  "list": 2
+ },
+ "kv_storage_bytes_max": 2345,
+ "r2_ops_hour_grain": {
+  "class_a": 73369,
+  "class_b": 2495
+ },
+ "r2_storage_bytes_max": 564897442,
+ "vectorize_queried_dims_day_grain": 4517888,
+ "vectorize_queried_dims_billable": 1008640.0,
+ "vectorize_stored_dims_max": 53067776,
+ "ai_neurons_cycle": 13910.298,
+ "fresh_observations": {
+  "workers.requests": 130092,
+  "workers.cpu_ms": 1570302,
+  "d1.rows_read": 67900807,
+  "d1.rows_written": 1419652,
+  "d1.storage_gb_month": 50,
+  "kv.reads": 2680,
+  "kv.writes": 2279,
+  "kv.deletes": 0,
+  "kv.lists": 2,
+  "kv.storage_gb_month": 0,
+  "r2.class_a": 73369,
+  "r2.class_b": 2495,
+  "r2.storage_gb_month": 335,
+  "vectorize.queried_dims": 4517888
+ },
+ "elapsed_days": 18.075,
+ "remaining_days": 11.299
+}
