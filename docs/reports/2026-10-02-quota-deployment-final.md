@@ -4,7 +4,7 @@
 **日期**：2026-10-02（本机 CST）/ 2026-10-01（UTC）
 **环境**：RESEARCH（`D:\quantpro-collector`，本机）
 **结论**：阶段 1–4 全部完成；自动对账已挂 12h 计划任务并经调度器实跑验证；
-生产已部署 `cdb9d5c1`；空心跳在 enforce 模式下 100% 放行（带回执）。
+生产已部署 `6cd9199`（版本 `a1ae5b45`）；空心跳在 enforce 模式下 100% 放行（带回执）。
 **期间发生一次真实故障并已修复闭合**（见 §5，必读）。
 
 ---
@@ -18,7 +18,11 @@
 | 3 自动对账 | `scripts/auto_reconcile_quota.py` + 12h 计划任务 | 完成（提交 `cdb9d5c`） |
 | 4 生产部署 | `npm run deploy`（携带 DEPLOYED_GIT_SHA） | 完成 |
 
-**提交链**：`9ef7d6a` → `bac40b5` → `330a944` → `cdb9d5c`（四者均已推送 `origin/main`）
+**提交链**：`9ef7d6a` → `bac40b5` → `330a944` → `cdb9d5c` → `6cd9199`（五者均已推送 `origin/main`）
+
+> 说明：本次共部署两次。第一次部署的是 `cdb9d5c`（阶段 3 代码 + 修复）；
+> 随后记录本文档产生的提交 `6cd9199` 使 HEAD 前移，为使线上 build SHA 与 commit 严格一致
+> （任务验收项之一），又部署了一次，**线上最终版本 = `a1ae5b45` / `6cd9199`**。
 
 ---
 
@@ -82,9 +86,11 @@ NextRunTime    : 10/02/2026 09:10:00
 
 ### 3.1 部署
 
+最终一次部署（HEAD = `6cd9199`）的输出：
+
 ```
 $ cd D:/quantpro-collector && npm run deploy
-[deploy] DEPLOYED_GIT_SHA=cdb9d5c129d53e81f466690b81281cf537036508
+[deploy] DEPLOYED_GIT_SHA=6cd919990a58966206425dfe184ad05d3cefc70a
 Total Upload: 1988.58 KiB / gzip: 370.45 KiB
 Uploaded cn-hk-quotes-mcp (8.91 sec)
 Deployed cn-hk-quotes-mcp triggers (0.97 sec)
@@ -95,22 +101,22 @@ Deployed cn-hk-quotes-mcp triggers (0.97 sec)
   schedule: 4,9,24,29 8 * * mon-fri
   schedule: 30 20 * * *
   schedule: 40 16 * * *
-Current Version ID: a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84
+Current Version ID: a1ae5b45-5bdc-4046-b9b3-427b03689e17
 ```
 
 ### 3.2 只读验证（任务要求四项）
 
 | 检查项 | 结果 | 证据 |
 |---|---|---|
-| version 已更新 | ✅ | `cloudflare_version_id: a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84`，时间戳 `2026-10-01T18:49:42.052162Z` |
-| build SHA 与 commit 一致 | ✅ | `service_build_sha: cdb9d5c129d53e81f466690b81281cf537036508` = `git rev-parse HEAD` |
+| version 已更新 | ✅ | `cloudflare_version_id: a1ae5b45-5bdc-4046-b9b3-427b03689e17`，时间戳 `2026-10-01T18:52:23.267443Z` |
+| build SHA 与 commit 一致 | ✅ | `service_build_sha: 6cd919990a58966206425dfe184ad05d3cefc70a` = `git rev-parse HEAD` |
 | mode 仍为 enforce | ✅ | `quota.mode: "enforce"` |
-| 6 条定时任务均在 | ✅ | 部署输出列出 6 条（`55 0` / `39,44,49 1,2,3,5,6` / `24,29,54,59 7` / `4,9,24,29 8` / `30 20` / `40 16`）；`wrangler deployments status` 显示该版本 100% 生效 |
+| 6 条定时任务均在 | ✅ | 两次部署输出均列出 6 条（`55 0` / `39,44,49 1,2,3,5,6` / `24,29,54,59 7` / `4,9,24,29 8` / `30 20` / `40 16`）；`wrangler deployments status` 显示该版本 100% 生效 |
 
-> 说明：`get_gateway_status` 第一次读到的仍是上一版 SHA（`330a944` / `f0869fa6`）。
-> 这是边缘缓存；随后复读即为新值（上表）。**独立佐证**：期间写入的生产 run 行
-> 自行记录了 `collector_build_sha = cdb9d5c1...` 与 `cloudflare_version_id = a2b0f7fe-...`，
-> 与部署结果完全一致，排除"只读到了缓存"的可能。
+> 说明：`get_gateway_status` 偶有边缘缓存，会短暂读到上一版 SHA。
+> **独立佐证**（排除"只读到缓存"）：部署后写入的生产 run 行自行记录了
+> `collector_build_sha = 6cd91999...` 与 `cloudflare_version_id = a1ae5b45-...`（见 §4），
+> 直接证明新版本正在服务。
 
 ### 3.3 部署后新增能力可见
 
@@ -132,18 +138,19 @@ Current Version ID: a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84
 
 ## 4. 生产实测：空心跳 100% 放行
 
-`submit_run_envelope`（enforce 模式、仅 `task_name` + `summary`、无 `channel_payload`）：
+对**最终部署版本**（`a1ae5b45` / `6cd9199`）执行 `submit_run_envelope`
+（enforce 模式、仅 `task_name` + `summary`、无 `channel_payload`）：
 
 ```json
 {
   "status": "ENVELOPE_RECORDED",
-  "run_id": "run_8aa7c9f330d141f4baba1d45e61cca24",
-  "task_name": "industry-research",
+  "run_id": "run_1584525b5f564dd7b6a382cc619acf17",
+  "task_name": "company-facts",
   "outcome": "SILENT",
   "blocker_code": null,
   "envelope_key": "HB:2026-10-01T18",
-  "slot": "02:45",
-  "slot_date": "2026-10-02",
+  "slot": null,
+  "slot_date": null,
   "ledger": { "status": "SKIPPED_HEARTBEAT", "channel": null },
   "fresh_delta_count": 0,
   "event_count": 0,
@@ -154,21 +161,29 @@ Current Version ID: a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84
 
 - **无 `isError`、无 `QUOTA_GUARD_UNAVAILABLE`** —— 与 2026-10-01 事故现场
   （`request_id=5cc21320931e4024806341cca7df0ed5` 被拒）形成直接对照。
-- 回执记录 **`request_id` 字段在 MCP 信封外层**；本回执的定位键为
-  **`run_id = run_8aa7c9f330d141f4baba1d45e61cca24`** 与
-  **`envelope_key = HB:2026-10-01T18`**。
-- 落库核对（生产 D1 实读）：
+- 回执定位键：**`run_id = run_1584525b5f564dd7b6a382cc619acf17`** 与
+  **`envelope_key = HB:2026-10-01T18`**（MCP 回执本身不含 `request_id` 字段，故以
+  run_id + envelope_key 作为可追溯标识）。
+- 落库核对（生产 D1 实读，两次心跳并列）：
 
 ```
-run_id                = run_8aa7c9f330d141f4baba1d45e61cca24
+run_id                = run_1584525b5f564dd7b6a382cc619acf17   (最终版本)
+task_name             = company-facts
 outcome               = SILENT
 envelope_key          = HB:2026-10-01T18
 fresh_delta_count     = 0
-created_at            = 2026-10-01T18:50:50.772Z
-prompt_version        = cdb9d5c129d53e81f466690b81281cf537301... (= 部署 SHA)
-collector_build_sha   = cdb9d5c129d53e81f466690b81281cf537301...
+created_at            = 2026-10-01T18:53:15.873Z
+collector_build_sha   = 6cd919990a58966206425dfe184ad05d3cefc70a   (= 部署 SHA)
+cloudflare_version_id = a1ae5b45-5bdc-4046-b9b3-427b03689e17
+
+run_id                = run_8aa7c9f330d141f4baba1d45e61cca24   (前一版本)
+task_name             = industry-research
+collector_build_sha   = cdb9d5c129d53e81f466690b81281cf537036508
 cloudflare_version_id = a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84
 ```
+
+同一 UTC 小时内重复的空心跳会走 `ENVELOPE_REPLAY`（幂等复用同一 run 行，同样不拒绝）——
+这是设计内的幂等行为，不是放行失败。
 
 ---
 
@@ -245,7 +260,7 @@ powershell -NoProfile -Command "Get-ScheduledTaskInfo -TaskName 'QuantPro_QuotaA
 # 阶段4：部署与验证
 npm run deploy
 npx wrangler deployments status
-npx wrangler versions view a2b0f7fe-25ce-4c23-8bf5-5ef79c57db84
+npx wrangler versions view a1ae5b45-5bdc-4046-b9b3-427b03689e17
 
 # 阶段2：单测与类型
 npm test                    # 467 passed / 0 failed
