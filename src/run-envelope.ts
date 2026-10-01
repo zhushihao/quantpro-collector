@@ -7,13 +7,12 @@
 // means a heartbeat: no ledger write, one SILENT run row.
 import { z } from "zod";
 
-import { AUTOMATION_REGISTRY_KEYS, READ_ONLY_TASKS } from "./automation-run-ledger.ts";
 import {
+	AUTOMATION_REGISTRY_KEYS,
+	READ_ONLY_TASKS,
 	computeTimeliness,
 	ensureRunEnvelopeTables,
-	readScheduleRows,
-	resolveSlotBinding,
-} from "./automation-schedule.ts";
+} from "./automation-run-ledger.ts";
 import { getStateWriteReceipt } from "./state-receipts.ts";
 import { StateGatewayError } from "./state-gateway.ts";
 import {
@@ -27,15 +26,7 @@ import {
 } from "./state-commands.ts";
 import { MARKET_LEDGER_SLOT_SCHEMA } from "./market-ledger.ts";
 
-export {
-	computeTimeliness,
-	deriveMissedSlots,
-	deriveMissedSlotsFromRows,
-	ensureRunEnvelopeTables,
-	readScheduleRows,
-	resolveSlotBinding,
-	runScheduleReconciliation,
-} from "./automation-schedule.ts";
+export { computeTimeliness, ensureRunEnvelopeTables } from "./automation-run-ledger.ts";
 
 const ENVELOPE_SUMMARY_SCHEMA = z.string().min(1).max(1200);
 
@@ -261,15 +252,6 @@ async function readRunV3(
 	);
 }
 
-type WindowMinuteLookup = (taskName: string) => number | null;
-
-function windowMinuteLookup(rows: Awaited<ReturnType<typeof readScheduleRows>>): WindowMinuteLookup {
-	return (taskName) => {
-		const row = rows.find((candidate) => candidate.task_name === taskName && candidate.enabled);
-		return row ? row.window_minutes : null;
-	};
-}
-
 type LedgerOutcome =
 	| { kind: "heartbeat" }
 	| { kind: "pre_write_block" }
@@ -309,7 +291,6 @@ function ledgerFromReceipt(
 async function receiptFromRow(
 	db: D1Database,
 	row: StoredRunV3Row,
-	windowMinutesFor: WindowMinuteLookup,
 ): Promise<RunEnvelopeReceipt> {
 	const receipt = row.write_key ? await getStateWriteReceipt(db, row.write_key) : null;
 	return {
@@ -319,19 +300,16 @@ async function receiptFromRow(
 		outcome: row.outcome,
 		blocker_code: row.blocker_code,
 		envelope_key: row.envelope_key,
-		slot: row.slot,
-		slot_date: row.slot_date,
+		// Legacy run slots were guessed from receipt time, not host facts.
+		slot: null,
+		slot_date: null,
 		ledger: ledgerFromReceipt(row, receipt),
 		fresh_delta_count: row.fresh_delta_count,
 		event_count: row.event_count,
 		notification_required: (row.fresh_delta_count ?? 0) > 0,
 		notification_semantics: "SERVER_DERIVED_FLOOR",
 		delivery: "MODEL_DELIVERY_UNVERIFIED",
-		timeliness: computeTimeliness(
-			row.as_of,
-			Date.parse(row.received_at),
-			windowMinutesFor(row.task_name),
-		),
+		timeliness: computeTimeliness(row.as_of, Date.parse(row.received_at)),
 	};
 }
 
@@ -564,8 +542,6 @@ export async function processRunEnvelope(input: {
 		}
 		await ensureRunEnvelopeTables(input.db);
 		const envelopeKey = `E:INVALID:${await sha256Hex(raw)}`;
-		const scheduleRows = await readScheduleRows(input.db);
-		const binding = resolveSlotBinding(scheduleRows, taskName, receivedAtMs);
 		const rawSummary =
 			raw && typeof raw === "object" && !Array.isArray(raw)
 				? (raw as Record<string, unknown>).summary
@@ -576,19 +552,15 @@ export async function processRunEnvelope(input: {
 			taskName,
 			envelopeKey,
 			receivedAt,
-			slot: binding?.slot ?? null,
-			slotDate: binding?.slot_date ?? null,
+			slot: null,
+			slotDate: null,
 			blockerCode,
 			summary: typeof rawSummary === "string" ? rawSummary.slice(0, 1200) : null,
 			collectorBuildSha: input.collectorBuildSha,
 			cloudflareVersionId: input.cloudflareVersionId,
 		});
 		if (inserted.replay) {
-			return receiptFromRow(
-				input.db,
-				inserted.replay,
-				windowMinuteLookup(scheduleRows),
-			);
+			return receiptFromRow(input.db, inserted.replay);
 		}
 		throw new RunEnvelopeError(
 			{
@@ -605,9 +577,6 @@ export async function processRunEnvelope(input: {
 	const envelope = parsed.data;
 	const taskName = envelope.task_name;
 	await ensureRunEnvelopeTables(input.db);
-	const scheduleRows = await readScheduleRows(input.db);
-	const windowMinutesFor = windowMinuteLookup(scheduleRows);
-	const binding = resolveSlotBinding(scheduleRows, taskName, receivedAtMs);
 
 	// ---- Narrow-field combination gate (issue #47 items 2/3) ----------------
 	// blocked_by (pre-write refusal) and observations (READ_ONLY self-declared
@@ -632,15 +601,15 @@ export async function processRunEnvelope(input: {
 			taskName,
 			envelopeKey,
 			receivedAt,
-			slot: binding?.slot ?? null,
-			slotDate: binding?.slot_date ?? null,
+			slot: null,
+			slotDate: null,
 			blockerCode,
 			summary: envelope.summary,
 			collectorBuildSha: input.collectorBuildSha,
 			cloudflareVersionId: input.cloudflareVersionId,
 		});
 		if (inserted.replay) {
-			return receiptFromRow(input.db, inserted.replay, windowMinuteLookup(scheduleRows));
+			return receiptFromRow(input.db, inserted.replay);
 		}
 		throw new RunEnvelopeError(
 			{
@@ -695,7 +664,7 @@ export async function processRunEnvelope(input: {
 	// ---- Replay gate (spec §1.4 step 3) -------------------------------------
 	const existing = await readRunV3(input.db, taskName, envelopeKey);
 	if (existing && existing.outcome !== "UNKNOWN") {
-		return receiptFromRow(input.db, existing, windowMinutesFor);
+		return receiptFromRow(input.db, existing);
 	}
 	let runId = existing?.run_id ?? newRunId();
 
@@ -708,18 +677,12 @@ export async function processRunEnvelope(input: {
 			runId,
 			envelopeKey,
 			receivedAt,
-			slot: binding?.slot ?? null,
-			slotDate: binding?.slot_date ?? null,
-			// The first-receipt row carries the envelope's actual production_ref
-			// (MARKET only): a later BLOCKED/FAILED terminal must not erase which
-			// version was submitted. Non-MARKET channels/heartbeats keep null.
-			// MARKET rows keep the envelope's actual production_ref (5261ebf);
-			// every other row falls back to the installed deployment ref so the
-			// observer never reads null as "version unknown" (issue #47 item 4).
-			promptVersion:
-				payload && payload.channel === "MARKET"
-					? payload.production_ref
-					: input.collectorBuildSha ?? null,
+			slot: null,
+			slotDate: null,
+			// MARKET carries the actual submitted Prompt ref, even on failure.
+			// Non-MARKET has no Prompt provenance in the existing contract:
+			// unknown stays null; the Collector build is a different fact.
+			promptVersion: payload?.channel === "MARKET" ? payload.production_ref : null,
 			collectorBuildSha: input.collectorBuildSha,
 			cloudflareVersionId: input.cloudflareVersionId,
 		});
@@ -740,7 +703,7 @@ export async function processRunEnvelope(input: {
 	if (insertState === "conflicted") {
 		const winner = await readRunV3(input.db, taskName, envelopeKey);
 		if (winner && winner.outcome !== "UNKNOWN") {
-			return receiptFromRow(input.db, winner, windowMinutesFor);
+			return receiptFromRow(input.db, winner);
 		}
 		if (!winner) {
 			throw new RunEnvelopeError(
@@ -909,8 +872,8 @@ export async function processRunEnvelope(input: {
 			write_key: null,
 			as_of: null,
 			received_at: receivedAt,
-			slot: binding?.slot ?? null,
-			slot_date: binding?.slot_date ?? null,
+			slot: null,
+			slot_date: null,
 			fresh_delta_count: null,
 			event_count: null,
 			outcome: "UNKNOWN",
@@ -922,8 +885,8 @@ export async function processRunEnvelope(input: {
 		channel,
 		writeKey,
 		asOf,
-		slot: binding?.slot ?? null,
-		slotDate: binding?.slot_date ?? null,
+		slot: null,
+		slotDate: null,
 		freshDeltaCount,
 		eventCount,
 		outcome,
@@ -946,8 +909,8 @@ export async function processRunEnvelope(input: {
 		outcome,
 		blocker_code: blockerCode,
 		envelope_key: envelopeKey,
-		slot: binding?.slot ?? null,
-		slot_date: binding?.slot_date ?? null,
+		slot: null,
+		slot_date: null,
 		ledger: {
 			status: ledgerStatus,
 			channel,
@@ -960,6 +923,6 @@ export async function processRunEnvelope(input: {
 		notification_required: (freshDeltaCount ?? 0) > 0,
 		notification_semantics: "SERVER_DERIVED_FLOOR",
 		delivery: "MODEL_DELIVERY_UNVERIFIED",
-		timeliness: computeTimeliness(asOf, receivedAtMs, windowMinutesFor(taskName)),
+		timeliness: computeTimeliness(asOf, receivedAtMs),
 	};
 }

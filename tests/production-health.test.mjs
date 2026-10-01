@@ -16,7 +16,7 @@ registerHooks({
 
 import { getProductionHealthSnapshot } from "../src/production-health.ts";
 import { AUTOMATION_REGISTRY_KEYS } from "../src/automation-run-ledger.ts";
-import { ensureRunEnvelopeTables } from "../src/automation-schedule.ts";
+import { ensureRunEnvelopeTables } from "../src/automation-run-ledger.ts";
 import { createResearchWorkflowDb } from "./helpers/d1-sqlite-shim.mjs";
 
 async function insertV3Row(db, overrides = {}) {
@@ -103,6 +103,8 @@ test("health snapshot: seeded-but-empty ledger reports six registry rows as UNKN
 	);
 	for (const task of snapshot.tasks) {
 		assert.equal(task.latest_run_id, null);
+		assert.equal(task.latest_received_at, null);
+		assert.equal(task.seconds_since_last_received, null);
 		assert.equal(task.outcome, null);
 		assert.equal(task.prompt_version, null);
 		assert.equal(task.schedule_basis, "UNKNOWN");
@@ -112,7 +114,7 @@ test("health snapshot: seeded-but-empty ledger reports six registry rows as UNKN
 	assert.ok(tally.selects <= 6, `bounded reads only, got ${tally.selects}`);
 });
 
-test("health snapshot: stored latest row projects facts including prompt_version and window basis", async () => {
+test("health snapshot: real receipt time and age are shown without false Prompt or schedule provenance", async () => {
 	const db = createResearchWorkflowDb();
 	await ensureRunEnvelopeTables(db);
 	await insertV3Row(db, { prompt_version: "c".repeat(40) });
@@ -120,10 +122,14 @@ test("health snapshot: stored latest row projects facts including prompt_version
 	const industry = snapshot.tasks.find((task) => task.registry_key === "industry-research");
 	assert.equal(industry.latest_run_id, "run_" + "a".repeat(32));
 	assert.equal(industry.outcome, "COMPLETED");
-	assert.equal(industry.prompt_version, "c".repeat(40));
+	assert.equal(industry.prompt_version, null);
 	assert.equal(industry.cloudflare_version_id, "cf-ver-1");
-	// 2026-09-29T02:50Z is Shanghai 10:50, inside [10:45, 10:45+40).
-	assert.equal(industry.schedule_basis, "IN_WINDOW");
+	assert.equal(industry.latest_received_at, "2026-09-29T02:50:00Z");
+	assert.equal(industry.seconds_since_last_received,
+		Math.floor((Date.parse(snapshot.as_of) - Date.parse(industry.latest_received_at)) / 1000));
+	assert.equal(industry.schedule_basis, "UNKNOWN");
+	assert.equal(industry.slot, null);
+	assert.equal(industry.slot_date, null);
 	assert.equal(snapshot.cloudflare_version_id, "ver-x");
 	// Other tasks stay UNKNOWN facts, never synthesized failures.
 	const central = snapshot.tasks.find((task) => task.registry_key === "central-policy");
@@ -142,11 +148,10 @@ test("health snapshot: slot drift past the window and unseeded tables are report
 	});
 	const snapshot = await getProductionHealthSnapshot({ db });
 	const industry = snapshot.tasks.find((task) => task.registry_key === "industry-research");
-	assert.equal(industry.schedule_basis, "OUT_OF_WINDOW");
+	assert.equal(industry.schedule_basis, "UNKNOWN");
 	assert.equal(industry.outcome, "SILENT", "the stored terminal stays a fact");
 
-	// A non-market envelope row keeps whatever the ledger stored: null here,
-	// never a computed "expected version" comparison.
+	// No expected version or schedule is inferred for a non-MARKET receipt.
 	const noSlot = await insertV3Row(db, {
 		task_name: "ai-financing-rates",
 		run_id: "run_" + "f".repeat(32),
@@ -159,7 +164,7 @@ test("health snapshot: slot drift past the window and unseeded tables are report
 	const recheck = await getProductionHealthSnapshot({ db });
 	const rates = recheck.tasks.find((task) => task.registry_key === "ai-financing-rates");
 	assert.equal(rates.latest_run_id, noSlot.run_id);
-	assert.equal(rates.schedule_basis, "NOT_APPLICABLE");
+	assert.equal(rates.schedule_basis, "UNKNOWN");
 });
 
 test("health snapshot: unseeded ledger answers NOT_SEEDED without creating anything", async () => {
@@ -220,7 +225,7 @@ test("MCP exposes get_production_health_snapshot for state:read and denies it wi
 		assert.equal(body.status, "OK");
 		assert.equal(body.tasks.length, 6);
 		const industry = body.tasks.find((task) => task.registry_key === "industry-research");
-		assert.equal(industry.prompt_version, "d".repeat(40));
+		assert.equal(industry.prompt_version, null);
 	} finally {
 		await close();
 	}

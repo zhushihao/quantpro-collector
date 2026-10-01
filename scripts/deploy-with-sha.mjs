@@ -2,8 +2,8 @@
 //
 // npm scripts run under cmd.exe on Windows, so "$(git rev-parse HEAD)" does
 // not expand inline. This wrapper resolves the sha once and hands it to
-// wrangler; run-v3 falls back to this value for non-MARKET prompt_version
-// (issue #47 item 4). The stamp reflects the COMMIT — working-tree drift is
+// wrangler. This identifies the Collector build only, never an Automation
+// Prompt version (#47). The stamp reflects the COMMIT — working-tree drift is
 // not accounted for, same as any batch stamp; deploy from a clean checkout.
 import { execFileSync, spawnSync } from "node:child_process";
 

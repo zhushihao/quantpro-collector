@@ -17,7 +17,7 @@ registerHooks({
 });
 
 import { RunEnvelopeError, processRunEnvelope } from "../src/run-envelope.ts";
-import { ensureRunEnvelopeTables } from "../src/automation-schedule.ts";
+import { ensureRunEnvelopeTables } from "../src/automation-run-ledger.ts";
 import { StateGatewayError } from "../src/state-gateway.ts";
 import { createResearchWorkflowDb } from "./helpers/d1-sqlite-shim.mjs";
 
@@ -99,6 +99,7 @@ async function runEnvelope(db, envelope, overrides = {}) {
 		fetchImpl: overrides.fetchImpl,
 		now: overrides.now ?? NOW,
 		requestId: overrides.requestId,
+		collectorBuildSha: overrides.collectorBuildSha,
 	});
 }
 
@@ -474,11 +475,11 @@ test("receipt-missing deadlock (spec §10.6): same events re-stamped as_of block
 	assert.equal(replay.outcome, "BLOCKED");
 });
 
-test("timeliness: STALE follows the task schedule window, heartbeat is FRESH, delivery stays MODEL_DELIVERY_UNVERIFIED", async () => {
+test("timeliness: STALE is a fixed data-age diagnostic, heartbeat is FRESH, delivery stays MODEL_DELIVERY_UNVERIFIED", async () => {
 	const db = createResearchWorkflowDb();
 	const { fetchImpl } = recordingFetch();
 
-	// as_of a full day older than received_at → far beyond window_minutes (40).
+	// as_of a full day older than received_at exceeds the fixed 40-minute data-age bound.
 	const stale = await runEnvelope(
 		db,
 		industryEnvelope({
@@ -661,13 +662,14 @@ test("owner-context failure (spec §1.4 step 0) records an UNKNOWN row and retur
 	assert.equal(rows.length, 1);
 });
 
-test("slot binding: an in-window envelope stores the schedule slot, out-of-window stays NULL", async () => {
+test("receipt times never bind run slots, regardless of former schedule windows", async () => {
 	const db = createResearchWorkflowDb();
 	const { fetchImpl } = recordingFetch();
 
 	const inWindow = await runEnvelope(db, industryEnvelope(), { fetchImpl });
-	assert.equal(inWindow.slot, "10:45");
-	assert.equal(inWindow.slot_date, "2026-09-28");
+	assert.equal(inWindow.slot, null);
+	assert.equal(inWindow.slot_date, null);
+	assert.equal((await countRunRows(db, "run_id=?1", inWindow.run_id))[0].received_at, NOW);
 
 	const outOfWindow = await runEnvelope(
 		db,
@@ -688,7 +690,7 @@ test("slot binding: an in-window envelope stores the schedule slot, out-of-windo
 
 test("run-v3 prompt_version records the envelope's actual MARKET production_ref (2026-09-29 repair)", async () => {
 	const db = createResearchWorkflowDb();
-	const { fetchImpl } = recordingFetch();
+	const { fetchImpl, state } = recordingFetch();
 	const marketEnvelope = (productionRef) => ({
 		task_name: "holding-assistant-intraday",
 		summary: "盘中轮次",
@@ -701,10 +703,20 @@ test("run-v3 prompt_version records the envelope's actual MARKET production_ref 
 			records: [{ subject_key: "CN:600000", holding_status: "ACTIVE" }],
 		},
 	});
-	const completed = await runEnvelope(db, marketEnvelope("a".repeat(40)), { fetchImpl });
+	const completed = await runEnvelope(db, marketEnvelope("a".repeat(40)), {
+		fetchImpl, collectorBuildSha: "c".repeat(40),
+	});
 	assert.equal(completed.outcome, "COMPLETED");
 	const completedRow = (await countRunRows(db, "run_id=?1", completed.run_id))[0];
 	assert.equal(completedRow.prompt_version, "a".repeat(40));
+	assert.equal(completedRow.collector_build_sha, "c".repeat(40));
+	const business = JSON.parse(state.created.body.match(/```json\s*([\s\S]*?)\s*```/)[1]);
+	assert.equal(business.trading_date, "2026-09-28");
+	assert.equal(business.scheduled_slot, "09:50");
+	assert.equal(business.production_ref, "a".repeat(40));
+	assert.equal(completedRow.received_at, NOW);
+	assert.equal(completedRow.slot, null);
+	assert.equal(completedRow.slot_date, null);
 
 	// A BLOCKED chain outcome must not erase the version that was received:
 	// duplicate same-slot comments make the ledger conflict before the POST.
@@ -752,6 +764,7 @@ test("run-v3 prompt_version records the envelope's actual MARKET production_ref 
 
 	// Non-MARKET channels and heartbeats have no production ref: stay null.
 	const industryRun = await runEnvelope(db, industryEnvelope(), {
+		collectorBuildSha: "c".repeat(40),
 		fetchImpl: recordingFetch().fetchImpl,
 	});
 	const industryRow = (await countRunRows(db, "run_id=?1", industryRun.run_id))[0];
@@ -942,10 +955,9 @@ test("MCP end-to-end PERSISTED envelope via LIVE universe context returns the §
 		assert.equal(body.ledger.status, "PERSISTED");
 		assert.equal(body.ledger.channel, "INDUSTRY");
 		assert.match(body.envelope_key, /^E:INDUSTRY:[0-9a-f]{64}$/);
-		// The MCP lane uses the real server clock, so the slot depends on when
-		// this runs; assert the shape instead of a fixed slot.
-		assert.ok(body.slot === null || /^\d{2}:\d{2}$/.test(body.slot));
-		assert.ok(body.slot_date === null || /^\d{4}-\d{2}-\d{2}$/.test(body.slot_date));
+		// Receipt time is never interpreted as a host schedule slot.
+		assert.equal(body.slot, null);
+		assert.equal(body.slot_date, null);
 	} finally {
 		await close();
 	}
@@ -1034,7 +1046,7 @@ test("observations on a write task and blocked/payload combinations persist FAIL
 	assert.equal(rows.length, 3);
 });
 
-test("non-MARKET rows fall back to the installed deployment ref for prompt_version", async () => {
+test("non-MARKET Prompt version stays unknown while Collector build remains separately auditable", async () => {
 	const db = createResearchWorkflowDb();
 	const receipt = await processRunEnvelope({
 		db,
@@ -1046,5 +1058,6 @@ test("non-MARKET rows fall back to the installed deployment ref for prompt_versi
 	});
 	assert.equal(receipt.outcome, "SILENT");
 	const rows = await countRunRows(db, "task_name=?1", "central-policy");
-	assert.equal(rows[0].prompt_version, "6f13644eb36c8e4872d3774c9e91c7eca4767056");
+	assert.equal(rows[0].prompt_version, null);
+	assert.equal(rows[0].collector_build_sha, "6f13644eb36c8e4872d3774c9e91c7eca4767056");
 });

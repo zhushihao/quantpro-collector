@@ -8,7 +8,7 @@ import {
 	getAutomationRunHistory,
 	recordAutomationRunEvent,
 } from "../src/automation-run-ledger.ts";
-import { ensureRunEnvelopeTables } from "../src/automation-schedule.ts";
+import { ensureRunEnvelopeTables } from "../src/automation-run-ledger.ts";
 import { createResearchWorkflowDb } from "./helpers/d1-sqlite-shim.mjs";
 
 function begin(overrides = {}) {
@@ -96,13 +96,11 @@ test("#37 begin + end stores one SILENT run with server-owned lifecycle", async 
 		db,
 		taskName: "industry-research",
 		limit: 5,
-		// Pin the derivation clock: spec §6.2 merges MISSED_SLOT rows over the
-		// 7-day lookback, so a real-clock query would drown this 09-27 row.
+		// The observation clock cannot fabricate newer audit records.
 		now: "2026-09-27T12:03:00Z",
 		since: "2026-09-27T00:00:00Z",
 	});
-	// Spec §6.2 merges MISSED_SLOT schedule-derivation rows into the same list;
-	// locate the stored run by contract instead of absolute position.
+	// Only actual audit records are returned.
 	const run = history.runs.find((entry) => entry.source_contract === "run-v2");
 	assert.ok(run, "the stored run-v2 row must be present");
 	assert.equal(run.effective_status, "SILENT");
@@ -349,10 +347,10 @@ test("run-v3 rows merge into get_automation_run_history with server-derived sema
 	});
 	const contracts = new Set(history.runs.map((entry) => entry.source_contract));
 	assert.ok(contracts.has("run-v3"));
-	assert.ok(history.runs.some((entry) => entry.source_contract === "schedule-derivation"));
+	assert.equal(history.runs.some((entry) => entry.source_contract === "schedule-derivation"), false);
 
 	// Descending received_at across sources: UNKNOWN (12:10) → SILENT (12:05)
-	// → COMPLETED (12:00) → … then MISSED_SLOT synthetics.
+	// → COMPLETED (12:00), without synthetic missing receipts.
 	const v3Rows = history.runs.filter((entry) => entry.source_contract === "run-v3");
 	assert.deepEqual(
 		v3Rows.map((entry) => entry.run_id),
@@ -365,10 +363,9 @@ test("run-v3 rows merge into get_automation_run_history with server-derived sema
 	assert.equal(freshRow.result_semantics, "TERMINAL_RECORDED");
 	assert.equal(freshRow.fresh_delta_semantics, "SERVER_COUNTED");
 	assert.equal(freshRow.notification_required, true);
-	// Persisted run-v3 prompt_version projects through history (2026-09-29
-	// repair: it used to be hard-coded null); rows without a stored value keep
-	// null (asserted on staleRow below).
-	assert.equal(freshRow.prompt_version, "f".repeat(40));
+	// Non-MARKET run-v3 values have no verified Prompt source; old stored
+	// deployment stamps must not continue to masquerade as Prompt versions.
+	assert.equal(freshRow.prompt_version, null);
 	assert.equal(freshRow.notification_semantics, "SERVER_DERIVED_FLOOR");
 	assert.equal(freshRow.delivery, "MODEL_DELIVERY_UNVERIFIED");
 	assert.equal(freshRow.event_count, 3);
@@ -388,11 +385,8 @@ test("run-v3 rows merge into get_automation_run_history with server-derived sema
 	assert.equal(unknownRow.final_recorded, false);
 	assert.equal(unknownRow.result_semantics, "RESULT_UNKNOWN");
 
-	// MISSED_SLOT synthetic rows carry the derivation shape (spec §6.2).
-	const synthetic = history.runs.find((entry) => entry.source_contract === "schedule-derivation");
-	assert.equal(synthetic.effective_status, "MISSED_SLOT");
-	assert.equal(synthetic.derivation, "SCHEDULE_WINDOW");
-	assert.match(synthetic.window, /^\d{2}:\d{2}\.\.\d{2}:\d{2}$/);
+	assert.equal(history.runs.length, 3, "only the three received rows exist");
+	assert.equal(history.runs.some((row) => row.effective_status === "MISSED_SLOT"), false);
 });
 
 test("run-v2, legacy-event-v1 and run-v3 rows coexist in one merged history (spec §4.3.3)", async () => {
@@ -422,7 +416,7 @@ test("run-v2, legacy-event-v1 and run-v3 rows coexist in one merged history (spe
 	assert.ok(contracts.has("run-v2"));
 	assert.ok(contracts.has("legacy-event-v1"));
 	assert.ok(contracts.has("run-v3"));
-	assert.ok(contracts.has("schedule-derivation"));
+	assert.equal(contracts.has("schedule-derivation"), false);
 
 	// v2 rows keep their legacy output shape untouched (spec §4.3.3).
 	const v2Row = history.runs.find((entry) => entry.source_contract === "run-v2");

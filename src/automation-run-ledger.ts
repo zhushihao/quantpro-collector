@@ -1,12 +1,67 @@
 import { z } from "zod";
 
-import {
-	MISSED_SLOT_LOOKBACK_DAYS,
-	computeTimeliness,
-	deriveMissedSlotsFromRawRows,
-	ensureRunEnvelopeTables,
-	readScheduleRows,
-} from "./automation-schedule.ts";
+// Receipt storage is independent of host scheduling (#47). Historical schedule
+// tables/columns are left intact for audit, but are never bootstrapped or read.
+const envelopeTablesReady = new WeakMap<object, Promise<void>>();
+
+export function ensureRunEnvelopeTables(db: D1Database): Promise<void> {
+	const existing = envelopeTablesReady.get(db as object);
+	if (existing) return existing;
+	const ready = (async () => {
+		await db.prepare(`CREATE TABLE IF NOT EXISTS automation_runs_v3 (
+			task_name TEXT NOT NULL,
+			run_id TEXT NOT NULL,
+			envelope_key TEXT NOT NULL,
+			channel TEXT,
+			write_key TEXT,
+			as_of TEXT,
+			received_at TEXT NOT NULL,
+			slot TEXT,
+			slot_date TEXT,
+			fresh_delta_count INTEGER CHECK (fresh_delta_count IS NULL OR fresh_delta_count >= 0),
+			event_count INTEGER CHECK (event_count IS NULL OR event_count >= 0),
+			outcome TEXT NOT NULL CHECK (outcome IN ('COMPLETED','SILENT','BLOCKED','FAILED','UNKNOWN')),
+			blocker_code TEXT,
+			summary TEXT,
+			prompt_version TEXT,
+			collector_build_sha TEXT,
+			cloudflare_version_id TEXT,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			PRIMARY KEY (task_name, run_id)
+		) WITHOUT ROWID`).run();
+		await db.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS automation_runs_v3_envelope
+			ON automation_runs_v3 (task_name, envelope_key)`).run();
+		await db.prepare(`CREATE INDEX IF NOT EXISTS automation_runs_v3_task_time
+			ON automation_runs_v3 (task_name, received_at DESC)`).run();
+		await db.prepare(`CREATE INDEX IF NOT EXISTS automation_runs_v3_time
+			ON automation_runs_v3 (received_at DESC)`).run();
+	})();
+	envelopeTablesReady.set(db as object, ready);
+	ready.catch(() => envelopeTablesReady.delete(db as object));
+	return ready;
+}
+
+/** Data-age diagnostic only: retain the previous 40-minute / 5-minute bounds,
+ * independent of any task cadence. This never declares a missed host run. */
+export function computeTimeliness(asOf: string | null, receivedAtMs: number): "FRESH" | "STALE" {
+	if (!asOf) return "FRESH";
+	const asOfMs = Date.parse(asOf);
+	if (!Number.isFinite(asOfMs) || !Number.isFinite(receivedAtMs)) return "STALE";
+	const delta = receivedAtMs - asOfMs;
+	return delta > 40 * 60 * 1000 || -delta > 5 * 60 * 1000 ? "STALE" : "FRESH";
+}
+
+/** run-v3 has a real Prompt source only on MARKET envelopes. Its identity
+ * prefix also survives UNKNOWN / pre-write failures before channel is saved.
+ * Old non-MARKET deployment stamps stay in storage, not in the fact projection.
+ * Legacy v1/v2 caller-reported Prompt versions use their existing separate path. */
+export function receiptPromptVersion(row: Record<string, unknown>): string | null {
+	if (!String(row.envelope_key ?? "").startsWith("E:MARKET:")) return null;
+	return typeof row.prompt_version === "string" && /^[0-9a-f]{40}$/i.test(row.prompt_version)
+		? row.prompt_version
+		: null;
+}
 
 export const AUTOMATION_RUN_PHASES = ["STARTED", "FINAL"] as const;
 export const AUTOMATION_RUN_STATUSES = [
@@ -938,14 +993,9 @@ export async function getAutomationRunHistory(input: {
 				{ requestId },
 			);
 		}
-		const lookbackMs = MISSED_SLOT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-		const sinceMs = since ? Date.parse(since) : Number.NaN;
-		const derivationStartMs = Number.isNaN(sinceMs)
-			? nowMs - lookbackMs
-			: Math.max(nowMs - lookbackMs, sinceMs);
 
-		// Review F6 query shape: one time-range SELECT per (task, table), then
-		// all windowing/merging in JS.
+		// Bounded reads of stored audit facts only. No schedule reads or
+		// fabricated rows for time periods without a receipt.
 		const clauses: string[] = [];
 		const binds: unknown[] = [];
 		if (taskName) {
@@ -992,10 +1042,6 @@ export async function getAutomationRunHistory(input: {
 			.all<Record<string, unknown>>();
 		const v3Raw = v3Result.results ?? [];
 
-		// One schedule read feeds both as_of_stale/timeliness derivation and
-		// MISSED_SLOT windows (spec §2.4/§6.2).
-		const scheduleRows = await readScheduleRows(input.db);
-
 		const v2Runs = v2Raw.map((raw) => {
 			const row = normalizeRow(raw)!;
 			const legacy = row.source_contract === "legacy-event-v1";
@@ -1041,12 +1087,7 @@ export async function getAutomationRunHistory(input: {
 				| "UNKNOWN";
 			const asOf = raw.as_of == null ? null : String(raw.as_of);
 			const receivedAt = String(raw.received_at ?? "");
-			const windowMinutes = scheduleRows.find(
-				(schedule) => schedule.task_name === String(raw.task_name ?? "") && schedule.enabled,
-			)?.window_minutes ?? null;
-			const timeliness = asOf
-				? computeTimeliness(asOf, Date.parse(receivedAt), windowMinutes)
-				: null;
+			const timeliness = asOf ? computeTimeliness(asOf, Date.parse(receivedAt)) : null;
 			const freshDeltaCount = raw.fresh_delta_count == null ? null : Number(raw.fresh_delta_count);
 			return {
 				task_name: String(raw.task_name ?? ""),
@@ -1077,25 +1118,17 @@ export async function getAutomationRunHistory(input: {
 					raw.collector_build_sha == null ? null : String(raw.collector_build_sha),
 				cloudflare_version_id:
 					raw.cloudflare_version_id == null ? null : String(raw.cloudflare_version_id),
-				prompt_version:
-					raw.prompt_version == null ? null : String(raw.prompt_version),
+				prompt_version: receiptPromptVersion(raw),
 				safe_summary: raw.summary == null ? null : String(raw.summary),
 				as_of: asOf,
 				as_of_stale: asOf ? timeliness === "STALE" : null,
 				timeliness,
-				slot: raw.slot == null ? null : String(raw.slot),
-				slot_date: raw.slot_date == null ? null : String(raw.slot_date),
+				// Retained wire fields; historical run slots were inferred, not
+				// host trigger facts or MARKET business observation times.
+				slot: null,
+				slot_date: null,
 				source_contract: "run-v3",
 			};
-		});
-
-		const { missed, truncated } = deriveMissedSlotsFromRawRows({
-			scheduleRows,
-			v3Rows: v3Raw,
-			v2Rows: v2Raw,
-			taskName,
-			derivationStartMs,
-			nowMs,
 		});
 
 		// Merge on each row's own time key BEFORE slicing to the caller limit —
@@ -1110,14 +1143,9 @@ export async function getAutomationRunHistory(input: {
 		for (const row of v3Runs) {
 			merged.push({ key: timeKeyMs(row.received_at), row });
 		}
-		for (const row of missed) {
-			merged.push({ key: timeKeyMs(row.window_end), row });
-		}
 		merged.sort((left, right) => right.key - left.key);
 		const runs = merged.slice(0, limit).map((entry) => entry.row);
-		return truncated
-			? { status: "OK", task_name: taskName, since, runs, truncated: true }
-			: { status: "OK", task_name: taskName, since, runs };
+		return { status: "OK", task_name: taskName, since, runs };
 	} catch (error) {
 		if (error instanceof AutomationRunLedgerError) throw error;
 		throw new AutomationRunLedgerError(
