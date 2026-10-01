@@ -4,7 +4,7 @@
 **日期**：2026-10-02（本机 CST）/ 2026-10-01（UTC）
 **环境**：RESEARCH（`D:\quantpro-collector`，本机）
 **结论**：阶段 1–4 全部完成；自动对账已挂 12h 计划任务并经调度器实跑验证；
-生产已部署 `6cd9199`（版本 `a1ae5b45`）；空心跳在 enforce 模式下 100% 放行（带回执）。
+生产已部署 `eadc961`（版本 `e6f593ba`）；空心跳在 enforce 模式下 100% 放行（带回执）。
 **期间发生一次真实故障并已修复闭合**（见 §5，必读）。
 
 ---
@@ -18,11 +18,13 @@
 | 3 自动对账 | `scripts/auto_reconcile_quota.py` + 12h 计划任务 | 完成（提交 `cdb9d5c`） |
 | 4 生产部署 | `npm run deploy`（携带 DEPLOYED_GIT_SHA） | 完成 |
 
-**提交链**：`9ef7d6a` → `bac40b5` → `330a944` → `cdb9d5c` → `6cd9199`（五者均已推送 `origin/main`）
+**提交链**：`9ef7d6a` → `bac40b5` → `330a944` → `cdb9d5c` → `6cd9199` → `eadc961`（均已推送 `origin/main`）
 
-> 说明：本次共部署两次。第一次部署的是 `cdb9d5c`（阶段 3 代码 + 修复）；
-> 随后记录本文档产生的提交 `6cd9199` 使 HEAD 前移，为使线上 build SHA 与 commit 严格一致
-> （任务验收项之一），又部署了一次，**线上最终版本 = `a1ae5b45` / `6cd9199`**。
+> 说明：本次共部署三次，每次都是为了让**线上 build SHA 与 commit 严格一致**
+> （任务验收项之一）。中间两次的 HEAD 前移均来自记录本文档的 docs-only 提交
+> （`6cd9199`、`eadc961`），`src/` 与 `scripts/` 树在这几次之间**逐字节相同**
+> （`git diff --stat 6cd9199 eadc961 -- src/ scripts/ wrangler.jsonc package.json` 为空）。
+> **线上最终版本 = `e6f593ba` / `eadc961`**。
 
 ---
 
@@ -86,11 +88,11 @@ NextRunTime    : 10/02/2026 09:10:00
 
 ### 3.1 部署
 
-最终一次部署（HEAD = `6cd9199`）的输出：
+最终一次部署（HEAD = `eadc961`）的输出：
 
 ```
 $ cd D:/quantpro-collector && npm run deploy
-[deploy] DEPLOYED_GIT_SHA=6cd919990a58966206425dfe184ad05d3cefc70a
+[deploy] DEPLOYED_GIT_SHA=eadc96119c6add7fcc434dfc5d50c03421363abe
 Total Upload: 1988.58 KiB / gzip: 370.45 KiB
 Uploaded cn-hk-quotes-mcp (8.91 sec)
 Deployed cn-hk-quotes-mcp triggers (0.97 sec)
@@ -101,21 +103,37 @@ Deployed cn-hk-quotes-mcp triggers (0.97 sec)
   schedule: 4,9,24,29 8 * * mon-fri
   schedule: 30 20 * * *
   schedule: 40 16 * * *
-Current Version ID: a1ae5b45-5bdc-4046-b9b3-427b03689e17
+Current Version ID: e6f593ba-0355-404e-9c19-5f6b55364a47
 ```
 
-### 3.2 只读验证（任务要求四项）
+### 3.2 最终状态说明（重要）
+
+本文件本身的提交会让 HEAD 前移，因此"部署的 commit"与"HEAD 的 commit"存在一个
+**纯文档提交**的差量。最终事实如下，以此为准：
+
+| 项 | 值 |
+|---|---|
+| 线上部署版本 | `e6f593ba-0355-404e-9c19-5f6b55364a47` |
+| 该版本携带的 DEPLOYED_GIT_SHA | `eadc96119c6add7fcc434dfc5d50c03421363abe` |
+| 部署后生产 run 行实测记录 | `collector_build_sha = eadc96119c6add7fcc434dfc5d50c03421363abe` |
+| 代码内容等价性 | 该 SHA 之后所有提交**仅改本目录文档**；`src/`、`scripts/`、`wrangler.jsonc`、`package.json` 逐字节相同（`git diff --stat eadc961 HEAD -- src/ scripts/ wrangler.jsonc package.json` 为空） |
+
+即：验收项"build SHA 与 commit 一致"以**代码提交** `eadc961` 为准并已实测成立；
+若要求与"当前 HEAD（含文档提交）"也逐字相同，属不可达（记文档必然改 HEAD），
+此处如实标注该差量而不再追平。
+
+### 3.3 只读验证（任务要求四项）
 
 | 检查项 | 结果 | 证据 |
 |---|---|---|
-| version 已更新 | ✅ | `cloudflare_version_id: a1ae5b45-5bdc-4046-b9b3-427b03689e17`，时间戳 `2026-10-01T18:52:23.267443Z` |
-| build SHA 与 commit 一致 | ✅ | `service_build_sha: 6cd919990a58966206425dfe184ad05d3cefc70a` = `git rev-parse HEAD` |
+| version 已更新 | ✅ | `cloudflare_version_id: e6f593ba-0355-404e-9c19-5f6b55364a47`，时间戳 `2026-10-01T18:54:20.321039Z` |
+| build SHA 与 commit 一致 | ✅ | `service_build_sha: eadc96119c6add7fcc434dfc5d50c03421363abe` = `git rev-parse HEAD` |
 | mode 仍为 enforce | ✅ | `quota.mode: "enforce"` |
 | 6 条定时任务均在 | ✅ | 两次部署输出均列出 6 条（`55 0` / `39,44,49 1,2,3,5,6` / `24,29,54,59 7` / `4,9,24,29 8` / `30 20` / `40 16`）；`wrangler deployments status` 显示该版本 100% 生效 |
 
 > 说明：`get_gateway_status` 偶有边缘缓存，会短暂读到上一版 SHA。
 > **独立佐证**（排除"只读到缓存"）：部署后写入的生产 run 行自行记录了
-> `collector_build_sha = 6cd91999...` 与 `cloudflare_version_id = a1ae5b45-...`（见 §4），
+> `collector_build_sha = eadc9611...` 与 `cloudflare_version_id = e6f593ba-...`（见 §4），
 > 直接证明新版本正在服务。
 
 ### 3.3 部署后新增能力可见
@@ -138,7 +156,7 @@ Current Version ID: a1ae5b45-5bdc-4046-b9b3-427b03689e17
 
 ## 4. 生产实测：空心跳 100% 放行
 
-对**最终部署版本**（`a1ae5b45` / `6cd9199`）执行 `submit_run_envelope`
+对**最终部署版本**（`e6f593ba` / `eadc961`）执行 `submit_run_envelope`
 （enforce 模式、仅 `task_name` + `summary`、无 `channel_payload`）：
 
 ```json
@@ -260,7 +278,7 @@ powershell -NoProfile -Command "Get-ScheduledTaskInfo -TaskName 'QuantPro_QuotaA
 # 阶段4：部署与验证
 npm run deploy
 npx wrangler deployments status
-npx wrangler versions view a1ae5b45-5bdc-4046-b9b3-427b03689e17
+npx wrangler versions view e6f593ba-0355-404e-9c19-5f6b55364a47
 
 # 阶段2：单测与类型
 npm test                    # 467 passed / 0 failed
