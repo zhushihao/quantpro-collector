@@ -785,7 +785,7 @@ function createMcpRequestMetering(
 	request: Request,
 ): {
 	env: Env;
-	settleAfterResponse: (ctx: ExecutionContext, principal: string | null) => void;
+	settleAfterResponse: (ctx: ExecutionContext, principal: string | null, response: Response) => void;
 } {
 	// Clone BEFORE the handler reads the body: clone() tees the stream, so both
 	// the MCP handler and this probe can read the same payload independently.
@@ -802,10 +802,27 @@ function createMcpRequestMetering(
 		: env;
 	return {
 		env: meteredEnv,
-		settleAfterResponse(executionCtx, principal) {
+		settleAfterResponse(executionCtx, principal, response) {
 			if (typeof executionCtx?.waitUntil !== "function") return;
+			// Streaming MCP responses resolve `fetch` at HEADERS time while the
+			// tool work is still streaming inside the body.  Settling immediately
+			// reads an empty observer (production-proven 2026-10-02: meta landed
+			// 200ms after settle).  Mirror the body and drain it first, so the
+			// settle reads totals AFTER the stream actually finished; the 25s
+			// race backstops a long-lived SSE stream so the ledger still lands.
+			const bodyMirror = response.body ? response.clone() : null;
 			executionCtx.waitUntil(
 				(async () => {
+					if (bodyMirror) {
+						try {
+							await Promise.race([
+								bodyMirror.arrayBuffer(),
+								new Promise<null>((resolve) => setTimeout(() => resolve(null), 25_000)),
+							]);
+						} catch {
+							// A client-aborted stream must not lose the metering either.
+						}
+					}
 					// Resolve the concrete tool route from the pre-dispatch clone
 					// FIRST, then account once, in this single waitUntil task.
 					// settleQuotaMetering owns the try-catch, so neither the probe nor
@@ -3731,7 +3748,7 @@ export default {
 			);
 		});
 		const response = await handler(request, metering.env, ctx);
-		metering.settleAfterResponse(ctx, identity.principal);
+		metering.settleAfterResponse(ctx, identity.principal, response);
 		return response;
 	},
 	async scheduled(controller: ScheduledController, env: Env) {
