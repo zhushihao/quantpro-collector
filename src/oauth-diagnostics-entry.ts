@@ -24,7 +24,8 @@ async function writeDiagnostic(
 	status: number,
 	detail: DiagnosticDetail,
 ): Promise<void> {
-	if (env.QUOTA_ADMISSION_MODE === "enforce") return;
+	// No quota gate: diagnostics always write (2026-10-02 gate removal).  The
+	// former `QUOTA_ADMISSION_MODE === "enforce"` early return is abolished.
 	const db = env.RESEARCH_REPLICA;
 	if (!db) return;
 	try {
@@ -166,8 +167,7 @@ function applyChatGptCallbackIssuerCompat(response: Response): Response {
 }
 
 async function readLatest(env: Env): Promise<Response> {
-	if (env.QUOTA_ADMISSION_MODE === "enforce")
-		return Response.json({ available: false }, { status: 503 });
+	// No quota gate: the diagnostic read is always available when the binding is.
 	const db = env.RESEARCH_REPLICA;
 	if (!db) return Response.json({ available: false }, { status: 503 });
 	await ensureTable(db);

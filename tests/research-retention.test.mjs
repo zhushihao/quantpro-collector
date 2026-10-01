@@ -283,11 +283,26 @@ async function seedIndexedDocument(
 	const record = await ingestDocument(store, payload);
 	const bodyHash = await seedContentObject(store, encoder.encode(options.body ?? "synthetic body"));
 	if (index) {
-		const outcome = await semantic.indexSemanticDocument(store, fake.deps, {
-			documentId: payload.document.document_id,
-			versionId: payload.version.version_id,
-			now: NOW,
-		});
+		// Local RTX 5080 pipeline in miniature (quota redesign 2026-10-02): chunk
+		// locally with the shared composition rule and push through the REAL
+		// precomputed-vector path.  No cloud embedding exists any more.
+		const title = payload.document.title ?? "";
+		const body = options.body ?? "synthetic body";
+		const composed = title ? `${title}\n\n${body}` : body;
+		const { chunks } = semantic.chunkSemanticDocument(composed);
+		const outcome = await semantic.ingestPrecomputedVectors(
+			store,
+			{ index: fake.index },
+			{
+				document_id: payload.document.document_id,
+				version_id: payload.version.version_id,
+				content_sha256: bodyHash,
+				vectors: chunks.map((chunk) => ({
+					ordinal: chunk.ordinal,
+					values: embedText(chunk.text),
+				})),
+			},
+		);
 		assert.equal(outcome.status, "READY");
 	}
 	return { payload, record, bodyHash };
@@ -447,11 +462,11 @@ test("EXPIRED 对 search_documents / get_document / search_documents_semantic �
 	);
 });
 
-test("EXPIRED 文档的语义状态行不会被索引批次领取（re-ingest 复活防护）", async () => {
+test("EXPIRED 文档绝不接受本地向量推送（re-ingest 复活防护迁移到 precomputed 路径）", async () => {
 	const fake = { ai: new FakeAi(), index: new FakeVectorize() };
 	fake.deps = { ai: fake.ai, index: fake.index };
 	const store = storage();
-	await seedIndexedDocument(store, fake, {
+	const seeded = await seedIndexedDocument(store, fake, {
 		documentId: "doc_reclaim",
 		versionId: "ver_reclaim",
 		ingestedAt: OLD_INGESTED_AT,
@@ -464,16 +479,20 @@ test("EXPIRED 文档的语义状态行不会被索引批次领取（re-ingest �
 			"UPDATE research_semantic_index_state SET state='PENDING', retired_at=NULL, last_error_code=NULL WHERE document_id='doc_reclaim'",
 		)
 		.run();
-	const callsBefore = fake.ai.calls;
-	const outcome = await semantic.indexSemanticDocument(store, fake.deps, {
-		documentId: "doc_reclaim",
-		versionId: "ver_reclaim",
-		now: NOW,
-	});
-	assert.equal(outcome.status, "PENDING");
-	assert.equal(fake.ai.calls, callsBefore, "EXPIRED 文档绝不消耗 embedding");
-	const batch = await semantic.runSemanticIndexBatch(store, fake.deps, { now: NOW });
-	assert.equal(batch.ready, 0);
+	// EXPIRED 文档的推送被拒收：向量绝不重新附着，也绝不消耗任何 embedding。
+	const outcome = await semantic.ingestPrecomputedVectors(
+		store,
+		{ index: fake.index },
+		{
+			document_id: "doc_reclaim",
+			version_id: "ver_reclaim",
+			content_sha256: seeded.bodyHash,
+			vectors: [{ ordinal: 0, values: embedText("复活防护合成正文") }],
+		},
+	);
+	assert.equal(outcome.status, "REJECTED");
+	assert.match(outcome.reason, /EXPIRED by retention/);
+	assert.equal(fake.ai.calls, 0, "EXPIRED 文档绝不消耗 embedding");
 });
 
 /* ---------------------------------------------------------------- */

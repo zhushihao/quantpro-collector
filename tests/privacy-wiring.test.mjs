@@ -121,12 +121,18 @@ test("Task D index schema and readers are PUBLIC-only by construction", async ()
 	assert.doesNotMatch(semanticSource, /visibility='PRIVATE'/);
 	assert.doesNotMatch(semanticSource, /visibility=\?/);
 	// 向量 metadata 只允许 PUBLIC 标识与模型 id；不得写入正文、摘要或定位符。
+	// （2026-10-02 拆闸后唯一剩余的向量写入点是本地 GPU 推送的 precomputed 路径。）
 	const metadataStart = semanticSource.indexOf("metadata: {");
 	const metadataBlock = semanticSource.slice(
 		metadataStart,
 		semanticSource.indexOf("}", metadataStart) + 1,
 	);
-	assert.match(metadataBlock, /document_id: row\.document_id/);
+	assert.match(metadataBlock, /document_id: payload\.document_id/);
+	assert.equal(
+		semanticSource.indexOf("metadata: {"),
+		semanticSource.lastIndexOf("metadata: {"),
+		"exactly one vector-write site may exist",
+	);
 	assert.doesNotMatch(metadataBlock, /snippet|body|text:|locator|url|token/i);
 	// ingest 只在 PUBLIC document_version 上登记，且不携 PRIVATE 字段。
 	const replicaSource = await readFile(new URL("../src/research-replica.ts", import.meta.url), "utf8");

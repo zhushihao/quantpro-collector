@@ -1,10 +1,11 @@
 /**
- * Contract-surface tests for the quota entry module (SDD CQ spec P0-A/P0-C).
+ * Contract-surface tests for the quota entry module (post gate-removal,
+ * 2026-10-02 quota redesign).
  *
  * These pin the parts a reviewer must be able to check without a database: the
- * admission switch, the inert legacy flag, the 95% catalog arithmetic, the
- * natural-period resolution (renewal anchor / UTC day / storage integral) and the
- * guarantee boundary text.
+ * abolished admission switch, the inert legacy flag, the 95% catalog
+ * arithmetic, the natural-period resolution (renewal anchor / UTC day /
+ * storage integral) and the guarantee boundary text.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -13,7 +14,6 @@ import {
 	QUOTA_CATALOG_VERSION,
 	QUOTA_DIMENSIONS,
 	admissionCeiling,
-	admissionMode,
 	dimensionSpec,
 	isVerifiedAnchor,
 	legacyBreakerFlag,
@@ -33,11 +33,10 @@ const ANCHOR = {
 	verified_at: "2026-09-14T00:00:00.000Z",
 };
 
-test("admission mode defaults to off and only enforce enables gating", () => {
-	assert.equal(admissionMode(undefined), "off");
-	assert.equal(admissionMode({}), "off");
-	assert.equal(admissionMode({ QUOTA_ADMISSION_MODE: "on" }), "off");
-	assert.equal(admissionMode({ QUOTA_ADMISSION_MODE: "enforce" }), "enforce");
+test("the admission switch is abolished: no admissionMode export exists any more", async () => {
+	const facade = await import("../src/quota-breaker.ts");
+	assert.equal("admissionMode" in facade, false, "the enforce/off switch must not survive");
+	assert.equal("QuotaAdmissionMode" in facade, false);
 });
 
 test("the legacy daily flag is reported but can never gate work", () => {
@@ -169,11 +168,11 @@ test("storage risk is a time integral over the remaining cycle, not a flat capac
 	);
 });
 
-test("the catalog version is pinned and the guarantee boundary is stated in code", async () => {
+test("the catalog version is pinned and the post-removal boundary is stated in code", async () => {
 	assert.equal(QUOTA_CATALOG_VERSION, "quota-catalog/2026-09-30.5");
 	assert.equal(QUOTA_DIMENSIONS.length, 19);
 	const { readFile } = await import("node:fs/promises");
 	const text = await readFile(new URL("../src/quota-breaker.ts", import.meta.url), "utf8");
-	assert.match(text, /NOT a physical spending cap/);
-	assert.match(text, /never zero/);
+	assert.match(text, /nothing here gates work any more/);
+	assert.match(text, /is inert/);
 });

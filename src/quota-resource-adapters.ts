@@ -1,166 +1,81 @@
 /**
- * Guarded resource adapters (spec §"准入器与资源代理").
+ * Pure resource observers (quota redesign 2026-10-02, spec section 1.1).
  *
- * Every paid resource call the Collector can make is wrapped here.  A wrapper:
- *   1. refuses to run at all without an ADMITTED reservation handle (typed,
- *      in-process only — it is never serialised to a client);
- *   2. refuses when the dimension the call will bill is not reserved;
- *   3. enforces the declared per-operation upper bound: a call may not amplify
- *      past what the guard reserved (the hidden multiplier the spec warns about);
- *   4. reports observed platform usage so the caller can settle the reservation,
- *      and never auto-releases on timeout or on an unknown outcome.
+ * The Collector no longer gates any business call on quota metadata.  These
+ * wrappers stay in the call path for exactly one job: AFTER a paid resource call
+ * completes, read the platform-reported practical usage (D1 `meta.rows_read` /
+ * `meta.rows_written`, R2 operation classes) and accumulate it for the post-hoc
+ * accounting middleware.
  *
- * Dimensions without a provable bound (`AI neurons`, Vectorize stored
- * dimensions, storage time integrals) stay CLOSED: the wrapper throws
- * `QUOTA_GUARD_UNAVAILABLE` instead of pretending to bound them.
+ * Hard contract (do not regress):
+ *   - An observer NEVER throws.  Missing usage metadata is recorded as "nothing
+ *     observed" -- it can never fail or re-judge the business call.  The
+ *     2026-09-30 C5 outage (a guard that threw on missing D1 `first()` meta) is
+ *     the failure mode this module abolishes.
+ *   - An observer NEVER refuses, rewrites or re-orders a call.  The one
+ *     deliberate equivalence: D1 `first()` is answered by a single bounded
+ *     `.all()` execution whose meta is read (the C5 fix, driver-proven in
+ *     production), because `first()` itself carries no usage meta -- with a
+ *     native-`first()` fallback so the projection can never change an outcome.
+ *   - Reporting to a sink is best effort: a throwing sink is swallowed.
  */
 
-import type { AdmissionResult, AdmissionDimension, ObservedDimension } from "./quota-admission.ts";
-import { dimensionSpec, type DimensionKey } from "./quota-dimensions.ts";
+import type { DimensionKey } from "./quota-dimensions.ts";
 
-/** Machine-readable refusal codes shared with the HTTP/MCP/Cron contract. */
-export type QuotaRefusalCode = "QUOTA_CIRCUIT_OPEN" | "QUOTA_GUARD_UNAVAILABLE";
-
-export class QuotaGuardError extends Error {
-	readonly error_code: QuotaRefusalCode;
-	readonly detail: string;
-
-	constructor(errorCode: QuotaRefusalCode, detail: string) {
-		super(detail);
-		this.name = "QuotaGuardError";
-		this.error_code = errorCode;
-		this.detail = detail;
-	}
+/** One measured usage entry in catalog dimension units. */
+export interface ObservedDimension {
+	readonly dimension_key: DimensionKey;
+	readonly units: number;
 }
 
-export interface ReservationHandle {
-	readonly reservation_id: string;
-	readonly operation_id: string;
-	readonly route: string;
-	readonly reserved: readonly AdmissionDimension[];
-}
-
-/** Turn an admission result into a handle, or `null` when the operation was not admitted. */
-export function admissionHandle(
-	result: AdmissionResult,
-	request: { operation_id: string; route: string },
-): ReservationHandle | null {
-	if (result.status !== "ADMITTED") return null;
-	const totals = new Map<DimensionKey, number>();
-	for (const dimension of result.reserved) {
-		totals.set(
-			dimension.dimension_key,
-			(totals.get(dimension.dimension_key) ?? 0) + dimension.units,
-		);
-	}
-	// The ledger's own cost is part of the same reservation and may be observed
-	// without exceeding it; merging keeps a single accounting view.
-	for (const dimension of result.self_cost) {
-		totals.set(
-			dimension.dimension_key,
-			(totals.get(dimension.dimension_key) ?? 0) + dimension.units,
-		);
-	}
-	return {
-		reservation_id: result.reservation_id,
-		operation_id: request.operation_id,
-		route: request.route,
-		reserved: [...totals.entries()].map(([dimension_key, units]) => ({ dimension_key, units })),
-	};
-}
-
+/**
+ * Post-hoc accounting hook (Phase 2): receives the observed totals of one
+ * request.  Observers only guard their own bookkeeping -- a failing sink never
+ * reaches the business call path.
+ */
 export interface QuotaObservationSink {
-	/** Report observed platform usage; settlement happens outside the call path. */
 	observe(observed: readonly ObservedDimension[]): Promise<void> | void;
 }
 
 /**
- * Tracks spend against a handle so a single logical operation cannot amplify
- * beyond its reserved upper bound.
+ * Cumulative, best-effort usage ledger for one request.  Every method is
+ * failure-proof: recording can never throw and can never affect the wrapped
+ * resource call.
  */
-export class ReservationBudget {
-	private readonly reservedByDimension: Map<DimensionKey, number>;
-	private readonly spentByDimension: Map<DimensionKey, number> = new Map();
+export class UsageObserver {
+	private readonly totalsByDimension = new Map<DimensionKey, number>();
 
-	constructor(handle: ReservationHandle) {
-		this.reservedByDimension = new Map(
-			handle.reserved.map((dimension) => [dimension.dimension_key, dimension.units]),
-		);
-	}
-
-	reserved(dimensionKey: DimensionKey): number {
-		return this.reservedByDimension.get(dimensionKey) ?? 0;
-	}
-
-	/** Reserve the right to bill up to `units` of `dimensionKey` for one call. */
-	require(dimensionKey: DimensionKey, units: number, reason: string): void {
-		const specification = dimensionSpec(dimensionKey);
-		if (!specification || !specification.provable) {
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				`${reason}: dimension ${dimensionKey} has no provable upper bound`,
+	record(dimensionKey: DimensionKey, units: number): void {
+		try {
+			if (!Number.isFinite(units) || units <= 0) return;
+			this.totalsByDimension.set(
+				dimensionKey,
+				(this.totalsByDimension.get(dimensionKey) ?? 0) + Math.floor(units),
 			);
-		}
-		if (!Number.isSafeInteger(units) || units < 0) {
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				`${reason}: declared bound is not an integer`,
-			);
-		}
-		const reserved = this.reserved(dimensionKey);
-		if (reserved === 0) {
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				`${reason}: dimension ${dimensionKey} is not covered by reservation`,
-			);
-		}
-		if (this.spent(dimensionKey) + units > reserved) {
-			throw new QuotaGuardError(
-				"QUOTA_CIRCUIT_OPEN",
-				`${reason}: operation would exceed its reserved ${dimensionKey} bound`,
-			);
+		} catch {
+			// Observation must never break the business call.
 		}
 	}
 
-	/** Record actual usage reported by the platform. */
-	spend(dimensionKey: DimensionKey, units: number): void {
-		const next = this.spent(dimensionKey) + Math.max(0, Math.floor(units));
-		this.spentByDimension.set(dimensionKey, next);
+	/** Observed totals so far; dimensions with zero observations are absent. */
+	totals(): ObservedDimension[] {
+		try {
+			return [...this.totalsByDimension.entries()].map(([dimension_key, units]) => ({
+				dimension_key,
+				units,
+			}));
+		} catch {
+			return [];
+		}
 	}
 
-	spent(dimensionKey: DimensionKey): number {
-		return this.spentByDimension.get(dimensionKey) ?? 0;
-	}
-
-	/** Observed totals for settlement; empty dimensions default to their full reservation. */
-	snapshot(): ObservedDimension[] {
-		return [...this.reservedByDimension.entries()].map(([dimension_key, units]) => ({
-			dimension_key,
-			units: Math.min(this.spent(dimension_key), units),
-		}));
-	}
-}
-
-function assertHandle(
-	handle: ReservationHandle | null | undefined,
-	reason: string,
-): ReservationHandle {
-	if (!handle) {
-		throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", `${reason}: no ADMITTED reservation`);
-	}
-	return handle;
-}
-
-/** Safe observation hook: a failing sink never turns a refusal into a success. */
-async function report(
-	sink: QuotaObservationSink | undefined,
-	budget: ReservationBudget,
-): Promise<void> {
-	if (!sink) return;
-	try {
-		await sink.observe(budget.snapshot());
-	} catch {
-		// Observation is best effort; the reservation stays live either way.
+	/** Push the current totals to a sink; a failing sink is swallowed. */
+	async report(sink: QuotaObservationSink): Promise<void> {
+		try {
+			await sink.observe(this.totals());
+		} catch {
+			// Observation is best effort.
+		}
 	}
 }
 
@@ -171,51 +86,22 @@ async function report(
 type D1Like = Pick<D1Database, "prepare" | "batch">;
 
 /**
- * Wrap a D1 binding so every statement is billed against the reservation.  The
- * wrapper requires `d1.rows_read` / `d1.rows_written` reservations and refuses to
- * execute a statement it cannot bound (for example an unbounded scan that was not
- * declared) — the caller must declare its per-statement bound with
- * `budget.require("d1.rows_read", n, ...)` before running it.
+ * Wrap a D1 binding so every executed statement's platform-reported
+ * `rows_read` / `rows_written` is accumulated into the observer.  Statements
+ * run unmodified and in order; a result without usage meta records nothing and
+ * never fails the call.
  */
-export function createGuardedD1(
-	db: D1Like,
-	handle: ReservationHandle,
-	budget: ReservationBudget,
-	sink?: QuotaObservationSink,
-): D1Database {
-	assertHandle(handle, "D1 access");
-	const requireReadBound = () => budget.require("d1.rows_read", 1, "D1 statement");
-	const requireWriteBound = () => budget.require("d1.rows_written", 1, "D1 statement");
-	const guard = async (sql: string, meta: unknown) => {
-		const kind = /^\s*(select|with|pragma|explain)/i.test(sql) ? "read" : "write";
-		if (kind === "read") requireReadBound();
-		else requireWriteBound();
-		const record = meta as { rows_read?: number; rows_written?: number } | undefined;
-		const reads = Number.isSafeInteger(record?.rows_read) ? Number(record!.rows_read) : null;
-		const writes = Number.isSafeInteger(record?.rows_written)
-			? Number(record!.rows_written)
-			: null;
-		if (reads === null || writes === null) {
-			// Unknown practical usage: keep the reservation, never claim settlement.
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				"D1 usage metadata unavailable; reservation kept",
-			);
-		}
-		budget.spend("d1.rows_read", reads);
-		budget.spend("d1.rows_written", writes);
-		await report(sink, budget);
-		// The platform may report more than the reservation: the call cannot be
-		// undone, so fail closed for the rest of the operation and keep the
-		// reservation (it must never be released as if it had been within bound).
-		if (
-			budget.spent("d1.rows_read") > budget.reserved("d1.rows_read") ||
-			budget.spent("d1.rows_written") > budget.reserved("d1.rows_written")
-		) {
-			throw new QuotaGuardError(
-				"QUOTA_CIRCUIT_OPEN",
-				"actual D1 usage exceeded the reserved bound; reservation kept",
-			);
+export function createObservedD1(db: D1Like, observer?: UsageObserver): D1Database {
+	const recordMeta = (meta: unknown): void => {
+		if (!observer) return;
+		try {
+			const record = meta as { rows_read?: unknown; rows_written?: unknown } | undefined;
+			const reads = Number(record?.rows_read);
+			const writes = Number(record?.rows_written);
+			if (Number.isFinite(reads)) observer.record("d1.rows_read", reads);
+			if (Number.isFinite(writes)) observer.record("d1.rows_written", writes);
+		} catch {
+			// Observation must never break the business call.
 		}
 	};
 	const wrap = (sql: string, bound: D1PreparedStatement): D1PreparedStatement =>
@@ -228,50 +114,56 @@ export function createGuardedD1(
 						...values: unknown[]
 					) => D1PreparedStatement;
 					// D1's bind reads runtime session state off `this`; call it against
-					// the real statement or the guard proxy breaks the driver.
+					// the real statement or the proxy breaks the driver.
 					return (...values: unknown[]) => wrap(sql, bind.apply(target, values));
 				}
 				if (property === "first") {
-					// D1's first() returns the row itself and never carries usage
-					// metadata, so guarding result.meta here would fail closed on
-					// EVERY bounded read (the 2026-09-30 C5 outage): run the
-					// bounded .all() instead, guard on its meta, then project the
-					// first row — preserving the optional column-name variant.
+					// first() returns the row itself and never carries usage meta, so a
+					// plain passthrough would leave read traffic unmeasured.  Mirror the
+					// C5-2026-09-30 fix (driver-proven in production): execute the
+					// bounded .all() ONCE, observe its meta, project the first row --
+					// preserving the optional column-name variant.  If the projection
+					// itself fails, fall back to the native first() (a read-only
+					// re-execution) so the observer can never change the business
+					// outcome.
 					return async (...args: unknown[]) => {
 						const all = target.all as unknown as (
 							...inner: unknown[]
 						) => Promise<{ results?: Array<Record<string, unknown>>; meta?: unknown }>;
-						const result = await all.apply(target, args);
-						await guard(sql, result?.meta);
-						const rows = result?.results ?? [];
-						const firstRow = (rows[0] ?? null) as Record<string, unknown> | null;
-						if (typeof args[0] === "string") {
-							return firstRow === null ? null : (firstRow[args[0] as string] ?? null);
+						const first = target.first as unknown as (
+							...inner: unknown[]
+						) => Promise<unknown>;
+						try {
+							const result = await all.apply(target, args);
+							recordMeta(result?.meta);
+							const rows = result?.results ?? [];
+							const firstRow = (rows[0] ?? null) as Record<string, unknown> | null;
+							if (typeof args[0] === "string") {
+								return firstRow === null ? null : (firstRow[args[0] as string] ?? null);
+							}
+							return firstRow;
+						} catch {
+							// The projection must never alter the business result: let the
+							// native first() answer (and throw) -- the earlier attempt was a
+							// read, so re-execution is safe.
+							return await first.apply(target, args);
 						}
-						return firstRow;
 					};
 				}
-				if (
-					property === "run" ||
-					property === "all" ||
-					property === "raw"
-				) {
+				if (property === "run" || property === "all" || property === "raw") {
 					return async (...args: unknown[]) => {
 						const result = await (
 							value as (...inner: unknown[]) => Promise<unknown>
 						).apply(target, args);
-						await guard(sql, (result as { meta?: unknown })?.meta);
+						recordMeta((result as { meta?: unknown })?.meta);
 						return result;
 					};
 				}
-				// Any other runtime affordance (e.g. D1 session APIs) passes through
-				// unwrapped rather than turning into an opaque guarded function.
+				// Everything else (session APIs, runtime affordances) passes through
+				// UNMODIFIED.
 				return value.bind(target);
 			},
 		}) as D1PreparedStatement;
-	// Proxy the database itself: prepare/batch are guarded, every other property
-	// (session APIs, internal handles the runtime reaches for) passes through to
-	// the real binding so the Worker runtime never sees a hole in the object.
 	return new Proxy(db, {
 		get(target, property, receiver) {
 			if (property === "prepare") {
@@ -280,10 +172,8 @@ export function createGuardedD1(
 			}
 			if (property === "batch") {
 				return async (statements: D1PreparedStatement[]) => {
-					requireWriteBound();
 					const results = await target.batch(statements);
-					for (const result of results)
-						await guard("batch", (result as { meta?: unknown })?.meta);
+					for (const result of results) recordMeta((result as { meta?: unknown })?.meta);
 					return results;
 				};
 			}
@@ -304,29 +194,22 @@ const R2_CLASS_BY_OPERATION = {
 	get: "r2.class_b",
 	head: "r2.class_b",
 	list: "r2.class_a",
-	// DeleteObject is free: it consumes no Class A/B allowance.  The D1 rows that
-	// record the deletion are billed separately through the guarded D1 binding.
+	// DeleteObject is free: it consumes no Class A/B allowance.
 	delete: null,
 } as const;
 
-export function createGuardedR2(
-	bucket: R2Like,
-	handle: ReservationHandle,
-	budget: ReservationBudget,
-	sink?: QuotaObservationSink,
-): R2Bucket {
-	assertHandle(handle, "R2 access");
+/**
+ * Wrap an R2 bucket so every operation counts one Class A/B operation into the
+ * observer.  Calls run unmodified; counting can never fail the call.
+ */
+export function createObservedR2(bucket: R2Like, observer?: UsageObserver): R2Bucket {
 	const wrap = <K extends keyof typeof R2_CLASS_BY_OPERATION>(operation: K) => {
 		return async (...args: unknown[]) => {
-			const dimension = R2_CLASS_BY_OPERATION[operation];
-			if (dimension) budget.require(dimension as DimensionKey, 1, `R2 ${operation}`);
 			const result = await (
 				bucket[operation] as (...inner: unknown[]) => Promise<unknown>
 			).apply(bucket, args);
-			if (dimension) {
-				budget.spend(dimension as DimensionKey, 1);
-				await report(sink, budget);
-			}
+			const dimension = R2_CLASS_BY_OPERATION[operation];
+			if (dimension) observer?.record(dimension as DimensionKey, 1);
 			return result;
 		};
 	};
@@ -337,126 +220,4 @@ export function createGuardedR2(
 		delete: wrap("delete"),
 		list: wrap("list"),
 	} as unknown as R2Bucket;
-}
-
-// ---------------------------------------------------------------------------
-// AI / Vectorize
-// ---------------------------------------------------------------------------
-
-/**
- * A provider-side token upper bound with tokenizer evidence.
- */
-export interface NeuronBoundProof {
-	readonly model: string;
-	readonly neurons_per_million_tokens: number;
-	readonly max_input_tokens: number;
-}
-
-/**
- * Calibrated vector width for one Vectorize query.  `null` means the accounting
- * is not calibrated for this index (the deployment probe must confirm the real
- * dimensions first), and the guarded query refuses rather than guessing.
- */
-export const VECTORIZE_QUERY_DIMENSIONS: number | null = null;
-
-/**
- * Provider-side neuron bound with tokenizer evidence (owner approved the daily
- * budget admission on 2026-09-30).  The embedding pipeline caps one document at
- * `SEMANTIC_MAX_CHUNKS` (32) chunks of `SEMANTIC_CHUNK_CHARS` + overlap (1,350)
- * characters; billing counts *input* tokens, and 1 char = 1 token is the worst
- * case for bge-m3 (Chinese) and over-counts English ~4x:
- * ceil(43_200 * 1_075 / 1e6) = 47 neurons per document call.
- */
-export const NEURON_BOUND: NeuronBoundProof = {
-	model: "@cf/baai/bge-m3",
-	neurons_per_million_tokens: 1_075,
-	max_input_tokens: 43_200,
-};
-
-export function neuronUpperBound(proof: NeuronBoundProof | null = NEURON_BOUND): number | null {
-	if (!proof) return null;
-	if (!(proof.neurons_per_million_tokens > 0) || !(proof.max_input_tokens > 0)) return null;
-	return Math.ceil((proof.max_input_tokens * proof.neurons_per_million_tokens) / 1_000_000);
-}
-
-type AiLike = Pick<Ai, "run">;
-
-/** Refuse Workers AI unless a verified neuron bound exists and is reserved. */
-export function createGuardedAi(
-	ai: AiLike,
-	handle: ReservationHandle | null,
-	budget: ReservationBudget | null,
-): AiLike {
-	return {
-		async run(...args: unknown[]) {
-			assertHandle(handle, "Workers AI call");
-			const bound = neuronUpperBound();
-			if (bound === null || !budget) {
-				throw new QuotaGuardError(
-					"QUOTA_GUARD_UNAVAILABLE",
-					"Workers AI neurons have no provable per-call upper bound; embedding stays closed",
-				);
-			}
-			budget.require("ai.neurons", bound, "Workers AI call");
-			const result = await (ai.run as (...inner: unknown[]) => Promise<unknown>).apply(
-				ai,
-				args,
-			);
-			budget.spend("ai.neurons", bound);
-			return result;
-		},
-	} as AiLike;
-}
-
-type VectorizeLike = Pick<VectorizeIndex, "query" | "upsert" | "deleteByIds">;
-
-/**
- * Refuse Vectorize writes and queries unless both the query dimension count and
- * the stored-dimension stock semantics are provable and reserved.  Stored
- * dimensions use provider stock semantics (`verifiable_stock` must be set on the
- * handle), so the default is a refusal.
- */
-export function createGuardedVectorize(
-	index: VectorizeLike,
-	handle: ReservationHandle | null,
-	budget: ReservationBudget | null,
-): VectorizeLike {
-	assertHandle(handle, "Vectorize call");
-	return {
-		async query(...args: unknown[]) {
-			if (!budget) {
-				throw new QuotaGuardError(
-					"QUOTA_GUARD_UNAVAILABLE",
-					"Vectorize call has no reservation budget",
-				);
-			}
-			const specification = dimensionSpec("vectorize.queried_dims");
-			if (!specification?.provable || VECTORIZE_QUERY_DIMENSIONS === null) {
-				throw new QuotaGuardError(
-					"QUOTA_GUARD_UNAVAILABLE",
-					"Vectorize queried-dimension accounting is not calibrated",
-				);
-			}
-			const perQuery = (specification.threshold_95 ?? 0) > 0 ? VECTORIZE_QUERY_DIMENSIONS : 0;
-			budget.require("vectorize.queried_dims", perQuery, "Vectorize query");
-			const result = await (index.query as (...inner: unknown[]) => Promise<unknown>).apply(
-				index,
-				args,
-			);
-			budget.spend("vectorize.queried_dims", perQuery);
-			return result;
-		},
-		async upsert() {
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				"Vectorize stored-dimension stock semantics are not verified for this account",
-			);
-		},
-		async deleteByIds() {
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				"Vectorize stored-dimension stock semantics are not verified for this account",
-			);
-		},
-	} as VectorizeLike;
 }

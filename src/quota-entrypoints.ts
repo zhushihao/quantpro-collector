@@ -1,38 +1,45 @@
 /**
- * Entrypoint cost catalog and the outward refusal contract (spec §"模块与接口
- * 清单" last two rows, §5 response contract).
+ * Entrypoint cost catalog (post-redesign directory, 2026-10-02).
  *
  * The catalog is the single place where every reachable entrypoint (HTTP path,
- * MCP tool, Cron expression, OAuth route) is classified. Candidate bounds are
- * not admission authority until the physical per-call upper bound is proven.
- * `tests/quota-entrypoints.test.mjs` enumerates the real
- * registrations out of `src/index.ts` / `src/oauth-*.ts` and fails when a route
- * or tool is missing here — a new unclassified entrypoint cannot ship silently.
+ * MCP tool, Cron expression, OAuth route) is classified together with the paid
+ * dimensions it can touch.  Since the front admission gate was removed (quota
+ * redesign, spec section 1.1) this catalog has NO admission authority and
+ * NOTHING is refused because of it: the declared dimensions and caps are the
+ * dimension-aggregation vocabulary the post-hoc accounting middleware
+ * (`quota_client_usage_hourly`, Phase 2) reuses to bucket measured usage per
+ * route.
  *
- * Classes:
- *   control          - inbound request bookkeeping; billed on arrival and cannot
- *                      be prevented from inside the Worker.  Declared as a known
- *                      gap, never presented as a guarantee.
- *   light_read       - keyed read with a declared D1 row bound; may degrade
- *                      safely, but is still billed.
- *   heavy_bounded    - declares every affected paid dimension with a provable
- *                      upper bound; must pass the admission ledger.
- *   heavy_unbounded  - no provable upper bound (unbounded scan, AI neurons,
- *                      Vectorize stock).  ALWAYS refused in enforce mode.
+ * `tests/quota-entrypoints.test.mjs` enumerates the real registrations out of
+ * `src/index.ts` / `src/oauth-*.ts` / `wrangler.jsonc` and fails when a route or
+ * tool is missing here -- a new unclassified entrypoint cannot ship silently.
+ *
+ * Classes (informational, for accounting priority -- never a gate):
+ *   control          - inbound bookkeeping only; no Collector paid resource.
+ *   light_read       - keyed read with a small declared D1 row bound.
+ *   heavy_bounded    - touches paid dimensions with declared per-call caps.
+ *   heavy_unbounded  - touches dimensions without a per-call bound (unbounded
+ *                      scan, Vectorize stock).  Informational only.
  */
 
-import type { AdmissionDimension } from "./quota-admission.ts";
+import type { DimensionKey } from "./quota-dimensions.ts";
 
 export type EntrypointKind = "http" | "mcp_tool" | "cron" | "oauth";
 
 export type RouteCostClass = "control" | "light_read" | "heavy_bounded" | "heavy_unbounded";
 
+/** One declared paid dimension with its per-call cap, in catalog units. */
+export interface RouteDimension {
+	readonly dimension_key: DimensionKey;
+	readonly units: number;
+}
+
 export interface RouteCostProfile {
 	readonly route: string;
 	readonly kind: EntrypointKind;
 	readonly cost_class: RouteCostClass;
-	/** Declared per-call upper bounds; required for `heavy_bounded`. */
-	readonly dimensions: readonly AdmissionDimension[];
+	/** Declared per-call dimension caps; used by the accounting middleware. */
+	readonly dimensions: readonly RouteDimension[];
 	readonly note: string;
 }
 
@@ -40,29 +47,19 @@ function profile(
 	kind: EntrypointKind,
 	route: string,
 	cost_class: RouteCostClass,
-	dimensions: readonly AdmissionDimension[],
+	dimensions: readonly RouteDimension[],
 	note: string,
 ): RouteCostProfile {
-	// `heavy_bounded` declarations are CAP reservations: every declared unit count
-	// exceeds any real per-call cost the handler can generate, so settlement can
-	// only stay at or below the reservation and a batch of caps stays far below
-	// the 95% headroom (owner 95%-per-product directive 2026-09-29).  Without a
-	// VERIFIED baseline the ledger refuses exactly like an unbounded route.
 	return { route, kind, cost_class, dimensions, note };
 }
 
-const d1Read = (units: number): AdmissionDimension => ({ dimension_key: "d1.rows_read", units });
-const d1Write = (units: number): AdmissionDimension => ({
+const d1Read = (units: number): RouteDimension => ({ dimension_key: "d1.rows_read", units });
+const d1Write = (units: number): RouteDimension => ({
 	dimension_key: "d1.rows_written",
 	units,
 });
-const r2A = (units: number): AdmissionDimension => ({ dimension_key: "r2.class_a", units });
-const r2B = (units: number): AdmissionDimension => ({ dimension_key: "r2.class_b", units });
-const aiNeurons = (units: number): AdmissionDimension => ({ dimension_key: "ai.neurons", units });
-const vectorizeQueried = (units: number): AdmissionDimension => ({
-	dimension_key: "vectorize.queried_dims",
-	units,
-});
+const r2A = (units: number): RouteDimension => ({ dimension_key: "r2.class_a", units });
+const r2B = (units: number): RouteDimension => ({ dimension_key: "r2.class_b", units });
 
 /** HTTP entrypoints served by `src/index.ts`, `src/oauth-entry.ts`, `src/oauth-diagnostics-entry.ts`. */
 export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
@@ -120,7 +117,7 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 		"http:/internal/research-replica/v2/ingest",
 		"heavy_bounded",
 		[d1Read(10_000), d1Write(1_000), r2A(4), r2B(4)],
-		"replica ingest: journal+object R2 writes and one D1 batch per record. Caps, not estimates: the batch is keyed lookups plus bounded FTS/semantic maintenance, and even the full frozen backfill (~7.5k records x caps) stays under 0.5% of every monthly 95% headroom; real platform meta is observed by the guarded adapters and over-cap actuals keep the reservation and halt the route. In enforce mode no AI embedding is scheduled on this path.",
+		"replica ingest: journal+object R2 writes and one D1 batch per record. Declared caps are the accounting aggregation hints; actual usage is observed post-hoc by the pure resource observers.",
 	),
 	profile(
 		"http",
@@ -132,23 +129,23 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 	profile(
 		"http",
 		"http:/internal/research-semantic-index/run",
-		"heavy_bounded",
-		[aiNeurons(940), d1Read(20_000), d1Write(4_000)],
-		"embedding run with a daily neuron budget (owner approved 2026-09-30): handler clamps max_docs to SEMANTIC_BATCH_MAX_DOCS (10); 940 = 10 docs x 47-neuron document cap x 2x retry headroom; the daily booked ledger stops runs once the UTC-day 9,500 threshold would be crossed. D1 caps cover the register page scan (200 docs across records/objects/links) and its writes. Vectorize upserts grow stored dimensions (a stock dimension with no provable per-call bound, ~$0.01/month at this scale) and stay on the direct binding, as disclosed.",
+		"control",
+		[],
+		"SEALED (quota redesign 2026-10-02, G2): cloud batch embedding is permanently disabled and the route returns a structured pointer to the local RTX 5080 GPU pipeline; zero Workers AI calls",
 	),
 	profile(
 		"http",
 		"http:/internal/research-semantic-index/pending",
-		"heavy_bounded",
-		[d1Read(500_000), d1Write(1_000)],
-		"read-only cursor page of at most 128 already-registered versions using the forced (state,document,version) index; cap includes worst-case live-ledger scans and all ledger self-cost",
+		"light_read",
+		[d1Read(500_000)],
+		"read-only cursor page of at most 128 already-registered versions using the forced (state,document,version) index; the local GPU pipeline polls this to plan its embedding work",
 	),
 	profile(
 		"http",
 		"http:/internal/research-semantic-index/ingest-vectors",
 		"heavy_bounded",
 		[d1Read(500), d1Write(300)],
-		"locally-computed embeddings (owner approved 2026-09-30): zero Workers AI cost; the declaration covers the state-row read/write and one Vectorize upsert per document; Vectorize stored-dimension growth stays on the direct binding as disclosed for the run route",
+		"locally-computed embeddings (owner approved 2026-09-30): zero Workers AI cost; the declaration covers the state-row read/write and one Vectorize upsert per document; Vectorize stored-dimension growth stays on the direct binding",
 	),
 	profile(
 		"http",
@@ -162,7 +159,7 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 		"http:/internal/research-semantic-index/probe",
 		"light_read",
 		[d1Read(16)],
-		"deployment probe read",
+		"deployment probe read (one single-query embedding, operator-triggered only)",
 	),
 	profile(
 		"http",
@@ -204,7 +201,7 @@ export const QUOTA_HTTP_ROUTES: readonly RouteCostProfile[] = [
 /** MCP tools registered in `src/index.ts` (enumerated by the coverage test). */
 const TOOL_CLASSES: Record<
 	string,
-	{ cost_class: RouteCostClass; dimensions: readonly AdmissionDimension[]; note: string }
+	{ cost_class: RouteCostClass; dimensions: readonly RouteDimension[]; note: string }
 > = {
 	calculate: {
 		cost_class: "light_read",
@@ -326,8 +323,8 @@ const TOOL_CLASSES: Record<
 	get_document: { cost_class: "light_read", dimensions: [d1Read(16)], note: "document read" },
 	search_documents_semantic: {
 		cost_class: "heavy_bounded",
-		dimensions: [d1Read(32), aiNeurons(94), vectorizeQueried(1_024)],
-		note: "semantic query: one bge-m3 embedding + one 1024-dim index query + index lookups. aiNeurons(94) derives from the owner-approved 47-neuron per-document unit (see the index run entry) x 2x retry headroom — a single query embeds at most one document equivalent; vectorizeQueried(1024) is the index dimensionality x exactly one query per call. Read face: admitted on arrival, billed by declaration.",
+		dimensions: [d1Read(32)],
+		note: "semantic query: one bge-m3 query embedding (<1 Neuron, the ONLY remaining cloud AI spend) + one 1024-dim index query + index lookups; the single-shot query-to-vector path is preserved untouched (quota redesign 2026-10-02)",
 	},
 	search_evidence: { cost_class: "light_read", dimensions: [d1Read(32)], note: "evidence read" },
 	get_evidence: { cost_class: "light_read", dimensions: [d1Read(16)], note: "evidence read" },
@@ -405,14 +402,14 @@ export const QUOTA_CRONS: readonly RouteCostProfile[] = [
 		"cron:30 20 * * *",
 		"heavy_unbounded",
 		[],
-		"daily retention sweep: unbounded documents scan plus Vectorize deletion; must report a structured skip",
+		"daily retention sweep: unbounded documents scan plus Vectorize deletion",
 	),
 	profile(
 		"cron",
 		"cron:40 16 * * *",
-		"heavy_bounded",
-		[aiNeurons(940), d1Read(20_000), d1Write(4_000)],
-		"daily semantic indexing (owner approved 2026-09-30): the scheduled loop reserves each 10-document batch through the same admission path as the HTTP run route (940 neurons per batch) and stops when the UTC-day ledger refuses; this per-batch declaration is the loop's unit",
+		"control",
+		[],
+		"SEALED (quota redesign 2026-10-02, G2): registration kept so the cron catalog stays complete, but the handler is a structured no-op log; cloud batch embedding belongs to the local GPU pipeline",
 	),
 ];
 
@@ -514,91 +511,4 @@ export function missingEntrypoints(observed: readonly string[], kind?: Entrypoin
 
 export function unclassifiedEntrypoints(observed: readonly string[]): string[] {
 	return observed.filter((route) => !BY_ROUTE.has(route));
-}
-
-// ---------------------------------------------------------------------------
-// Outward refusal contract (spec §5)
-// ---------------------------------------------------------------------------
-
-export type QuotaRefusalErrorCode = "QUOTA_CIRCUIT_OPEN" | "QUOTA_GUARD_UNAVAILABLE";
-
-export interface QuotaRefusalBody {
-	readonly error_code: QuotaRefusalErrorCode;
-	readonly safe_message: string;
-	readonly retryable: boolean;
-	readonly request_id: string;
-}
-
-/**
- * Safe messages.  Deliberately free of any "UTC day reset" promise: the monthly
- * period can only be re-opened when a verified account baseline for the next
- * period exists, and no automated recovery instant can be proven today.
- */
-const REFUSAL_MESSAGES: Record<QuotaRefusalErrorCode, string> = {
-	QUOTA_CIRCUIT_OPEN:
-		"platform usage budget circuit is open; heavy work is paused until an operator verifies the account baseline",
-	QUOTA_GUARD_UNAVAILABLE:
-		"usage guard cannot prove a safe upper bound; heavy work is paused until the guard is available",
-};
-
-export function quotaRefusalBody(
-	errorCode: QuotaRefusalErrorCode,
-	requestId: string,
-	options: { retryable?: boolean } = {},
-): QuotaRefusalBody {
-	return {
-		error_code: errorCode,
-		safe_message: REFUSAL_MESSAGES[errorCode],
-		retryable: options.retryable ?? false,
-		request_id: requestId,
-	};
-}
-
-export interface SafeHttpRefusal {
-	readonly status: 503;
-	readonly body: QuotaRefusalBody;
-	/** Only present when the recovery instant is provable from a verified baseline. */
-	readonly retry_after_seconds: number | null;
-}
-
-export function quotaHttpRefusal(
-	errorCode: QuotaRefusalErrorCode,
-	requestId: string,
-	provenRecoveryAt: Date | null = null,
-	now = new Date(),
-): SafeHttpRefusal {
-	let retryAfter: number | null = null;
-	if (provenRecoveryAt && Number.isFinite(provenRecoveryAt.getTime())) {
-		const seconds = Math.ceil((provenRecoveryAt.getTime() - now.getTime()) / 1000);
-		if (seconds > 0) retryAfter = seconds;
-	}
-	return {
-		status: 503,
-		body: quotaRefusalBody(errorCode, requestId, { retryable: retryAfter !== null }),
-		retry_after_seconds: retryAfter,
-	};
-}
-
-/** MCP tools keep the existing envelope: `isError: true` plus the machine-readable body. */
-export function quotaMcpRefusal(
-	errorCode: QuotaRefusalErrorCode,
-	requestId: string,
-): { isError: true; content: Array<{ type: "text"; text: string }> } {
-	return {
-		isError: true,
-		content: [
-			{ type: "text", text: JSON.stringify(quotaRefusalBody(errorCode, requestId), null, 2) },
-		],
-	};
-}
-
-export type CronQuotaOutcome =
-	| { readonly status: "skipped"; readonly reason: QuotaRefusalErrorCode; readonly task: string }
-	| { readonly status: "failed"; readonly reason: QuotaRefusalErrorCode; readonly task: string };
-
-/** Cron must never fabricate a success receipt when the guard refuses the work. */
-export function cronQuotaOutcome(errorCode: QuotaRefusalErrorCode, task: string): CronQuotaOutcome {
-	return errorCode === "QUOTA_CIRCUIT_OPEN"
-		? { status: "skipped", reason: errorCode, task }
-		: { status: "failed", reason: errorCode, task };
 }

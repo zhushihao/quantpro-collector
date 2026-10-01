@@ -10,7 +10,6 @@ import {
 } from "./live-universe";
 import { recordPortfolioUniverseObservation, type PortfolioDeltaState } from "./portfolio-delta";
 import {
-	LiveCoverageError,
 	MARKET_READ_SCOPE,
 	isLiveOverlayEnabled,
 	projectCallerSnapshot,
@@ -34,7 +33,7 @@ import {
 	type PortfolioPresentation,
 	type StoredPortfolioStatus,
 } from "./portfolio-status";
-import { getSnapshotCounts, validateSnapshot, type QuoteSnapshot } from "./portfolio-validation";
+import { type QuoteSnapshot } from "./portfolio-validation";
 import { toPublicQuoteSnapshot, type PublicQuoteSnapshot } from "./quote-projections";
 import {
 	fetchQuoteSnapshotFromCatalog,
@@ -71,11 +70,8 @@ import {
 import {
 	ingestPrecomputedVectors,
 	listPendingSemanticVersions,
-	indexSemanticDocument,
 	probeSemanticIndex,
 	readSemanticIndexCoverage,
-	runSemanticIndexBatch,
-	SEMANTIC_BATCH_MAX_DOCS,
 	SEMANTIC_QUERY_MAX_LIMIT,
 	SEMANTIC_QUERY_MAX_QUERY_CHARS,
 	type SemanticIndexDeps,
@@ -124,38 +120,24 @@ import {
 	SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA,
 	processRunEnvelope,
 } from "./run-envelope.ts";
-import {
-	ISSUE_BOOKKEEPING_INPUT_SCHEMA,
-	submitIssueBookkeeping,
-} from "./issue-bookkeeping.ts";
+import { ISSUE_BOOKKEEPING_INPUT_SCHEMA, submitIssueBookkeeping } from "./issue-bookkeeping.ts";
 import { runScheduleReconciliation } from "./automation-schedule.ts";
 import { getProductionHealthSnapshot } from "./production-health.ts";
 import {
 	QUOTA_ACCOUNT_TAG,
-	QUOTA_CATALOG_VERSION,
-	admissionHandle,
-	admissionMode,
-	admitOperation,
-	cronQuotaOutcome,
-	legacyBreakerFlag,
-	quotaHttpRefusal,
-	quotaMcpRefusal,
-	quotaStatus,
-	QuotaGuardError,
-	ReservationBudget,
-	routeCostProfile,
-	settleReservation,
-	syncDimensionCatalog,
-	createGuardedAi,
-	createGuardedD1,
-	createGuardedR2,
 	QUOTA_DIMENSIONS,
+	UsageObserver,
+	createObservedD1,
+	createObservedR2,
+	legacyBreakerFlag,
+	quotaStatus,
 } from "./quota-breaker.ts";
 import {
-	LIFELINE_MAINTENANCE_RESERVE,
-	runEnvelopeAdmissionRoute,
-	type LifelineProbeInput,
-} from "./quota-entrypoints.ts";
+	QUOTA_CLIENT_RESEARCH_RUNNER,
+	QUOTA_CLIENT_UNATTRIBUTED,
+	recordClientUsage,
+	semanticSearchCircuitRefusal,
+} from "./quota-metering.ts";
 import { STATE_READ_SCOPE, STATE_WRITE_SCOPE } from "./state-scopes.ts";
 
 const GITHUB_REPOSITORY = "zhushihao/quantpro-collector";
@@ -188,11 +170,11 @@ interface Env {
 	/** 转发主体头白名单（空格分隔，含桥身份）；未配置时保持旧行为（开放接受）。 */
 	COLLECTOR_FORWARDABLE_PRINCIPALS?: string;
 	RESEARCH_REPLICA?: D1Database;
-	/** Multi-dimension 95% admission switch: `off` (default) | `enforce`. */
-	QUOTA_ADMISSION_MODE?: string;
 	/**
 	 * Legacy 2026-09-29 daily prototype flag.  Inert by contract: it never opens
 	 * a gate and is only reported so an operator cannot mistake it for protection.
+	 * The former `QUOTA_ADMISSION_MODE` switch is abolished (2026-10-02 gate
+	 * removal): setting it changes no behavior anywhere.
 	 */
 	QUOTA_BREAKER_ENABLED?: string;
 	CLOUDFLARE_API_TOKEN?: string;
@@ -679,170 +661,168 @@ export async function updateQuoteBridge(
 	return payload;
 }
 
-/** Server-owned billing account id for the admission ledger. */
+/** Server-owned billing account id for the legacy quota-ledger status face. */
 function quotaAccountId(): string {
 	return QUOTA_ACCOUNT_TAG;
 }
 
 /**
- * Multi-dimension admission (SDD CQ spec §"准入、原子性、异步和恢复合同").
+ * One settle of post-hoc usage metering (quota redesign 2026-10-02 Phase 2):
+ * the finished request's measured D1/R2 totals are logged AND aggregated into
+ * `quota_client_usage_hourly`.  This is pure bookkeeping: the whole settle body
+ * is wrapped in try-catch, so a metering failure can never fail, block or
+ * re-judge the business response.
  *
- * `off` (default) performs no gating.  `enforce` requires an ADMITTED
- * reservation for every `heavy_bounded` route and refuses every
- * `heavy_unbounded` route outright; with no verified account baseline the ledger
- * denies by construction, so the safe state is CLOSED rather than a modelled
- * "95% guarantee".
+ * `clientId` is a verified credential identity (never an IP guess): the
+ * internal-transport callers pass QUOTA_CLIENT_RESEARCH_RUNNER (their handler
+ * already 401s anything that did not byte-match the ingest token); the MCP face
+ * passes the bridge/static principal or QUOTA_CLIENT_UNATTRIBUTED.  Requests
+ * whose observers measured nothing write nothing: auth refusals and zero-usage
+ * tools must not inject rows into the ledger.
  */
-async function admitHeavyRouteForEnv(
-	env: Env | undefined,
-	args: { route: string; operation_id: string; fingerprint: string },
-): Promise<{
-	handle: NonNullable<ReturnType<typeof admissionHandle>>;
-	budget: ReservationBudget;
-	result: { status: string; reservation_id?: string };
-}> {
-	const profile = routeCostProfile(args.route);
-	if (!profile) {
-		throw new QuotaGuardError(
-			"QUOTA_GUARD_UNAVAILABLE",
-			`route ${args.route} is not classified in the cost catalog`,
-		);
-	}
-	if (profile.cost_class === "heavy_unbounded") {
-		throw new QuotaGuardError(
-			"QUOTA_GUARD_UNAVAILABLE",
-			`route ${args.route} has no provable per-operation upper bound`,
-		);
-	}
-	const db = env?.RESEARCH_REPLICA;
-	if (!db)
-		throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "admission ledger binding is missing");
-	const catalogOk = await ensureDimensionCatalog(db).then(
-		() => true,
-		() => false,
-	);
-	if (!catalogOk) {
-		throw new QuotaGuardError(
-			"QUOTA_GUARD_UNAVAILABLE",
-			"dimension catalog is not synchronised",
-		);
-	}
-	const result = await admitOperation(
-		db,
-		{
-			operation_id: args.operation_id,
-			fingerprint: args.fingerprint,
-			route: args.route,
-			dimensions: profile.dimensions,
-		},
-		{ account_id: quotaAccountId() },
-	);
-	if (result.status === "DENIED") {
-		// Error-code decoupling (issue #54): `limit` is the REAL 95% ceiling (or
-		// the unobserved-tail reserve) and is the only reason that may report
-		// `QUOTA_CIRCUIT_OPEN`.  The ledger read-bound reason (`cap`) and every
-		// proof/plumbing failure report `QUOTA_GUARD_UNAVAILABLE`, so an operator
-		// never reads "circuit open" while the account has headroom.
-		const code = result.reason === "limit" ? "QUOTA_CIRCUIT_OPEN" : "QUOTA_GUARD_UNAVAILABLE";
-		// Operators can only fix what the logs name: the reason and refusing
-		// dimension carry no secrets and are the sole signal for baseline repair.
+async function settleQuotaMetering(options: {
+	route: string;
+	clientId: string;
+	observer: UsageObserver;
+	/** Raw (unobserved) replica binding used ONLY for the metering write. */
+	db?: D1Database | null;
+}): Promise<void> {
+	try {
+		const observed = options.observer.totals();
+		if (observed.length === 0) return;
 		console.log(
 			JSON.stringify({
-				event: "quota_admission_denied",
+				event: "quota_observation",
 				timestamp: new Date().toISOString(),
-				route: args.route,
-				operation_id: args.operation_id,
-				reason: result.reason,
-				dimension: result.dimension_key ?? null,
-				detail: result.detail,
+				route: options.route,
+				client_id: options.clientId,
+				observed,
 			}),
 		);
-		throw new QuotaGuardError(code, `admission denied (${result.reason}) for ${args.route}`);
-	}
-	if (result.status === "REPLAY") {
-		throw new QuotaGuardError(
-			"QUOTA_GUARD_UNAVAILABLE",
-			`operation ${args.operation_id} already completed; refusing to repeat it`,
+		if (options.db) {
+			await recordClientUsage(options.db, {
+				route: options.route,
+				client_id: options.clientId,
+				observed,
+				now: new Date(),
+			});
+		}
+	} catch (error) {
+		// Metering failure is bookkeeping-only: name it for operators, never
+		// let it reach the business response (which already returned).
+		console.log(
+			JSON.stringify({
+				event: "quota_metering_failed",
+				timestamp: new Date().toISOString(),
+				route: options.route,
+				detail: "usage accounting failed; business response unaffected",
+				error_name: error instanceof Error ? error.name : "Error",
+			}),
 		);
 	}
-	const handle = admissionHandle(result, {
-		operation_id: args.operation_id,
-		route: args.route,
-	});
-	if (!handle) throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "admission handle missing");
-	return { handle, budget: new ReservationBudget(handle), result };
 }
 
-/**
- * Settle a reservation with the platform-observed practical usage.  Used by the
- * guarded ingest path; a rejection keeps the reservation (never a silent
- * "corrected" write).
- */
-async function settleObserved(
-	env: Env | undefined,
-	reservationId: string,
-	observed: { dimension_key: never; units: number }[],
-	reason: string,
-): Promise<void> {
-	const db = env?.RESEARCH_REPLICA;
-	if (!db || observed.length === 0) return;
-	await settleReservation(db, {
-		reservation_id: reservationId,
-		observed,
-		reason,
-	}).catch(() => undefined);
+/** `settleQuotaMetering` moved off the response path into `ctx.waitUntil`. */
+export function scheduleQuotaMetering(
+	ctx: ExecutionContext | undefined,
+	options: Parameters<typeof settleQuotaMetering>[0],
+): void {
+	if (typeof ctx?.waitUntil !== "function") return;
+	ctx.waitUntil(settleQuotaMetering(options));
 }
 
-/**
- * Declared-bound charge for routes whose internal calls are not yet metered per
- * dimension (MCP heavy tools).  Conservative: the whole declared bound is
- * charged, so a later settlement can never under-count; the residual gap is
- * reported in the implementation report.
- */
-async function chargeDeclaredBoundForEnv(
-	env: Env | undefined,
-	result: { status: string; reservation_id?: string },
-): Promise<void> {
-	const db = env?.RESEARCH_REPLICA;
-	if (!db || result.status !== "ADMITTED" || !result.reservation_id) return;
-	const reserved = await db
-		.prepare(
-			`SELECT dimension_key, units FROM quota_reservation_units WHERE reservation_id = ?`,
-		)
-		.bind(result.reservation_id)
-		.all<{ dimension_key: string; units: number }>();
-	const observed = (reserved.results ?? []).map((row) => ({
-		dimension_key: row.dimension_key as never,
-		units: Number(row.units),
-	}));
-	await settleObserved(env, result.reservation_id, observed, "declared_bound_charged");
-}
+/** Fallback route for MCP traffic whose JSON-RPC method could not be read. */
+const MCP_ROUTE_UNCLASSIFIED = "mcp:unclassified";
 
 /**
- * Dimension-catalog synchronisation cache, keyed by the concrete D1 binding and
- * the catalog version.  The write is bounded (one row per catalog dimension, once
- * per isolate per version); a failure clears the entry so the next admission
- * retries instead of trusting a half-written catalog.  Catalog rows are copied
- * into D1 so the admission guard can reject a stale or edited ceiling.
+ * Best-effort JSON-RPC probe of the MCP tool a request invoked, for the usage
+ * ledger's route column.  Reads a CLONE made before the handler consumed the
+ * body, so the probe can never disturb the business request; every failure
+ * (non-JSON body, batch shapes, timeouts, non-POST transports) degrades to
+ * `mcp:unclassified` rather than guessing.
  */
-const dimensionCatalogReady = new WeakMap<D1Database, Map<string, Promise<void>>>();
-
-function ensureDimensionCatalog(db: D1Database): Promise<void> {
-	let byVersion = dimensionCatalogReady.get(db);
-	if (!byVersion) {
-		byVersion = new Map();
-		dimensionCatalogReady.set(db, byVersion);
+async function probeMcpToolRoute(probe: Request | null): Promise<string> {
+	if (!probe) return MCP_ROUTE_UNCLASSIFIED;
+	try {
+		const text = await Promise.race([
+			probe.text(),
+			new Promise<null>((resolve) => setTimeout(() => resolve(null), 1_000)),
+		]);
+		if (typeof text !== "string" || text.length === 0) return MCP_ROUTE_UNCLASSIFIED;
+		const body: unknown = JSON.parse(text);
+		const messages = Array.isArray(body) ? body : [body];
+		for (const message of messages) {
+			if (!message || typeof message !== "object") continue;
+			const method = (message as { method?: unknown }).method;
+			if (typeof method !== "string") continue;
+			if (method === "tools/call") {
+				const name = (message as { params?: { name?: unknown } }).params?.name;
+				if (typeof name === "string" && name.length > 0) return `mcp:${name}`;
+				return MCP_ROUTE_UNCLASSIFIED;
+			}
+		}
+		const first = messages[0];
+		const method =
+			first && typeof first === "object" ? (first as { method?: unknown }).method : undefined;
+		return typeof method === "string" && method.length > 0
+			? `mcp:${method}`
+			: MCP_ROUTE_UNCLASSIFIED;
+	} catch {
+		return MCP_ROUTE_UNCLASSIFIED;
 	}
-	const key = QUOTA_CATALOG_VERSION;
-	let ready = byVersion.get(key);
-	if (!ready) {
-		ready = syncDimensionCatalog(db, QUOTA_DIMENSIONS).catch((error) => {
-			byVersion!.delete(key);
-			throw error;
-		});
-		byVersion.set(key, ready);
-	}
-	return ready;
+}
+
+/**
+ * Per-request metering context for the MCP face: one observer wrapped around
+ * the replica D1/R2 bindings of THIS request, plus a pre-dispatch body clone
+ * for the route probe.  `settleAfterResponse` schedules the post-hoc
+ * accounting; it must be called after the handler produced the response, and
+ * everything inside runs in `ctx.waitUntil` under `scheduleQuotaMetering`'s
+ * try-catch, so no metering failure can reach the business response.
+ */
+function createMcpRequestMetering(
+	env: Env,
+	request: Request,
+): {
+	env: Env;
+	settleAfterResponse: (ctx: ExecutionContext, principal: string | null) => void;
+} {
+	// Clone BEFORE the handler reads the body: clone() tees the stream, so both
+	// the MCP handler and this probe can read the same payload independently.
+	const probe = request.method === "POST" ? request.clone() : null;
+	const observer = new UsageObserver();
+	const meteredEnv: Env = env.RESEARCH_REPLICA
+		? {
+				...env,
+				RESEARCH_REPLICA: createObservedD1(env.RESEARCH_REPLICA, observer),
+				RESEARCH_OBJECTS: env.RESEARCH_OBJECTS
+					? createObservedR2(env.RESEARCH_OBJECTS, observer)
+					: env.RESEARCH_OBJECTS,
+			}
+		: env;
+	return {
+		env: meteredEnv,
+		settleAfterResponse(executionCtx, principal) {
+			if (typeof executionCtx?.waitUntil !== "function") return;
+			executionCtx.waitUntil(
+				(async () => {
+					// Resolve the concrete tool route from the pre-dispatch clone
+					// FIRST, then account once, in this single waitUntil task.
+					// settleQuotaMetering owns the try-catch, so neither the probe nor
+					// the write can fail the response (which the caller already has).
+					const route = await probeMcpToolRoute(probe);
+					await settleQuotaMetering({
+						route,
+						// The verified principal from the just-finished request; null ->
+						// unattributed.  Never an IP-derived identity.
+						clientId: principal ?? QUOTA_CLIENT_UNATTRIBUTED,
+						observer,
+						db: env.RESEARCH_REPLICA,
+					});
+				})(),
+			);
+		},
+	};
 }
 
 /**
@@ -868,131 +848,23 @@ export function createServer(
 	});
 
 	/**
-	 * MCP tool registration wrapper: every registered tool is classified by the
-	 * entrypoint cost catalog (`src/quota-entrypoints.ts`), and the coverage test
-	 * fails when a new tool is not classified.
+	 * MCP tool registration (quota redesign 2026-10-02): tools register directly
+	 * with the SDK.  There is no admission wrapper -- every enforce-mode
+	 * pre-refusal was removed.  Each tool must still be classified in the
+	 * entrypoint cost catalog (`src/quota-entrypoints.ts`, kept for the
+	 * accounting middleware's per-route dimension aggregation); the coverage test
+	 * fails when a new tool is not classified.  Tool-level authorization (scope
+	 * checks inside each handler) is unchanged and is NOT a quota gate.
 	 *
-	 * Enforce mode:
-	 *   - `heavy_unbounded` is refused outright with `isError: true` and the
-	 *     machine-readable `QUOTA_GUARD_UNAVAILABLE` body (no provable bound):
-	 *     AI embedding, semantic search and the retention sweep stay closed.
-	 *   - `heavy_bounded` requires a VERIFIED per-dimension baseline and an
-	 *     ADMITTED cap reservation before the first paid side effect; its
-	 *     declared units are caps that exceed any real per-call cost, and
-	 *     over-cap actuals keep the reservation and halt the route.
-	 *   - `light_read` keeps its declared cap and is billed on arrival, never
-	 *     refused by the guard. Control and zero-declared-cost paths remain
-	 *     unguarded; the route catalog does not establish account-wide quota
-	 *     coverage.
-	 *
-	 * Lifeline split (issue #54, owner ruling 2026-10-01): a
-	 * `submit_run_envelope` call that carries NO `channel_payload` is a run
-	 * registration / status report (bare heartbeat, `blocked_by` pre-write
-	 * refusal, or `observations`).  It is exempt from the heavy multi-dimension
-	 * gate so the monitoring and run-audit surface can never be killed by the
-	 * spend circuit — that coupling turned a stale-baseline warning into a
-	 * platform-wide observability outage on 2026-10-01.  The exemption is
-	 * auditable: every skip emits `quota_lifeline_exempt`, and the spend it
-	 * carries is the fixed, Collector-owned run-row write budgeting under the
-	 * maintenance reserve reported by `get_gateway_status`.  An envelope WITH
-	 * business content keeps the full `heavy_bounded` admission.
-	 *
-	 * A caller with no scope basis is refused before admission. A caller with
-	 * insufficient tool-specific scope could otherwise reserve before the handler
-	 * checks authorization; heavy admission therefore runs only for callers that
-	 * carry a research scope or principal.
+	 * The implementation is cast back to the SDK signature so call sites keep the
+	 * schema-derived handler typing.
 	 */
-	const rawRegisterTool = server.registerTool.bind(server) as unknown as (
-		name: string,
-		config: unknown,
-		handler: (...args: never[]) => unknown,
-	) => unknown;
+	 */
 	const registerToolImplementation = (
 		name: string,
 		config: unknown,
 		handler: (...args: never[]) => unknown,
-	) => {
-		const route = `mcp:${name}`;
-		const guarded = async (...args: never[]) => {
-			const profile = routeCostProfile(route);
-			const requestId = crypto.randomUUID().replaceAll("-", "");
-			if (!profile) {
-				return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
-			}
-			const split = runEnvelopeAdmissionRoute(route, args[0] as LifelineProbeInput);
-			if (split.exempt) {
-				// Lifeline: no heavy admission.  The handler still performs its own
-				// scope/state checks, and the run row it writes is the bounded,
-				// Collector-owned cost the maintenance reserve budgets for.
-				console.log(
-					JSON.stringify({
-						event: "quota_lifeline_exempt",
-						timestamp: new Date().toISOString(),
-						route,
-						request_id: requestId,
-						envelope_has_payload: split.envelope_has_payload,
-						maintenance_reserve: `${LIFELINE_MAINTENANCE_RESERVE.dimension_key} ${LIFELINE_MAINTENANCE_RESERVE.units}/period`,
-					}),
-				);
-				return handler(...args);
-			}
-			let admission: Awaited<ReturnType<typeof admitHeavyRoute>> | null = null;
-			if (admissionMode(env) === "enforce") {
-				if (profile.cost_class === "heavy_unbounded") {
-					return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
-				}
-				if (
-					profile.cost_class === "heavy_bounded" &&
-					researchScopes.size === 0 &&
-					researchPrincipal === null
-				) {
-					// No scope basis at all: never run heavy work unguarded.  The
-					// handler would deny on its scope check; refusing here also keeps
-					// the paid path closed for an unauthenticated caller.
-					return quotaMcpRefusal("QUOTA_GUARD_UNAVAILABLE", requestId);
-				}
-				if (
-					profile.cost_class === "heavy_bounded" &&
-					(researchScopes.size > 0 || researchPrincipal !== null)
-				) {
-					const digest = await crypto.subtle.digest(
-						"SHA-256",
-						new TextEncoder().encode([route, requestId].join("\u0000")),
-					);
-					const fingerprint = [...new Uint8Array(digest)]
-						.map((byte) => byte.toString(16).padStart(2, "0"))
-						.join("");
-					try {
-						admission = await admitHeavyRoute({
-							route,
-							operation_id: `${route}:${requestId}`,
-							fingerprint,
-						});
-					} catch (error) {
-						return quotaMcpRefusal(
-							error instanceof QuotaGuardError
-								? error.error_code
-								: "QUOTA_GUARD_UNAVAILABLE",
-							requestId,
-						);
-					}
-				}
-			}
-			try {
-				return await handler(...args);
-			} finally {
-				// The declared bound is charged once the handler settled: a scope
-				// refusal still consumes the declared bound (conservative), and a
-				// crashed handler leaves the reservation live instead of losing it.
-				if (admission) await chargeDeclaredBound(admission.result);
-			}
-		};
-		return rawRegisterTool(name, config, guarded);
-	};
-	/**
-	 * Asserted to the SDK signature so call sites keep the schema-derived handler
-	 * typing; the implementation above only adds the cost-catalog gate.
-	 */
+	) => server.registerTool(name, config as never, handler as never);
 	const registerTool = registerToolImplementation as unknown as typeof server.registerTool;
 
 	// 保留测试工具，确认 MCP 基础链路持续正常
@@ -1197,11 +1069,6 @@ export function createServer(
 		if (!storage) throw new ResearchBoundaryError("STORE_UNAVAILABLE");
 		return storage.db;
 	};
-	const quotaEnforced = () => admissionMode(env) === "enforce";
-	const admitHeavyRoute = (args: { route: string; operation_id: string; fingerprint: string }) =>
-		admitHeavyRouteForEnv(env, args);
-	const chargeDeclaredBound = (result: { status: string; reservation_id?: string }) =>
-		chargeDeclaredBoundForEnv(env, result);
 	const researchDomain = async (operation: () => Promise<unknown>) => {
 		try {
 			return {
@@ -1210,9 +1077,6 @@ export function createServer(
 				],
 			};
 		} catch (error) {
-			if (error instanceof QuotaGuardError) {
-				return quotaMcpRefusal(error.error_code, crypto.randomUUID().replaceAll("-", ""));
-			}
 			const safe =
 				error instanceof ResearchBoundaryError
 					? error.asError()
@@ -1225,20 +1089,7 @@ export function createServer(
 	};
 	const researchRead = <T>(tool: string, operation: () => Promise<T>) => {
 		const requestId = crypto.randomUUID().replaceAll("-", "");
-		const gate = async () => {
-			if (!quotaEnforced()) return;
-			const profile = routeCostProfile(`mcp:${tool}`);
-			// Read-only routes are billed on arrival and may degrade safely; only a
-			// route the catalog cannot classify or that has no provable bound is
-			// refused.  A local day counter is never treated as a 95% guarantee.
-			if (profile && profile.cost_class !== "heavy_unbounded") return;
-			throw new QuotaGuardError(
-				"QUOTA_GUARD_UNAVAILABLE",
-				`read tool ${tool} is not covered by a provable cost profile`,
-			);
-		};
 		return researchDomain(async () => {
-			await gate();
 			return withResearchReadRetry(operation, {
 				requestId,
 				tool,
@@ -2470,11 +2321,12 @@ export function createServer(
 					serviceVersion: "1.3.1",
 					db: env?.RESEARCH_REPLICA,
 				});
-				// Quota admission exposure (SDD CQ spec §"用量/状态查询"): operators and
-				// observers read the per-dimension CLOSED/OPEN/UNKNOWN state, the
-				// verified period, the live reservation count and the explicit gaps.
-				// No token, no document content. Fail-soft: an unavailable ledger is
-				// reported as UNKNOWN, never as "safe".
+				// Legacy quota-ledger status exposure (quota redesign 2026-10-02):
+				// operators and observers read the per-dimension OPEN/CLOSED/UNKNOWN
+				// projection over the retained read-only tables.  CLOSED now means a
+				// real 95% threshold breach only; a missing baseline never closes a
+				// dimension.  No token, no document content. Fail-soft: an
+				// unavailable ledger is reported as UNKNOWN, never as "safe".
 				let quota: unknown = null;
 				if (env?.RESEARCH_REPLICA) {
 					try {
@@ -2499,8 +2351,10 @@ export function createServer(
 							);
 						}
 						quota = {
-							...status,
-							mode: admissionMode(env),
+							...(await quotaStatus(env.RESEARCH_REPLICA, {
+								account_id: quotaAccountId(),
+								dimensions: QUOTA_DIMENSIONS,
+							})),
 							legacy: legacyBreakerFlag(env),
 							quantified_guarantee: false,
 							// Warning-only view (never a gate); empty array = all fresh.
@@ -2734,13 +2588,27 @@ export function createServer(
 				limit: z.number().int().min(1).max(SEMANTIC_QUERY_MAX_LIMIT).optional(),
 			}),
 		},
-		async ({ query, limit }) =>
-			researchRead("search_documents_semantic", () =>
+		async ({ query, limit }) => {
+			// The ONE surviving quota gate (quota redesign 2026-10-02 Phase 2,
+			// spec section 3 contract 2): consult the reconcile program's circuit
+			// state BEFORE spending the query embedding.  OPEN on any guarded
+			// dimension returns a structured QUOTA_CIRCUIT_OPEN refusal; a gate
+			// that cannot be read fails OPEN (never a new front-gate outage).
+			// Lifeline tools never reach this line.
+			const refusal = await semanticSearchCircuitRefusal(env?.RESEARCH_REPLICA ?? null);
+			if (refusal) {
+				return {
+					isError: true as const,
+					content: [{ type: "text" as const, text: JSON.stringify(refusal, null, 2) }],
+				};
+			}
+			return researchRead("search_documents_semantic", () =>
 				researchAdapter().searchDocumentsSemantic(query, {
 					limit,
 					deps: semanticIndexDeps(env),
 				}),
-			),
+			);
+		},
 	);
 	registerTool(
 		"search_evidence",
@@ -3018,118 +2886,24 @@ function semanticIndexDeps(env: Env | undefined): SemanticIndexDeps {
 	return { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
 }
 
-/** Daily semantic indexing trigger (UTC 16:40 — off the backfill peak). */
+/** Daily semantic indexing trigger (UTC 16:40). Registration is kept so the
+ * cron catalog stays complete; the handler is a structured no-op (G2). */
 export const SEMANTIC_INDEX_CRON = "40 16 * * *";
-const SEMANTIC_CRON_MAX_BATCHES = 20;
 
 /**
- * The scheduled half of the daily neuron budget: identical admission, guard and
- * settlement as `handleSemanticIndexRun`, looping batch by batch until the
- * ledger refuses (daily budget exhausted) or the queue drains.
+ * Scheduled batch-embedding handler (quota redesign 2026-10-02, G2 "cloud
+ * batch AI is physically sealed"): the registration in `wrangler.jsonc` is
+ * retained on purpose, but the body never touches Workers AI.  Cloud document
+ * vectorization belongs to the local RTX 5080 GPU pipeline, which pushes
+ * precomputed vectors through `/internal/research-semantic-index/ingest-vectors`.
  */
-async function runSemanticIndexCron(env: Env, context: BridgeStageContext): Promise<void> {
-	const storage = researchReplicaStorage(env);
-	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
-		logBridgeStage(context, "scheduled_skipped", {
-			task: "research_semantic_index",
-			reason: "replica transport is not configured",
-		});
-		return;
-	}
-	const deps = semanticIndexDeps(env);
-	for (let batch = 0; batch < SEMANTIC_CRON_MAX_BATCHES; batch += 1) {
-		const requestId = crypto.randomUUID().replaceAll("-", "");
-		let admission: {
-			handle: ReturnType<typeof admissionHandle>;
-			budget: ReservationBudget;
-			result: { status: string; reservation_id?: string };
-		};
-		try {
-			admission = await admitHeavyRouteForEnv(env, {
-				route: "http:/internal/research-semantic-index/run",
-				operation_id: `semantic-cron:${batch}:${requestId}`,
-				fingerprint: crypto.randomUUID().replaceAll("-", ""),
-			});
-		} catch (error) {
-			// The daily budget refusing admission is the designed stop, not a fault.
-			logBridgeStage(context, "scheduled_stopped", {
-				task: "research_semantic_index",
-				batch,
-				reason: error instanceof QuotaGuardError ? error.error_code : "admission_fault",
-				detail: error instanceof Error ? error.message.slice(0, 200) : undefined,
-			});
-			return;
-		}
-		try {
-			const handle = admission.handle;
-			if (!handle) throw new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "admission handle missing");
-			const guardedDeps: SemanticIndexDeps = {
-				ai: createGuardedAi(deps.ai, handle, admission.budget) as typeof deps.ai,
-				index: deps.index,
-			};
-			const report = await runSemanticIndexBatch(
-				{ ...storage, db: createGuardedD1(storage.db, handle, admission.budget) },
-				guardedDeps,
-				{ maxDocs: SEMANTIC_BATCH_MAX_DOCS },
-			);
-			await settleReservation(env.RESEARCH_REPLICA!, {
-				reservation_id: admission.result.reservation_id as string,
-				observed: admission.budget.snapshot(),
-				reason: "semantic_cron_batch",
-			}).catch(() => undefined);
-			logBridgeStage(context, "scheduled_batch_complete", {
-				task: "research_semantic_index",
-				batch,
-				ready: report.ready,
-				pending: report.pending,
-				vectors_upserted: report.vectors_upserted,
-			});
-			if (report.pending === 0) {
-				logBridgeStage(context, "scheduled_complete", {
-					task: "research_semantic_index",
-					batches: batch + 1,
-					reason: "queue drained",
-				});
-				return;
-			}
-		} catch (error) {
-			// Unknown outcome: the reservation stays reserved (fail-closed) and the
-			// operator sees the batch failure in the logs.
-			logBridgeFailure(context, error, `semantic_cron_batch_${batch}`);
-			return;
-		}
-	}
-	logBridgeStage(context, "scheduled_complete", {
+async function runSemanticIndexCronDisabled(context: BridgeStageContext): Promise<void> {
+	logBridgeStage(context, "scheduled_skipped", {
 		task: "research_semantic_index",
-		batches: SEMANTIC_CRON_MAX_BATCHES,
-		reason: "batch cap reached",
+		reason: "cloud batch embedding permanently disabled",
+		detail: "local GPU pipeline owns document vectors; push via /internal/research-semantic-index/ingest-vectors",
+		workers_ai_calls: 0,
 	});
-}
-
-/** Background work must never change the ingest receipt. */
-function scheduleBackground(
-	ctx: ExecutionContext | undefined,
-	label: string,
-	operation: () => Promise<unknown>,
-): void {
-	if (typeof ctx?.waitUntil !== "function") return;
-	ctx.waitUntil(
-		(async () => {
-			try {
-				await operation();
-			} catch (error) {
-				console.warn(
-					JSON.stringify({
-						event: "research_semantic_index_background_failure",
-						timestamp: new Date().toISOString(),
-						stage: label,
-						error_code:
-							error instanceof ResearchBoundaryError ? error.error_code : "UNKNOWN",
-					}),
-				);
-			}
-		})(),
-	);
 }
 
 function decodeBase64Chunks(value: unknown): Uint8Array[] {
@@ -3145,22 +2919,6 @@ function decodeBase64Chunks(value: unknown): Uint8Array[] {
 	} catch {
 		throw new ResearchBoundaryError("INTEGRITY_FAILED");
 	}
-}
-
-/**
- * HTTP refusal for the quota guard.  Always 503 (never 429: this is a budget
- * circuit, not rate limiting), with the fixed four-key body.  `Retry-After` is
- * only emitted when a recovery instant is provable — today no verified baseline
- * exists, so it is omitted.
- */
-function quotaGuardResponse(error: unknown, requestId: string): Response {
-	const code = error instanceof QuotaGuardError ? error.error_code : "QUOTA_GUARD_UNAVAILABLE";
-	const refusal = quotaHttpRefusal(code, requestId, null);
-	const headers = new Headers({ "Content-Type": "application/json; charset=utf-8" });
-	if (refusal.retry_after_seconds !== null) {
-		headers.set("Retry-After", String(refusal.retry_after_seconds));
-	}
-	return new Response(JSON.stringify(refusal.body), { status: refusal.status, headers });
 }
 
 /**
@@ -3184,87 +2942,33 @@ async function handleResearchReplicaIngest(
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
-	// Multi-dimension admission (SDD CQ spec §2): every heavy ingest must hold an
-	// atomic multi-dimension reservation before its first paid side effect.  With
-	// no verified account baseline the ledger denies, so enforce mode is CLOSED.
-	const requestId = crypto.randomUUID().replaceAll("-", "");
-	let admission: {
-		handle: ReturnType<typeof admissionHandle>;
-		budget: ReservationBudget;
-		result: { status: string; reservation_id?: string };
-	} | null = null;
-	// The global live-row scan cap (256) is shared by every heavy route: an
-	// admission that exits without settlement leaks one slot per call and, under
-	// sustained ingest traffic, jams ingest + semantic + run envelopes platform
-	// wide (2026-09-30 incident). Every exit after admission therefore settles
-	// the declared bound; the success path marks admissionSettled first.
-	let admissionSettled = false;
-	const settleDeclaredOnLeak = (): Promise<void> =>
-		admission && !admissionSettled
-			? chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined)
-			: Promise.resolve();
-	if (admissionMode(env) === "enforce") {
-		const profile = routeCostProfile("http:/internal/research-replica/v2/ingest");
-		if (!profile || profile.cost_class !== "heavy_bounded") {
-			return quotaGuardResponse(
-				new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "ingest route is not classified"),
-				requestId,
-			);
-		}
-		const operationId = `ingest:${requestId}`;
-		const digest = await crypto.subtle.digest(
-			"SHA-256",
-			new TextEncoder().encode(
-				[
-					profile.route,
-					String(request.headers.get("Content-Length") ?? ""),
-					String(request.headers.get("X-Collector-Message-Id") ?? ""),
-					requestId,
-				].join("\u0000"),
-			),
-		);
-		const fingerprint = [...new Uint8Array(digest)]
-			.map((byte) => byte.toString(16).padStart(2, "0"))
-			.join("");
-		try {
-			admission = await admitHeavyRouteForEnv(env, {
-				route: profile.route,
-				operation_id: operationId,
-				fingerprint,
-			});
-		} catch (error) {
-			return quotaGuardResponse(error, requestId);
-		}
-	}
-	const guarded: ResearchReplicaStorage =
-		admission?.handle && admission.budget
-			? {
-					db: createGuardedD1(storage.db, admission.handle, admission.budget),
-					objects: createGuardedR2(storage.objects, admission.handle, admission.budget),
-				}
-			: storage;
+	// Quota redesign 2026-10-02: no admission reservation.  The request passes
+	// straight to the handler; paid-resource usage is observed post-hoc by the
+	// pure observers and logged asynchronously -- measurement can never gate,
+	// fail or re-judge this business call.
+	const observer = new UsageObserver();
+	const observed: ResearchReplicaStorage = {
+		db: createObservedD1(storage.db, observer),
+		objects: createObservedR2(storage.objects, observer),
+	};
 	// §A8 双道尺寸门：Content-Length 预检（缺失/非数值跳过）+ 读体后实测。
 	const contentLength = Number(request.headers.get("Content-Length"));
 	if (Number.isFinite(contentLength) && contentLength > RESEARCH_INGEST_MAX_BODY_BYTES) {
-		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("RATE_LIMITED"), 413);
 	}
 	let raw: string;
 	try {
 		raw = await request.text();
 	} catch {
-		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	if (new TextEncoder().encode(raw).byteLength > RESEARCH_INGEST_MAX_BODY_BYTES) {
-		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("RATE_LIMITED"), 413);
 	}
 	let body: unknown;
 	try {
 		body = JSON.parse(raw);
 	} catch {
-		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	if (
@@ -3275,7 +2979,6 @@ async function handleResearchReplicaIngest(
 			(key) => key !== "record" && key !== "object_chunks_base64",
 		)
 	) {
-		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	const transport = body as { record?: unknown; object_chunks_base64?: unknown };
@@ -3284,49 +2987,32 @@ async function handleResearchReplicaIngest(
 			transport.object_chunks_base64 === undefined
 				? null
 				: decodeBase64Chunks(transport.object_chunks_base64);
-		const result = await ingestResearchReplicaRecord(guarded, transport.record, objectChunks);
-		// Task D: the pending row was registered inside the ingest transaction,
-		// so this hook is only the fast path - the bounded sweep converges
-		// whatever the background task cannot finish.  The receipt below is
-		// unchanged: embedding never blocks it.
-		//
-		// In enforce mode the embedding cannot be scheduled: Workers AI neurons
-		// have no provable per-call upper bound, so the semantic index stays
-		// pending (the documented CLOSED path) instead of spending unbounded
-		// neurons.  The omission is logged, never silent.
-		if (result.semantic_target && env.AI && env.RESEARCH_PUBLIC_INDEX) {
-			if (admissionMode(env) === "enforce") {
-				console.log(
-					JSON.stringify({
-						event: "semantic_index_deferred_closed",
-						timestamp: new Date().toISOString(),
-						reason: "QUOTA_GUARD_UNAVAILABLE",
-						detail: "Workers AI neurons have no provable upper bound",
-					}),
-				);
-			} else {
-				const deps: SemanticIndexDeps = { ai: env.AI, index: env.RESEARCH_PUBLIC_INDEX };
-				const target = result.semantic_target;
-				scheduleBackground(ctx, "ingest_semantic_index", () =>
-					indexSemanticDocument(guarded, deps, {
-						documentId: target.documentId,
-						versionId: target.versionId,
-					}),
-				);
-			}
+		const result = await ingestResearchReplicaRecord(observed, transport.record, objectChunks);
+		// Task D (quota redesign 2026-10-02, G2): cloud document embedding is
+		// physically sealed.  The pending row was registered inside the ingest
+		// transaction; the local RTX 5080 GPU pipeline owns the vector work and
+		// pushes it back through /internal/research-semantic-index/ingest-vectors.
+		// No Workers AI call happens here -- the omission is logged, never silent.
+		if (result.semantic_target) {
+			console.log(
+				JSON.stringify({
+					event: "semantic_index_pending_local_gpu",
+					timestamp: new Date().toISOString(),
+					document_id: result.semantic_target.documentId,
+					version_id: result.semantic_target.versionId,
+					detail: "cloud embedding disabled; vector arrives via ingest-vectors from the local GPU pipeline",
+				}),
+			);
 		}
-		// Settle with the platform-reported practical usage observed by the guarded
-		// adapters.  A settlement rejection keeps the reservation (over-bound actual
-		// usage must not be "corrected" by an after-the-fact write).
-		if (admission) {
-			const budget = admission.budget;
-			const settleOutcome = await settleReservation(env.RESEARCH_REPLICA!, {
-				reservation_id: admission.result.reservation_id as string,
-				observed: budget.snapshot(),
-				reason: "ingest_completed",
-			}).catch(() => undefined);
-			if (settleOutcome?.status === "SETTLED") admissionSettled = true;
-		}
+		scheduleQuotaMetering(ctx, {
+			route: "http:/internal/research-replica/v2/ingest",
+			// Credential-verified attribution: this handler 401s anything that did
+			// not byte-match RESEARCH_REPLICA_INGEST_TOKEN (the research machine's
+			// transport credential), so research-runner is measured, not guessed.
+			clientId: QUOTA_CLIENT_RESEARCH_RUNNER,
+			observer,
+			db: env.RESEARCH_REPLICA,
+		});
 		// Envelope pinned explicitly: the additive in-process fields
 		// (semantic_target) never widen the frozen four-key transport response.
 		return jsonResponse({
@@ -3336,14 +3022,6 @@ async function handleResearchReplicaIngest(
 			content_sha256: result.content_sha256,
 		});
 	} catch (error) {
-		// A refusal from inside the guarded region (amplification past the reserved
-		// bound, or missing D1 usage metadata) is a quota refusal, not a store error.
-		// The reservation used to be kept live here by design; that collided with
-		// the global live-row scan cap — sustained traffic jammed every heavy route
-		// platform wide (2026-09-30). Charging the declared bound is equally
-		// conservative for the ceiling (booked is monotonic) and frees the slot.
-		await settleDeclaredOnLeak();
-		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
 			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
@@ -3352,101 +3030,37 @@ async function handleResearchReplicaIngest(
 }
 
 /**
- * Task D operations transport (internal, NOT an MCP tool): one bounded
- * indexing run and read-only coverage counters.  Same fail-closed credential
- * as the ingest/receipts transport; no PRIVATE capability is introduced and no
- * document ids leave this face.
+ * Task D batch-run transport (internal, NOT an MCP tool) -- PHYSICALLY SEALED
+ * (quota redesign 2026-10-02, G2 "cloud batch AI sterilised"): cloud batch
+ * embedding is permanently disabled, so this route NEVER calls Workers AI.  It
+ * returns an explicit structured pointer to the local RTX 5080 GPU pipeline.
+ * Authorization (method + internal credential) is unchanged; the single-shot
+ * query-to-vector path inside `search_documents_semantic` is untouched.
  */
-async function handleSemanticIndexRun(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
+async function handleSemanticIndexRun(request: Request, env: Env): Promise<Response> {
 	if (request.method !== "POST") {
 		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
 	}
-	const storage = researchReplicaStorage(env);
-	if (!storage || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
+	if (!researchReplicaStorage(env) || !env.RESEARCH_REPLICA_INGEST_TOKEN) {
 		return researchBoundaryResponse(new ResearchBoundaryError("STORE_UNAVAILABLE"), 503);
 	}
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
-	// Daily neuron budget admission (owner approved 2026-09-30): in enforce mode
-	// the run holds a cap reservation whose ai.neurons declaration covers the
-	// directory's 10-document run cap with retry headroom; the UTC-day ledger
-	// refuses runs once the 9,500 threshold would be crossed.  The AI binding is
-	// guarded so every embedding call requires and spends against the cap.
-	const requestId = crypto.randomUUID().replaceAll("-", "");
-	const enforce = admissionMode(env) === "enforce";
-	let admission: {
-		handle: ReturnType<typeof admissionHandle>;
-		budget: ReservationBudget;
-		result: { status: string; reservation_id?: string };
-	} | null = null;
-	if (enforce) {
-		try {
-			admission = await admitHeavyRouteForEnv(env, {
-				route: "http:/internal/research-semantic-index/run",
-				operation_id: `semantic-run:${requestId}`,
-				fingerprint: crypto.randomUUID().replaceAll("-", ""),
-			});
-		} catch (error) {
-			return quotaGuardResponse(error, requestId);
-		}
-	}
-	let body: unknown = {};
-	try {
-		const raw = await request.text();
-		body = raw ? JSON.parse(raw) : {};
-	} catch {
-		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
-	}
-	if (!body || typeof body !== "object" || Array.isArray(body)) {
-		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
-	}
-	const options = body as Record<string, unknown>;
-	if (Object.keys(options).some((key) => key !== "max_docs" && key !== "max_register")) {
-		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
-	}
-	// The declared ai.neurons reservation prices 10 documents: never let a caller
-	// widen the batch past what the cap reservation covers.
-	const maxDocs =
-		typeof options.max_docs === "number" && Number.isFinite(options.max_docs)
-			? Math.max(1, Math.min(Math.floor(options.max_docs), SEMANTIC_BATCH_MAX_DOCS))
-			: SEMANTIC_BATCH_MAX_DOCS;
-	try {
-		const deps = semanticIndexDeps(env);
-		const handle = admission?.handle;
-		const guardedDeps: SemanticIndexDeps = handle
-			? {
-					ai: createGuardedAi(deps.ai, handle, admission!.budget) as typeof deps.ai,
-					index: deps.index,
-				}
-			: deps;
-		const report = await runSemanticIndexBatch(
-			handle
-				? { ...storage, db: createGuardedD1(storage.db, handle, admission!.budget) }
-				: storage,
-			guardedDeps,
-			{ maxDocs, maxRegister: options.max_register as number | undefined },
-		);
-		if (admission) {
-			await settleReservation(env.RESEARCH_REPLICA!, {
-				reservation_id: admission.result.reservation_id as string,
-				observed: admission.budget.snapshot(),
-				reason: "semantic_index_run_completed",
-			}).catch(() => undefined);
-		}
-		return jsonResponse(report);
-	} catch (error) {
-		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
-		return researchBoundaryResponse(
-			error,
-			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
-		);
-	}
+	return jsonResponse({
+		status: "BATCH_DISABLED",
+		reason: "cloud batch embedding is permanently disabled (quota redesign 2026-10-02); document vectorization runs on the local RTX 5080 GPU pipeline",
+		push_path:
+			"POST /internal/research-semantic-index/ingest-vectors with locally computed vectors",
+		queue_status_path: "POST /internal/research-semantic-index/pending",
+		workers_ai_calls: 0,
+	});
 }
 
 export async function handleSemanticVectorIngest(
 	request: Request,
 	env: Env,
+	ctx?: ExecutionContext,
 ): Promise<Response> {
 	if (request.method !== "POST") {
 		return researchBoundaryResponse(new ResearchBoundaryError("UNSUPPORTED_OPERATION"), 405);
@@ -3459,69 +3073,35 @@ export async function handleSemanticVectorIngest(
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
 	// Locally-computed embeddings (owner approved 2026-09-30): zero Workers AI
-	// cost - the admission reserves only the ledger's own D1 costs for the state
-	// row read/write and the Vectorize upsert bookkeeping.
-	const requestId = crypto.randomUUID().replaceAll("-", "");
-	let admission: {
-		handle: ReturnType<typeof admissionHandle>;
-		budget: ReservationBudget;
-		result: { status: string; reservation_id?: string };
-	} | null = null;
-	if (admissionMode(env) === "enforce") {
-		try {
-			admission = await admitHeavyRouteForEnv(env, {
-				route: "http:/internal/research-semantic-index/ingest-vectors",
-				operation_id: `semantic-vectors:${requestId}`,
-				fingerprint: crypto.randomUUID().replaceAll("-", ""),
-			});
-		} catch (error) {
-			return quotaGuardResponse(error, requestId);
-		}
-	}
-	// Same discipline as the C5 ingest (40236a5, #48): every exit after an
-	// admission settles the reservation, or the global live-row cap (256) jams
-	// all heavy routes. The 2026-09-30 leak here was the vector ingest's
-	// REJECTED early-return (content-sha mismatch / stale version), which used
-	// to return without ever reaching settlement.
-	let admissionSettled = false;
-	const settleDeclaredOnLeak = (): Promise<void> =>
-		admission && !admissionSettled
-			? chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined)
-			: Promise.resolve();
+	// cost.  No admission reservation (gate removed 2026-10-02); D1 usage is
+	// observed post-hoc and never gates this call.
+	const observer = new UsageObserver();
+	const observedStorage: ResearchReplicaStorage = {
+		...storage,
+		db: createObservedD1(storage.db, observer),
+	};
 	let payload: unknown;
 	try {
 		payload = JSON.parse(await request.text());
 	} catch {
-		await settleDeclaredOnLeak();
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	try {
 		const deps = semanticIndexDeps(env);
-		const handle = admission?.handle ?? null;
-		const budget = admission?.budget ?? null;
 		const result = await ingestPrecomputedVectors(
-			handle && budget
-				? { ...storage, db: createGuardedD1(storage.db, handle, budget) }
-				: storage,
+			observedStorage,
 			{ index: deps.index },
 			payload as Parameters<typeof ingestPrecomputedVectors>[2],
 		);
-		if (admission && handle && budget) {
-			const settleOutcome = await settleReservation(env.RESEARCH_REPLICA!, {
-				reservation_id: admission.result.reservation_id as string,
-				observed: budget.snapshot(),
-				reason: "semantic_vector_ingest",
-			}).catch(() => undefined);
-			if (settleOutcome?.status === "SETTLED") admissionSettled = true;
-		}
-		// REJECTED results (shape/version/content failures) never spent the
-		// guarded budget; charge the declared bound so the slot is freed even
-		// when the row was refused before any D1 write.
-		await settleDeclaredOnLeak();
+		scheduleQuotaMetering(ctx, {
+			route: "http:/internal/research-semantic-index/ingest-vectors",
+			// Same credential-verified attribution as the replica ingest route.
+			clientId: QUOTA_CLIENT_RESEARCH_RUNNER,
+			observer,
+			db: env.RESEARCH_REPLICA,
+		});
 		return jsonResponse(result);
 	} catch (error) {
-		await settleDeclaredOnLeak();
-		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
 		return researchBoundaryResponse(
 			error,
 			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
@@ -3540,67 +3120,47 @@ async function handleSemanticPending(request: Request, env: Env): Promise<Respon
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
-	const requestId = crypto.randomUUID().replaceAll("-", "");
-	let admission: {
-		handle: ReturnType<typeof admissionHandle>;
-		budget: ReservationBudget;
-		result: { status: string; reservation_id?: string };
-	} | null = null;
-	if (admissionMode(env) === "enforce") {
-		try {
-			admission = await admitHeavyRouteForEnv(env, {
-				route: "http:/internal/research-semantic-index/pending",
-				operation_id: `semantic-pending:${requestId}`,
-				fingerprint: crypto.randomUUID().replaceAll("-", ""),
-			});
-		} catch (error) {
-			return quotaGuardResponse(error, requestId);
-		}
-	}
 	let body: unknown = {};
 	try {
 		const raw = await request.text();
 		body = raw ? JSON.parse(raw) : {};
 	} catch {
-		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	if (!body || typeof body !== "object" || Array.isArray(body)) {
-		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	const options = body as Record<string, unknown>;
 	if (Object.keys(options).some((key) => !["limit", "after", "state"].includes(key))) {
-		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
 	if (options.state !== undefined && options.state !== "PENDING" && options.state !== "READY") {
-		if (admission) await chargeDeclaredBoundForEnv(env, admission.result).catch(() => undefined);
 		return researchBoundaryResponse(new ResearchBoundaryError("INTEGRITY_FAILED"), 400);
 	}
-	const limit = typeof options.limit === "number" && Number.isInteger(options.limit)
-		? Math.max(1, Math.min(options.limit, 128)) : 128;
-	const after = options.after && typeof options.after === "object" ? options.after as {
-		updated_at: string; document_id: string; version_id: string;
-	} : null;
+	const limit =
+		typeof options.limit === "number" && Number.isInteger(options.limit)
+			? Math.max(1, Math.min(options.limit, 128))
+			: 128;
+	const after =
+		options.after && typeof options.after === "object"
+			? (options.after as {
+					updated_at: string;
+					document_id: string;
+					version_id: string;
+				})
+			: null;
 	try {
-		const result = await listPendingSemanticVersions(
-			admission?.handle
-				? { ...storage, db: createGuardedD1(storage.db, admission.handle, admission.budget) }
-				: storage,
-				{ limit, after, state: options.state === "READY" ? "READY" : "PENDING" },
-		);
-		if (admission) {
-			await settleReservation(env.RESEARCH_REPLICA!, {
-				reservation_id: admission.result.reservation_id as string,
-				observed: admission.budget.snapshot(),
-				reason: "semantic_pending_list",
-			}).catch(() => undefined);
-		}
+		const result = await listPendingSemanticVersions(storage, {
+			limit,
+			after,
+			state: options.state === "READY" ? "READY" : "PENDING",
+		});
 		return jsonResponse(result);
 	} catch (error) {
-		if (error instanceof QuotaGuardError) return quotaGuardResponse(error, requestId);
-		return researchBoundaryResponse(error, error instanceof ResearchBoundaryError && error.retryable ? 503 : 400);
+		return researchBoundaryResponse(
+			error,
+			error instanceof ResearchBoundaryError && error.retryable ? 503 : 400,
+		);
 	}
 }
 
@@ -3664,24 +3224,9 @@ async function handleRetentionRun(request: Request, env: Env): Promise<Response>
 	if (!researchReplicaAuthorized(request, env)) {
 		return researchBoundaryResponse(new ResearchBoundaryError("FILTERED"), 401);
 	}
-	// Quota admission (SDD CQ spec §4): the retention sweep combines an unbounded
-	// `research_records` scan with Vectorize stock deletion.  Neither has a
-	// provable upper bound, so enforce mode refuses the run and reports the
-	// compliance backlog instead of silently consuming the allowance.  The dry-run
-	// listing remains available for the compliance remediation window.
-	if (admissionMode(env) === "enforce") {
-		const url = new URL(request.url);
-		const dryRunParam = url.searchParams.get("dry_run");
-		if (!(dryRunParam === "1" || dryRunParam === "true")) {
-			return quotaGuardResponse(
-				new QuotaGuardError(
-					"QUOTA_GUARD_UNAVAILABLE",
-					"retention sweep has no provable scan/vector upper bound; dry_run remains available",
-				),
-				crypto.randomUUID().replaceAll("-", ""),
-			);
-		}
-	}
+	// Quota redesign 2026-10-02: no enforce-mode refusal here any more.  The
+	// sweep runs in every mode; its cost profile stays classified in the catalog
+	// (heavy_unbounded, informational) for the accounting middleware.
 	const url = new URL(request.url);
 	const dryRunParam = url.searchParams.get("dry_run");
 	const dryRun = dryRunParam === "1" || dryRunParam === "true";
@@ -4111,22 +3656,11 @@ async function handlePublicQuotes(request: Request, env: Env): Promise<Response>
 }
 
 export default {
-	fetch(request: Request, env: Env, ctx: ExecutionContext) {
+	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
-		if (admissionMode(env) === "enforce") {
-			const profile = routeCostProfile(`http:${url.pathname}`);
-			if (
-				profile?.cost_class === "heavy_unbounded" &&
-				url.pathname !== "/internal/research-replica/v2/ingest" &&
-				url.pathname !== "/internal/research-semantic-index/run" &&
-				url.pathname !== "/internal/research-retention/run"
-			) {
-				return quotaGuardResponse(
-					new QuotaGuardError("QUOTA_GUARD_UNAVAILABLE", "route cost is unproven"),
-					crypto.randomUUID().replaceAll("-", ""),
-				);
-			}
-		}
+		// Quota redesign 2026-10-02: no admission gate at the router.  Every
+		// authorized request reaches its handler; the entrypoint cost catalog is
+		// classification-only (accounting dimension aggregation).
 		if (url.pathname === "/api/github-auth/probe") return handleGithubAuthProbe(request);
 		if (url.pathname === "/api/github-auth/quote-universe")
 			return handleGithubAuthUniverse(request, env);
@@ -4139,10 +3673,11 @@ export default {
 		if (url.pathname === "/internal/research-replica/v2/receipts") {
 			return handleResearchReplicaReceipts(request, env);
 		}
-		// Task D 运维通道（内部凭据门控，非 MCP 工具）：批次索引、覆盖率只读查询、
-		// 部署探针。语义检索本身只经 MCP `search_documents_semantic`。
+		// Task D 运维通道（内部凭据门控，非 MCP 工具）：本地向量推送、pending 队列、
+		// 覆盖率只读查询、部署探针。run 批量路由已物理封死（结构化禁用应答）；
+		// 语义检索本身只经 MCP `search_documents_semantic`（查询单次转向量保留）。
 		if (url.pathname === "/internal/research-semantic-index/ingest-vectors") {
-			return handleSemanticVectorIngest(request, env);
+			return handleSemanticVectorIngest(request, env, ctx);
 		}
 		if (url.pathname === "/internal/research-semantic-index/pending") {
 			return handleSemanticPending(request, env);
@@ -4170,8 +3705,17 @@ export default {
 			return handleDynamicPortfolioQuotes(request, env);
 		// MCP 面（含 `get_portfolio_quotes`）：外部 client auth 与内部 universe token 解耦。
 		// 工厂按请求构造 server，故 `ctx.requestInfo` 就是当前请求；market:read 不足一律 fail-closed。
-		const handler = createMcpHandler((ctx) => {
-			const liveOverlayStatus = requestMcpMarketReadStatus(ctx.requestInfo, env);
+		// Quota redesign 2026-10-02 Phase 2: the whole MCP face is metered
+		// post-hoc -- one UsageObserver wraps the replica bindings for THIS
+		// request only; after the response exists the totals are logged and
+		// aggregated into quota_client_usage_hourly in ctx.waitUntil (try-catch
+		// wrapped inside settleQuotaMetering; a metering failure never touches
+		// the response).  Identity is the verified principal only -- IP
+		// forwarding headers are never read as identity inputs.
+		const metering = createMcpRequestMetering(env, request);
+		const identity: { principal: string | null } = { principal: null };
+		const handler = createMcpHandler((mcpCtx) => {
+			const liveOverlayStatus = requestMcpMarketReadStatus(mcpCtx.requestInfo, env);
 			logBridgeStage(bridgeContext("mcp:market-read-auth"), "mcp_market_read_auth", {
 				...marketReadAuditFields(env, liveOverlayStatus),
 				live_overlay_status: liveOverlayStatus,
@@ -4179,8 +3723,8 @@ export default {
 			// §A4 研究写面 scope 解析：凭据逐字节匹配为前提，转发 scope 头 ∩
 			// server 配置上限（该头仅由 OAuth 桥在剥除客户端同名头后设置）。
 			const researchScopes = resolveResearchScopes(
-				ctx.requestInfo?.headers.get("Authorization") ?? null,
-				ctx.requestInfo?.headers.get(FORWARDED_SCOPES_HEADER) ?? null,
+				mcpCtx.requestInfo?.headers.get("Authorization") ?? null,
+				mcpCtx.requestInfo?.headers.get(FORWARDED_SCOPES_HEADER) ?? null,
 				env.COLLECTOR_MCP_CLIENT_TOKEN,
 				env.COLLECTOR_MCP_CLIENT_SCOPES,
 			);
@@ -4190,42 +3734,43 @@ export default {
 			// 2026-09-27：转发主体走白名单（COLLECTOR_FORWARDABLE_PRINCIPALS），
 			// 无头的静态直连客户端取登记身份（COLLECTOR_STATIC_CLIENT_PRINCIPAL）。
 			const researchPrincipal = resolveResearchPrincipal(
-				ctx.requestInfo?.headers.get("Authorization") ?? null,
-				ctx.requestInfo?.headers.get(FORWARDED_PRINCIPAL_HEADER) ?? null,
+				mcpCtx.requestInfo?.headers.get("Authorization") ?? null,
+				mcpCtx.requestInfo?.headers.get(FORWARDED_PRINCIPAL_HEADER) ?? null,
 				env.COLLECTOR_MCP_CLIENT_TOKEN,
 				env.COLLECTOR_FORWARDABLE_PRINCIPALS,
 				env.COLLECTOR_STATIC_CLIENT_PRINCIPAL,
 			);
 			const researchIssuer = resolveResearchIssuer(
-				ctx.requestInfo?.headers.get("Authorization") ?? null,
-				ctx.requestInfo?.headers.get(FORWARDED_ISSUER_HEADER) ?? null,
+				mcpCtx.requestInfo?.headers.get("Authorization") ?? null,
+				mcpCtx.requestInfo?.headers.get(FORWARDED_ISSUER_HEADER) ?? null,
 				env.COLLECTOR_MCP_CLIENT_TOKEN,
 				env.COLLECTOR_STATIC_CLIENT_ISSUER,
 			);
+			// Captured for the post-response metering settle: only the
+			// credential-verified principal (or null -> unattributed) feeds the
+			// usage ledger.
+			identity.principal = researchPrincipal;
 			return createServer(
-				env,
+				metering.env,
 				liveOverlayStatus,
 				researchScopes,
 				researchPrincipal,
 				researchIssuer,
 			);
 		});
-		return handler(request, env, ctx);
+		const response = await handler(request, metering.env, ctx);
+		metering.settleAfterResponse(ctx, identity.principal);
+		return response;
 	},
 	async scheduled(controller: ScheduledController, env: Env) {
-		// Daily semantic indexing (owner approved 2026-09-30): one scheduled run
-		// per UTC day loops the SAME admission path as the HTTP run route — each
-		// batch reserves its own 940-neuron cap, settles against the ledger, and
-		// stops the moment the daily 9,500 budget refuses.  No bypass exists.
+		// Quota redesign 2026-10-02 (G2): the 40 16 * * * registration is kept so
+		// the cron catalog stays complete, but the handler is a structured no-op.
+		// Cloud batch embedding is permanently sealed; the local GPU pipeline owns
+		// document vectors.
 		if (controller.cron === SEMANTIC_INDEX_CRON) {
 			const context = bridgeContext(`cron:${SEMANTIC_INDEX_CRON}`);
 			logBridgeStage(context, "scheduled_enter", { task: "research_semantic_index" });
-			try {
-				await runSemanticIndexCron(env, context);
-			} catch (error) {
-				logBridgeFailure(context, error, "scheduled");
-				throw error;
-			}
+			await runSemanticIndexCronDisabled(context);
 			return;
 		}
 		// PUBLIC 文档数据有效期（owner 裁定 2026-09-29）：每日一轮有界
@@ -4237,22 +3782,8 @@ export default {
 			try {
 				const storage = researchReplicaStorage(env);
 				if (!storage) throw new ResearchBoundaryError("STORE_UNAVAILABLE");
-				// Quota admission (SDD CQ spec §4/§5): the retention sweep has no
-				// provable scan or Vectorize-stock upper bound.  Enforce mode reports
-				// a structured skip/failed outcome and never fabricates a success
-				// receipt; the compliance backlog stays visible to operators.
-				if (admissionMode(env) === "enforce") {
-					const outcome = cronQuotaOutcome(
-						"QUOTA_GUARD_UNAVAILABLE",
-						"research_retention",
-					);
-					logBridgeStage(context, `scheduled_${outcome.status}`, {
-						task: outcome.task,
-						reason: outcome.reason,
-						detail: "unbounded documents scan and Vectorize stock deletion have no provable bound",
-					});
-					return;
-				}
+				// Quota redesign 2026-10-02: the former enforce-mode structured skip
+				// is removed; the sweep runs in every mode and reports honestly.
 				const deps: RetentionDeps = { index: env.RESEARCH_PUBLIC_INDEX ?? null };
 				const report: RetentionRunReport = await runRetentionSweep(storage, deps, {
 					trigger: "scheduled",

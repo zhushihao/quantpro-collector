@@ -1,32 +1,35 @@
 /**
  * Task D: Collector PUBLIC semantic index over the D1/R2 research replica.
  *
- * Contract (spec §"向量范围、增量与存量一致性", plan task D):
+ * Contract (spec §"向量范围、增量与存量一致性", plan task D; amended by the
+ * 2026-10-02 quota redesign):
  *
  * 1. Scope is the Collector **PUBLIC** `document_version` current servable
  *    version.  Text comes only from D1 metadata plus the R2 object whose
  *    SHA-256 is re-verified before use; PRIVATE rows are structurally
  *    excluded (the D1 sidecar constrains visibility to PUBLIC, and the read
  *    side never leaves the PUBLIC visibility).
- * 2. One Vectorize index (`research-public-bge-m3-v1`, 1024 dims, cosine)
- *    built with Workers AI `@cf/baai/bge-m3`.  Vector ids are deterministic
- *    and carry no identifier: sha256(document_id ‖ version_id ‖ chunk
- *    ordinal).  Vector metadata carries only PUBLIC identifiers plus the
- *    model id.
+ * 2. One Vectorize index (`research-public-bge-m3-v1`, 1024 dims, cosine).
+ *    Vector ids are deterministic and carry no identifier:
+ *    sha256(document_id ‖ version_id ‖ chunk ordinal).  Vector metadata
+ *    carries only PUBLIC identifiers plus the model id.
  * 3. `research_semantic_index_state` (migration 0012) is the authoritative
  *    queue and the query-time validation sidecar.  Ingest registers PUBLIC
  *    pending rows inside the same D1 batch that persists the record, so no
- *    crash window exists between "record stored" and "index pending"; the
- *    compensation sweep covers REPLAY, pre-migration rows, object-before-
- *    metadata and metadata-before-object orderings.
+ *    crash window exists between "record stored" and "index pending".
  * 4. Vectorize mutations are eventually consistent.  A replaced or withdrawn
  *    version first becomes invisible in D1 (`retired_at` plus the live
  *    current-version re-resolution at query time) and only then has its
  *    vectors deleted asynchronously.  Query results are always re-validated
  *    against D1, so a stale vector can never be served.
- * 5. Batches are bounded: <=10 documents per Worker run, <=100 vectors per
- *    embed/upsert call, <=30s wall-clock budget, resumable (claim marker +
- *    idempotent upsert by deterministic id).
+ * 5. CLOUD BATCH EMBEDDING IS PHYSICALLY SEALED (quota redesign 2026-10-02):
+ *    the cloud batch runner, per-document claim/index path and ingest-time
+ *    background hook were removed -- no Worker code path embeds documents any
+ *    more.  Document vectors are produced by the local RTX 5080 GPU pipeline
+ *    and pushed through `ingestPrecomputedVectors`.  The ONLY remaining cloud
+ *    Workers AI spend is the single-shot query embedding inside
+ *    `searchPublicDocumentsSemantic` (plus the operator-triggered deployment
+ *    probe), which is preserved untouched.
  */
 import { ResearchBoundaryError } from "./research-outbound-v2.ts";
 import type { OutboundV2Record } from "./research-outbound-v2.ts";
@@ -45,15 +48,6 @@ export const SEMANTIC_CHUNK_CHARS = 1200;
 export const SEMANTIC_CHUNK_OVERLAP_CHARS = 150;
 export const SEMANTIC_MAX_CHUNKS = 32;
 export const SEMANTIC_EMBED_BATCH_LIMIT = 100;
-export const SEMANTIC_BATCH_MAX_DOCS = 10;
-export const SEMANTIC_BATCH_BUDGET_MS = 30_000;
-export const SEMANTIC_MAX_ATTEMPTS = 5;
-export const SEMANTIC_CLAIM_STALE_MS = 5 * 60 * 1000;
-export const SEMANTIC_DEAD_LETTER_RETRY_MS = 6 * 60 * 60 * 1000;
-export const SEMANTIC_REGISTER_PAGE = 200;
-export const SEMANTIC_REVIVE_PAGE = 50;
-export const SEMANTIC_AUDIT_PAGE = 50;
-export const SEMANTIC_CLEANUP_PAGE = 10;
 export const SEMANTIC_QUERY_MAX_LIMIT = 20;
 export const SEMANTIC_QUERY_MAX_QUERY_CHARS = 500;
 export const SEMANTIC_QUERY_OVERFETCH_FACTOR = 4;
@@ -73,12 +67,8 @@ export const SEMANTIC_SNIPPET_CHARS = 240;
 export const SEMANTIC_TITLE_CHARS = 200;
 export const SEMANTIC_VECTOR_ID_PREFIX = "rsv1_";
 
-/** By-design dead letters that the retry sweep never revives. */
+/** Ingest-time supersede marker (the only remaining cloud-side state writer). */
 export const SEMANTIC_SUPERSEDED_CODE = "SUPERSEDED";
-export const SEMANTIC_TEXT_UNAVAILABLE_CODE = "TEXT_UNAVAILABLE";
-export const SEMANTIC_OBJECT_PENDING_CODE = "OBJECT_PENDING";
-export const SEMANTIC_RECORD_PENDING_CODE = "RECORD_PENDING";
-export const SEMANTIC_IN_PROGRESS_CODE = "IN_PROGRESS";
 
 export type SemanticIndexStorage = { db: D1Database; objects: R2Bucket };
 export type SemanticIndexDeps = { ai: Ai; index: Vectorize };
@@ -117,17 +107,6 @@ export type SemanticSearchMatch = {
 export type SemanticSearchResult = {
 	matches: SemanticSearchMatch[];
 	index_status: "READY" | "PARTIAL";
-};
-
-export type SemanticBatchReport = {
-	registered: number;
-	revived: number;
-	ready: number;
-	pending: number;
-	failed: number;
-	superseded: number;
-	vectors_upserted: number;
-	vectors_deleted: number;
 };
 
 export type SemanticPendingVersion = {
@@ -478,7 +457,7 @@ export function semanticIndexIngestStatements(
 }
 
 /* ------------------------------------------------------------------ */
-/* Work queue: claim, reconcile, revive, cleanup                       */
+/* Work queue: the local GPU pipeline's view of what to embed          */
 /* ------------------------------------------------------------------ */
 
 const STATE_COLUMNS =
@@ -486,41 +465,18 @@ const STATE_COLUMNS =
 
 /**
  * Retention (owner ruling): a document marked EXPIRED in
- * `research_document_retention` must never be claimed for indexing, even when
- * a re-ingest un-retired one of its state rows between the mark and the purge.
- * The expired doc is already invisible to every read face; indexing it would
- * only burn embeddings for vectors that the purge deletes.
+ * `research_document_retention` must never receive new vectors, even when a
+ * re-ingest un-retired one of its state rows between the mark and the purge.
+ * The expired doc is already invisible to every read face; embedding it would
+ * only produce vectors that the purge deletes.
  */
 const NOT_EXPIRED_BY_RETENTION =
 	"NOT EXISTS (SELECT 1 FROM research_document_retention ret WHERE ret.document_id=research_semantic_index_state.document_id AND ret.status='EXPIRED')";
 
-async function claimPendingRow(
-	storage: SemanticIndexStorage,
-	row: SemanticIndexStateRow,
-	now: string,
-): Promise<boolean> {
-	const staleBefore = new Date(Date.parse(now) - SEMANTIC_CLAIM_STALE_MS).toISOString();
-	const result = await storage.db
-		.prepare(
-			"UPDATE research_semantic_index_state SET updated_at=?, last_error_code=? WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND state='PENDING' AND retired_at IS NULL AND (last_error_code IS NULL OR last_error_code<>? OR updated_at<?)",
-		)
-		.bind(
-			now,
-			SEMANTIC_IN_PROGRESS_CODE,
-			row.document_id,
-			row.version_id,
-			SEMANTIC_IN_PROGRESS_CODE,
-			staleBefore,
-		)
-		.run();
-	return Number(result.meta?.changes ?? 0) === 1;
-}
-
 /**
- * Compensation registration: every PUBLIC document_version without a state
- * row becomes PENDING.  Pure SQL with a stable keyset (`record_key`, i.e. the
- * version id), so repeated bounded runs advance past already-registered rows
- * and the tail of a 10k+ set can never be permanently outside a window.
+ * Cursor page of the PUBLIC work queue: what the local GPU pipeline should
+ * embed next (state-filtered, retention-filtered, keyset-bounded).  Since the
+ * cloud batch runner was sealed (2026-10-02), this read face IS the queue.
  */
 export async function listPendingSemanticVersions(
 	storage: SemanticIndexStorage,
@@ -556,72 +512,6 @@ export async function listPendingSemanticVersions(
 			? { document_id: last.document_id, version_id: last.version_id }
 			: null,
 	};
-}
-
-export async function registerMissingPublicVersions(
-	storage: SemanticIndexStorage,
-	now: string,
-	limit = SEMANTIC_REGISTER_PAGE,
-): Promise<number> {
-	const page = clampInt(limit, SEMANTIC_REGISTER_PAGE, 1, 5000);
-	const result = await storage.db
-		.prepare(
-			`INSERT INTO research_semantic_index_state (document_id, version_id, visibility, state, content_sha256, model_id, title_only, truncated, expected_chunks, confirmed_chunks, attempts, last_error_code, retired_at, vector_deleted_at, registered_at, updated_at) SELECT json_extract(research_records.payload_json, '$.document.document_id'), research_records.record_key, 'PUBLIC', 'PENDING', NULL, ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, ?, ? FROM research_records WHERE research_records.record_type='document_version' AND research_records.visibility='PUBLIC' AND json_extract(research_records.payload_json, '$.document.document_id') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM research_semantic_index_state existing WHERE existing.document_id=json_extract(research_records.payload_json, '$.document.document_id') AND existing.version_id=research_records.record_key) ORDER BY research_records.record_key LIMIT ?`,
-		)
-		.bind(SEMANTIC_MODEL_ID, now, now, page)
-		.run();
-	return Number(result.meta?.changes ?? 0);
-}
-
-/**
- * Revive expired dead letters that are not permanent by design, so a
- * transient embedding/upsert outage self-heals without operator action.
- */
-export async function reviveExpiredDeadLetters(
-	storage: SemanticIndexStorage,
-	now: string,
-	limit = SEMANTIC_REVIVE_PAGE,
-): Promise<number> {
-	const page = clampInt(limit, SEMANTIC_REVIVE_PAGE, 1, 500);
-	const cutoff = new Date(Date.parse(now) - SEMANTIC_DEAD_LETTER_RETRY_MS).toISOString();
-	const result = await storage.db
-		.prepare(
-			"UPDATE research_semantic_index_state SET state='PENDING', attempts=0, expected_chunks=0, confirmed_chunks=0, last_error_code=NULL, updated_at=? WHERE visibility='PUBLIC' AND state='FAILED' AND retired_at IS NULL AND (last_error_code IS NULL OR (last_error_code<>? AND last_error_code<>?)) AND updated_at<? AND (document_id, version_id) IN (SELECT document_id, version_id FROM research_semantic_index_state WHERE visibility='PUBLIC' AND state='FAILED' AND retired_at IS NULL AND updated_at<? ORDER BY updated_at, document_id, version_id LIMIT ?)",
-		)
-		.bind(now, SEMANTIC_SUPERSEDED_CODE, SEMANTIC_TEXT_UNAVAILABLE_CODE, cutoff, cutoff, page)
-		.run();
-	return Number(result.meta?.changes ?? 0);
-}
-
-/**
- * A version that was superseded earlier may be current again (for example a
- * withdrawal of the newer version).  Re-resolve the document and move the row
- * back into the work queue, discarding any deleted-vector marker.
- */
-async function reviveCurrentSupersededRows(
-	storage: SemanticIndexStorage,
-	now: string,
-	limit = SEMANTIC_REVIVE_PAGE,
-): Promise<number> {
-	const candidates = await storage.db
-		.prepare(
-			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND state='FAILED' AND retired_at IS NOT NULL AND last_error_code=? ORDER BY updated_at, document_id, version_id LIMIT ?`,
-		)
-		.bind(SEMANTIC_SUPERSEDED_CODE, clampInt(limit, SEMANTIC_REVIVE_PAGE, 1, 500))
-		.all<SemanticIndexStateRow>();
-	let revived = 0;
-	for (const row of candidates.results ?? []) {
-		const current = await currentServableVersion(storage, row.document_id);
-		if (!current || current.versionId !== row.version_id) continue;
-		const result = await storage.db
-			.prepare(
-				"UPDATE research_semantic_index_state SET state='PENDING', retired_at=NULL, vector_deleted_at=NULL, expected_chunks=0, confirmed_chunks=0, attempts=0, last_error_code=NULL, updated_at=? WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND state='FAILED'",
-			)
-			.bind(now, row.document_id, row.version_id)
-			.run();
-		revived += Number(result.meta?.changes ?? 0);
-	}
-	return revived;
 }
 
 type VersionCandidate = {
@@ -681,8 +571,8 @@ async function currentServableVersion(
 /**
  * The current candidate plus whether it is actually servable.  When no version
  * of the document is servable at all, the highest-numbered version is still
- * "current" for indexing purposes: it must become a counted TEXT_UNAVAILABLE
- * dead letter instead of being dismissed as merely superseded.
+ * "current" for validation purposes (a title-only vector may be attached to
+ * it); the query face enforces that agreement before serving a hit.
  */
 async function currentVersionCandidate(
 	storage: SemanticIndexStorage,
@@ -695,7 +585,7 @@ async function currentVersionCandidate(
 }
 
 /* ------------------------------------------------------------------ */
-/* Per-document indexing                                               */
+/* Shared text composition (query face + precomputed-vector push)       */
 /* ------------------------------------------------------------------ */
 
 type DocumentText = { text: string; titleOnly: boolean };
@@ -708,10 +598,10 @@ function documentTitle(candidate: VersionCandidate): string {
 }
 
 /**
- * The single composition rule shared by the indexer and the query face:
- * normalized title + readable body, or a title-only chunk.  Both sides must
- * derive byte-identical text, otherwise a re-chunked snippet would not match
- * the chunk the vector was built from.
+ * The single composition rule shared by the local embedding pipeline and the
+ * query face: normalized title + readable body, or a title-only chunk.  Both
+ * sides must derive byte-identical text, otherwise a re-chunked snippet would
+ * not match the chunk the vector was built from.
  */
 function composeSemanticText(title: string, bodyText: string | null): DocumentText | null {
 	const normalizedBody = bodyText === null ? "" : normalizeSemanticText(bodyText);
@@ -725,56 +615,9 @@ function composeSemanticText(title: string, bodyText: string | null): DocumentTe
 }
 
 /**
- * Embedding text is "title + readable body".  A version without a readable
- * body still contributes a title-only chunk (marked `title_only`); when there
- * is neither body nor usable title the version is skipped and counted, never
- * replaced with invented text (no OCR fabrication).
+ * State-row write shared by the precomputed-vector push: flips a PENDING row to
+ * READY once the locally computed vectors are confirmed upserted.
  */
-async function loadDocumentText(
-	storage: SemanticIndexStorage,
-	candidate: VersionCandidate,
-): Promise<{
-	text: DocumentText | null;
-	contentSha256: string | null;
-	dependencyMissing: boolean;
-}> {
-	const title = documentTitle(candidate);
-	const body = servableBody(candidate.payload);
-	if (!body) {
-		return {
-			text: composeSemanticText(title, null),
-			contentSha256: null,
-			dependencyMissing: false,
-		};
-	}
-	const object = await storage.objects.get(objectKey(body.contentSha256));
-	if (!object) {
-		return { text: null, contentSha256: body.contentSha256, dependencyMissing: true };
-	}
-	const bytes = await object.arrayBuffer();
-	if ((await sha256Hex(bytes)) !== body.contentSha256) {
-		throw new ResearchBoundaryError("INTEGRITY_FAILED");
-	}
-	const decoded = new TextDecoder().decode(bytes);
-	if (!normalizeSemanticText(decoded)) {
-		return {
-			text: composeSemanticText(title, null),
-			contentSha256: body.contentSha256,
-			dependencyMissing: false,
-		};
-	}
-	return {
-		text: composeSemanticText(title, decoded),
-		contentSha256: body.contentSha256,
-		dependencyMissing: false,
-	};
-}
-
-export type DocumentOutcome = {
-	status: "READY" | "PENDING" | "FAILED" | "SUPERSEDED";
-	vectors: number;
-};
-
 async function markRow(
 	storage: SemanticIndexStorage,
 	row: SemanticIndexStateRow,
@@ -816,150 +659,11 @@ async function markRow(
 }
 
 /**
- * Index one claimed row.  Dependency-missing outcomes stay PENDING without
- * spending the retry budget (the object or record may still arrive); embed or
- * upsert failures spend it and dead-letter after SEMANTIC_MAX_ATTEMPTS.
- */
-async function indexClaimedRow(
-	storage: SemanticIndexStorage,
-	deps: SemanticIndexDeps,
-	row: SemanticIndexStateRow,
-	now: string,
-): Promise<DocumentOutcome> {
-	const candidates = await documentVersions(storage, row.document_id);
-	const candidate = candidates.find((item) => item.versionId === row.version_id) ?? null;
-	if (!candidate) {
-		await markRow(storage, row, now, {
-			state: "PENDING",
-			lastErrorCode: SEMANTIC_RECORD_PENDING_CODE,
-		});
-		return { status: "PENDING", vectors: 0 };
-	}
-	const current = (await currentVersionCandidate(storage, row.document_id)).candidate;
-	if (!current || current.versionId !== row.version_id) {
-		await markRow(storage, row, now, {
-			state: "FAILED",
-			expectedChunks: 0,
-			confirmedChunks: 0,
-			lastErrorCode: SEMANTIC_SUPERSEDED_CODE,
-			retired: true,
-		});
-		return { status: "SUPERSEDED", vectors: 0 };
-	}
-	const loaded = await loadDocumentText(storage, candidate);
-	if (loaded.dependencyMissing) {
-		await markRow(storage, row, now, {
-			state: "PENDING",
-			contentSha256: loaded.contentSha256,
-			lastErrorCode: SEMANTIC_OBJECT_PENDING_CODE,
-		});
-		return { status: "PENDING", vectors: 0 };
-	}
-	if (!loaded.text) {
-		await markRow(storage, row, now, {
-			state: "FAILED",
-			contentSha256: null,
-			titleOnly: 0,
-			truncated: 0,
-			expectedChunks: 0,
-			confirmedChunks: 0,
-			lastErrorCode: SEMANTIC_TEXT_UNAVAILABLE_CODE,
-		});
-		return { status: "FAILED", vectors: 0 };
-	}
-	const { chunks, truncated } = chunkSemanticDocument(loaded.text.text);
-	if (chunks.length === 0) {
-		await markRow(storage, row, now, {
-			state: "FAILED",
-			expectedChunks: 0,
-			confirmedChunks: 0,
-			lastErrorCode: SEMANTIC_TEXT_UNAVAILABLE_CODE,
-		});
-		return { status: "FAILED", vectors: 0 };
-	}
-	// A previous build may have left vectors at higher ordinals (model change
-	// or shorter current chunking).  Delete them so no stale vector survives.
-	if (row.expected_chunks > chunks.length || row.model_id !== SEMANTIC_MODEL_ID) {
-		await deleteVectorRange(deps, row, chunks.length, SEMANTIC_MAX_CHUNKS);
-	}
-	let upserted = 0;
-	try {
-		for (let start = 0; start < chunks.length; start += SEMANTIC_EMBED_BATCH_LIMIT) {
-			const batch = chunks.slice(start, start + SEMANTIC_EMBED_BATCH_LIMIT);
-			const vectors = await embedTexts(
-				deps.ai,
-				batch.map((chunk) => chunk.text),
-			);
-			const entries = [];
-			for (let index = 0; index < batch.length; index += 1) {
-				entries.push({
-					id: await semanticVectorId(
-						row.document_id,
-						row.version_id,
-						batch[index].ordinal,
-					),
-					values: vectors[index],
-					metadata: {
-						document_id: row.document_id,
-						version_id: row.version_id,
-						chunk: batch[index].ordinal,
-						model_id: SEMANTIC_MODEL_ID,
-					},
-				});
-			}
-			await deps.index.upsert(entries);
-			upserted += entries.length;
-		}
-	} catch (error) {
-		if (error instanceof ResearchBoundaryError && !error.retryable) throw error;
-		const attempts = row.attempts + 1;
-		const terminal = attempts >= SEMANTIC_MAX_ATTEMPTS;
-		await markRow(storage, row, now, {
-			state: terminal ? "FAILED" : "PENDING",
-			contentSha256: loaded.contentSha256,
-			titleOnly: loaded.text.titleOnly ? 1 : 0,
-			truncated: truncated ? 1 : 0,
-			expectedChunks: chunks.length,
-			confirmedChunks: 0,
-			attempts,
-			lastErrorCode: terminal ? "INDEX_WRITE_FAILED" : "INDEX_WRITE_RETRY",
-		});
-		return { status: terminal ? "FAILED" : "PENDING", vectors: upserted };
-	}
-	const applied = await markRow(storage, row, now, {
-		state: "READY",
-		contentSha256: loaded.contentSha256,
-		titleOnly: loaded.text.titleOnly ? 1 : 0,
-		truncated: truncated ? 1 : 0,
-		expectedChunks: chunks.length,
-		confirmedChunks: chunks.length,
-		attempts: 0,
-		lastErrorCode: null,
-	});
-	// The row was retired while embedding: its vectors are orphaned and the
-	// cleanup pass reclaims them.
-	return { status: applied === 1 ? "READY" : "SUPERSEDED", vectors: upserted };
-}
-
-async function deleteVectorRange(
-	deps: SemanticIndexDeps,
-	row: { document_id: string; version_id: string },
-	from: number,
-	to: number,
-): Promise<number> {
-	const ids = await semanticVectorIds(row.document_id, row.version_id, to);
-	const slice = ids.slice(from);
-	if (slice.length === 0) return 0;
-	await deps.index.deleteByIds(slice);
-	return slice.length;
-}
-
-/**
- * Retention reuse point: the same deterministic-id `deleteByIds` mechanism the
- * retired-row cleanup uses, exposed for the PUBLIC document retention purge,
- * which deletes the version rows before reclaiming vectors (D1 was already
- * authoritative, so the eventual Vectorize consistency window cannot expose a
- * deleted version).  Returns the number of vector ids submitted for deletion.
+ * Retention reuse point: deterministic-id `deleteByIds` for the PUBLIC document
+ * retention purge, which deletes the version rows before reclaiming vectors
+ * (D1 was already authoritative, so the eventual Vectorize consistency window
+ * cannot expose a deleted version).  Returns the number of vector ids
+ * submitted for deletion.
  */
 export async function deleteSemanticVersionVectors(
 	index: Vectorize,
@@ -970,177 +674,6 @@ export async function deleteSemanticVersionVectors(
 	if (ids.length === 0) return 0;
 	await index.deleteByIds(ids);
 	return ids.length;
-}
-
-/**
- * Bounded rolling audit of READY rows: a version that is no longer the
- * document's servable version (a later version arrived out of order, or the
- * version itself stopped being servable) must be invalidated in D1 before its
- * vectors are reclaimed.  Rows confirmed as current are touched so the audit
- * rotates instead of re-examining the same head every run.
- */
-async function auditReadyRows(
-	storage: SemanticIndexStorage,
-	now: string,
-	limit = SEMANTIC_AUDIT_PAGE,
-): Promise<number> {
-	const candidates = await storage.db
-		.prepare(
-			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND state='READY' AND retired_at IS NULL ORDER BY updated_at, document_id, version_id LIMIT ?`,
-		)
-		.bind(clampInt(limit, SEMANTIC_AUDIT_PAGE, 1, 500))
-		.all<SemanticIndexStateRow>();
-	let retired = 0;
-	for (const row of candidates.results ?? []) {
-		const current = await currentServableVersion(storage, row.document_id);
-		if (current && current.versionId === row.version_id) {
-			await storage.db
-				.prepare(
-					"UPDATE research_semantic_index_state SET updated_at=? WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND state='READY' AND retired_at IS NULL",
-				)
-				.bind(now, row.document_id, row.version_id)
-				.run();
-			continue;
-		}
-		await markRow(storage, row, now, {
-			state: "FAILED",
-			expectedChunks: 0,
-			confirmedChunks: 0,
-			lastErrorCode: SEMANTIC_SUPERSEDED_CODE,
-			retired: true,
-		});
-		retired += 1;
-	}
-	return retired;
-}
-
-/**
- * Delete vectors for rows whose ids must no longer be visible.  D1 was
- * already authoritative before this runs (retired_at), so an eventual
- * Vectorize consistency window cannot expose a retired version.
- */
-async function cleanupRetiredVectors(
-	storage: SemanticIndexStorage,
-	deps: SemanticIndexDeps,
-	now: string,
-	limit = SEMANTIC_CLEANUP_PAGE,
-): Promise<number> {
-	const candidates = await storage.db
-		.prepare(
-			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND retired_at IS NOT NULL AND vector_deleted_at IS NULL ORDER BY retired_at, document_id, version_id LIMIT ?`,
-		)
-		.bind(clampInt(limit, SEMANTIC_CLEANUP_PAGE, 1, 100))
-		.all<SemanticIndexStateRow>();
-	let deleted = 0;
-	for (const row of candidates.results ?? []) {
-		deleted += await deleteVectorRange(deps, row, 0, SEMANTIC_MAX_CHUNKS);
-		await storage.db
-			.prepare(
-				"UPDATE research_semantic_index_state SET vector_deleted_at=?, updated_at=? WHERE visibility='PUBLIC' AND document_id=? AND version_id=?",
-			)
-			.bind(now, now, row.document_id, row.version_id)
-			.run();
-	}
-	return deleted;
-}
-
-/* ------------------------------------------------------------------ */
-/* Batch runner                                                        */
-/* ------------------------------------------------------------------ */
-
-/**
- * One bounded, resumable indexing run: compensate registrations, revive
- * expired dead letters and superseded-but-current rows, index up to
- * `maxDocs` pending documents, then reclaim retired vectors.  Never one HTTP
- * request for a whole corpus.
- */
-export async function runSemanticIndexBatch(
-	storage: SemanticIndexStorage,
-	deps: SemanticIndexDeps,
-	options: { now?: string; maxDocs?: number; maxRegister?: number; budgetMs?: number } = {},
-): Promise<SemanticBatchReport> {
-	const now = options.now ?? new Date().toISOString();
-	const maxDocs = clampInt(options.maxDocs, SEMANTIC_BATCH_MAX_DOCS, 1, SEMANTIC_BATCH_MAX_DOCS);
-	const deadline =
-		Date.now() + clampInt(options.budgetMs, SEMANTIC_BATCH_BUDGET_MS, 1_000, 120_000);
-	const report: SemanticBatchReport = {
-		registered: 0,
-		revived: 0,
-		ready: 0,
-		pending: 0,
-		failed: 0,
-		superseded: 0,
-		vectors_upserted: 0,
-		vectors_deleted: 0,
-	};
-	try {
-		report.registered = await registerMissingPublicVersions(
-			storage,
-			now,
-			options.maxRegister ?? SEMANTIC_REGISTER_PAGE,
-		);
-		report.revived += await reviveExpiredDeadLetters(storage, now);
-		report.revived += await reviveCurrentSupersededRows(storage, now);
-		report.superseded += await auditReadyRows(storage, now);
-		const staleBefore = new Date(Date.parse(now) - SEMANTIC_CLAIM_STALE_MS).toISOString();
-		const candidates = await storage.db
-			.prepare(
-				`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND state='PENDING' AND retired_at IS NULL AND ${NOT_EXPIRED_BY_RETENTION} AND (last_error_code IS NULL OR last_error_code<>? OR updated_at<?) ORDER BY updated_at, document_id, version_id LIMIT ?`,
-			)
-			.bind(SEMANTIC_IN_PROGRESS_CODE, staleBefore, maxDocs * 3)
-			.all<SemanticIndexStateRow>();
-		let processed = 0;
-		for (const row of candidates.results ?? []) {
-			if (processed >= maxDocs || Date.now() >= deadline) break;
-			if (!(await claimPendingRow(storage, row, now))) continue;
-			processed += 1;
-			const outcome = await indexClaimedRow(storage, deps, row, now);
-			report.vectors_upserted += outcome.vectors;
-			if (outcome.status === "READY") report.ready += 1;
-			else if (outcome.status === "FAILED") report.failed += 1;
-			else if (outcome.status === "SUPERSEDED") report.superseded += 1;
-			else report.pending += 1;
-		}
-		report.vectors_deleted = await cleanupRetiredVectors(storage, deps, now);
-		return report;
-	} catch (error) {
-		// The boundaryFailure conversion erases the root cause; name it for the
-		// operator log (no secrets, no document ids in the error text).
-		console.log(
-			JSON.stringify({
-				event: "semantic_run_failed",
-				timestamp: new Date().toISOString(),
-				error_type: error instanceof Error ? error.name : typeof error,
-				error_message: (error instanceof Error ? error.message : String(error)).slice(0, 300),
-				error_stack: ((error instanceof Error ? error.stack : "") ?? "").slice(0, 600),
-			}),
-		);
-		boundaryFailure(error);
-	}
-}
-
-/** Targeted index attempt for one PUBLIC document version (ingest hook). */
-export async function indexSemanticDocument(
-	storage: SemanticIndexStorage,
-	deps: SemanticIndexDeps,
-	options: { documentId: string; versionId: string; now?: string },
-): Promise<DocumentOutcome> {
-	const now = options.now ?? new Date().toISOString();
-	try {
-		const row = await storage.db
-			.prepare(
-				`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND ${NOT_EXPIRED_BY_RETENTION} LIMIT 1`,
-			)
-			.bind(options.documentId, options.versionId)
-			.first<SemanticIndexStateRow>();
-		if (!row || row.state !== "PENDING" || row.retired_at !== null) {
-			return { status: "PENDING", vectors: 0 };
-		}
-		if (!(await claimPendingRow(storage, row, now))) return { status: "PENDING", vectors: 0 };
-		return await indexClaimedRow(storage, deps, row, now);
-	} catch (error) {
-		boundaryFailure(error);
-	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -1488,7 +1021,9 @@ function precomputedPayloadError(payload: unknown): string | null {
  * of the same document and report the cosine score against the local one).
  * The state row must exist (registered by the document_version ingest); the
  * supplied content hash must match the current servable body so stale vectors
- * can never attach to newer content.
+ * can never attach to newer content; and a document EXPIRED by retention never
+ * receives vectors (owner ruling: the same guard the retired cloud claim path
+ * enforced, carried over to the local-GPU push path on 2026-10-02).
  */
 export async function ingestPrecomputedVectors(
 	storage: SemanticIndexStorage,
@@ -1501,15 +1036,43 @@ export async function ingestPrecomputedVectors(
 
 	const row = await storage.db
 		.prepare(
-			`SELECT ${STATE_COLUMNS} FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=? AND retired_at IS NULL`,
+			`SELECT ${STATE_COLUMNS},
+					EXISTS (
+						SELECT 1 FROM research_document_retention ret
+						WHERE ret.document_id=research_semantic_index_state.document_id AND ret.status='EXPIRED'
+					) AS retention_expired
+			 FROM research_semantic_index_state WHERE visibility='PUBLIC' AND document_id=? AND version_id=?`,
 		)
 		.bind(payload.document_id, payload.version_id)
-		.first<SemanticIndexStateRow>();
+		.first<SemanticIndexStateRow & { retention_expired: number }>();
 	if (!row) return { status: "REJECTED", reason: "no registered state row for this version" };
-
+	if (Number(row.retention_expired) === 1) {
+		return {
+			status: "REJECTED",
+			reason: "document is EXPIRED by retention; vectors are never attached",
+		};
+	}
 	const { candidate, servable } = await currentVersionCandidate(storage, payload.document_id);
 	if (!candidate || candidate.versionId !== payload.version_id) {
+		// A superseded row stays retired: it is not current, so its vectors must
+		// never come back and it must not re-enter the work queue.
 		return { status: "REJECTED", reason: "version is not the current servable version" };
+	}
+	if (row.retired_at !== null) {
+		// The version is retired but is the current servable version again (for
+		// example a newer version was withdrawn).  The local push is the actor
+		// that revives it.
+		const revived = await storage.db
+			.prepare(
+				"UPDATE research_semantic_index_state SET retired_at=NULL, vector_deleted_at=NULL, state='PENDING', expected_chunks=0, confirmed_chunks=0, attempts=0, updated_at=? WHERE visibility='PUBLIC' AND document_id=? AND version_id=?",
+			)
+			.bind(now, payload.document_id, payload.version_id)
+			.run();
+		if (Number(revived.meta?.changes ?? 0) !== 1) {
+			return { status: "REJECTED", reason: "state row retired during revival" };
+		}
+		row.retired_at = null;
+		row.state = "PENDING";
 	}
 	const body = servable ? servableBody(candidate.payload) : null;
 	const title = documentTitle(candidate);

@@ -333,12 +333,53 @@ async function stateRows(store) {
 	return result.results;
 }
 
-async function indexDocument(store, fake, documentId, versionId, now = NOW) {
-	return semantic.indexSemanticDocument(store, fake.deps, { documentId, versionId, now });
+/**
+ * The local RTX 5080 GPU pipeline in miniature (quota redesign 2026-10-02):
+ * chunk the composed text locally, embed with the same deterministic synthetic
+ * embedder the FakeAi uses, and push through the REAL production
+ * precomputed-vector path.  Cloud document embedding no longer exists.
+ */
+function servableHashOf(built) {
+	if (built.payload.version.media_type.startsWith("text/")) {
+		return built.payload.version.content_sha256;
+	}
+	const projection = built.payload.attachments.find(
+		(attachment) =>
+			attachment.role === "text_extraction" && attachment.attachment_status === "FETCHED",
+	);
+	return projection ? projection.content_sha256 : null;
 }
 
-async function runBatch(store, fake, options = {}) {
-	return semantic.runSemanticIndexBatch(store, fake.deps, { now: NOW, ...options });
+async function pushDocumentVectors(store, fake, built, { bodyText = null } = {}) {
+	const title = built.payload.document.title ?? "";
+	const body = bodyText ?? (built.hash ? new TextDecoder().decode(built.bodyBytes) : null);
+	const composed = body ? (title ? `${title}\n\n${body}` : body) : title || null;
+	if (!composed) return { status: "NOTHING_TO_PUSH" };
+	const { chunks } = semantic.chunkSemanticDocument(composed);
+	const vectors = chunks.map((chunk) => ({
+		ordinal: chunk.ordinal,
+		values: embedText(chunk.text, 1024),
+	}));
+	return semantic.ingestPrecomputedVectors(
+		store,
+		{ index: fake.index },
+		{
+			document_id: built.payload.document.document_id,
+			version_id: built.payload.version.version_id,
+			content_sha256: body ? servableHashOf(built) : null,
+			vectors,
+		},
+	);
+}
+
+/** Register the pending state row the way the ingest transaction does. */
+async function registerPending(store, built, updatedAt = NOW) {
+	const statements = semantic.semanticIndexIngestStatements(
+		store.db,
+		await envelopeFor(built.payload),
+		updatedAt,
+	);
+	if (statements.length > 0) await store.db.batch(statements);
 }
 
 async function search(store, fake, query, limit = 5) {
@@ -473,7 +514,7 @@ test("REPLAY and duplicate delivery never reset a READY row", async () => {
 	await seedObjectR2(store, built);
 	const record = await envelopeFor(built.payload);
 	await replica.ingestResearchReplicaRecord(store, record, null, NOW);
-	assert.equal((await indexDocument(store, fake, "doc_replay", "ver_replay")).status, "READY");
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
 	assert.equal((await stateRow(store, "doc_replay", "ver_replay")).state, "READY");
 
 	const replayed = await replica.ingestResearchReplicaRecord(store, record, null, NOW);
@@ -521,18 +562,22 @@ test("REPLAY and duplicate delivery never reset a READY row", async () => {
 
 test("pending semantic version listing is state-filtered and cursor bounded", async () => {
 	const store = storage();
+	const fake = fakes();
+	const built = [];
 	for (let i = 0; i < 23; i += 1) {
 		const n = String(i).padStart(2, "0");
-		await seedVersionRow(store, documentVersionPayload({ documentId: `doc_queue_${n}`, versionId: `ver_queue_${n}` }));
+		const item = documentVersionPayload({ documentId: `doc_queue_${n}`, versionId: `ver_queue_${n}` });
+		await seedVersionRow(store, item);
+		await registerPending(store, item);
+		built.push(item);
 	}
-	await semantic.registerMissingPublicVersions(store, NOW, 50);
-	const fake = fakes();
-	await runBatch(store, fake, { maxDocs: 1 });
+	// One version gets its local vectors: 1 READY, 22 PENDING.
+	await pushDocumentVectors(store, fake, built[0]);
 	const first = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING" });
 	assert.equal(first.items.length, 20, "bounded page returns the requested rows");
 	assert.ok(first.next);
-	// Mutate the first page's state and updated_at as a successful upload would.
-	// The immutable-ID cursor must still reach every remaining PENDING version.
+	// Mutate the first page's state and updated_at as a successful local upload
+	// would.  The immutable-ID cursor must still reach every remaining version.
 	for (const item of first.items) {
 		await store.db.prepare("UPDATE research_semantic_index_state SET state='READY', updated_at='2026-09-30T12:00:00Z' WHERE document_id=? AND version_id=?")
 			.bind(item.document_id, item.version_id).run();
@@ -544,18 +589,17 @@ test("pending semantic version listing is state-filtered and cursor bounded", as
 	assert.equal(ready.items.length, 20, "the mutated first page is now READY");
 });
 
-test("pending registration -> index -> READY with deterministic ids and PUBLIC-only metadata", async () => {
+test("pending registration -> local vector push -> READY with deterministic ids and PUBLIC-only metadata", async () => {
 	const store = storage();
 	const fake = fakes();
 	const built = documentVersionPayload({ documentId: "doc_chain", versionId: "ver_chain" });
 	await seedVersionRow(store, built);
-	assert.equal(await semantic.registerMissingPublicVersions(store, NOW), 1);
+	await registerPending(store, built);
 	assert.equal((await stateRow(store, "doc_chain", "ver_chain")).state, "PENDING");
 
-	const report = await runBatch(store, fake);
-	assert.equal(report.registered, 0);
-	assert.equal(report.ready, 1);
-	assert.equal(report.vectors_upserted, 1);
+	const pushed = await pushDocumentVectors(store, fake, built);
+	assert.equal(pushed.status, "READY");
+	assert.equal(pushed.upserted, 1);
 	const row = await stateRow(store, "doc_chain", "ver_chain");
 	assert.equal(row.state, "READY");
 	assert.equal(row.expected_chunks, 1);
@@ -563,10 +607,8 @@ test("pending registration -> index -> READY with deterministic ids and PUBLIC-o
 	assert.equal(row.title_only, 0);
 	assert.equal(row.truncated, 0);
 	assert.equal(row.content_sha256, built.payload.version.content_sha256);
-	assert.equal(
-		fake.ai.models.every((model) => model === semantic.SEMANTIC_MODEL_ID),
-		true,
-	);
+	// G2: the document-vector work happens entirely off-cloud now.
+	assert.equal(fake.ai.calls, 0, "no Workers AI call may embed documents any more");
 	for (const metadata of fake.index.metadatas()) {
 		assert.deepEqual(Object.keys(metadata).sort(), [
 			"chunk",
@@ -583,27 +625,7 @@ test("pending registration -> index -> READY with deterministic ids and PUBLIC-o
 	);
 });
 
-	test("registered pending queue is state-filtered, cursor-stable, and capped at 128", async () => {
-	const store = storage();
-	for (let i = 0; i < 23; i += 1) {
-		const built = documentVersionPayload({ documentId: `doc_queue_${String(i).padStart(2,"0")}`, versionId: `ver_queue_${String(i).padStart(2,"0")}` });
-		await seedVersionRow(store, built);
-	}
-	await semantic.registerMissingPublicVersions(store, NOW, 50);
-	// Leave one row READY so state filtering is meaningful.
-	const fake = fakes();
-	await runBatch(store, fake, { maxDocs: 1 });
-	const first = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING" });
-	assert.equal(first.items.length, 20, "bounded page returns 20 requested rows");
-	assert.ok(first.next, "a continuation cursor is returned");
-	const second = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "PENDING", after: first.next });
-	assert.equal(first.items.length + second.items.length, 22);
-	assert.deepEqual(new Set([...first.items, ...second.items].map((x) => x.version_id)).size, 22);
-	const ready = await semantic.listPendingSemanticVersions(store, { limit: 20, state: "READY" });
-	assert.equal(ready.items.length, 1, "the single run-indexed row is READY");
-});
-
-test("metadata before object stays PENDING without spending retries, then converges", async () => {
+test("metadata before object: the local vector is inert until the object lands, then served", async () => {
 	const store = storage();
 	const fake = fakes();
 	const built = documentVersionPayload({
@@ -618,22 +640,25 @@ test("metadata before object stays PENDING without spending retries, then conver
 		.bind(built.hash)
 		.run();
 	store.objects.objects.delete(`research-objects/sha256/${built.hash}`);
-	assert.equal((await runBatch(store, fake)).registered, 1);
-	const pending = await stateRow(store, "doc_late_object", "ver_late_object");
-	assert.equal(pending.state, "PENDING");
-	assert.equal(pending.last_error_code, semantic.SEMANTIC_OBJECT_PENDING_CODE);
-	assert.equal(pending.attempts, 0, "a missing dependency is not a retry failure");
-	assert.equal(pending.content_sha256, built.hash);
-	assert.equal(fake.ai.calls, 0, "no embedding may happen without readable bytes");
+	await registerPending(store, built);
+	assert.equal(fake.ai.calls, 0, "no cloud embedding may happen at all");
 
-	// The object arrives afterwards; the sweep converges with no operator input.
+	// The local pipeline pushes before the object arrives: the state row turns
+	// READY (the hash is validated against the D1 payload), but the query face
+	// re-validates against R2 and refuses to serve an unreadable body.
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
+	const before = await search(store, fake, "迟到的正文对象");
+	assert.equal(before.matches.length, 0, "a hit without its object is never served");
+
+	// The object arrives afterwards; the same vector becomes servable with no
+	// further write.
 	await seedObjectR2(store, built);
-	const report = await runBatch(store, fake);
-	assert.equal(report.ready, 1);
-	assert.equal((await stateRow(store, "doc_late_object", "ver_late_object")).state, "READY");
+	const after = await search(store, fake, "迟到的正文对象");
+	assert.equal(after.matches.length, 1);
+	assert.equal(after.matches[0].document_id, "doc_late_object");
 });
 
-test("object before metadata: the ingest hook indexes the registered version directly", async () => {
+test("object before metadata: ingest registers the pending row at write time and the local pipeline completes it", async () => {
 	const store = storage();
 	const fake = fakes();
 	const built = documentVersionPayload({
@@ -652,14 +677,12 @@ test("object before metadata: the ingest hook indexes the registered version dir
 		documentId: "doc_object_first",
 		versionId: "ver_object_first",
 	});
-	assert.equal(
-		(await indexDocument(store, fake, "doc_object_first", "ver_object_first")).status,
-		"READY",
-	);
+	assert.equal((await stateRow(store, "doc_object_first", "ver_object_first")).state, "PENDING");
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
 	assert.equal((await stateRow(store, "doc_object_first", "ver_object_first")).state, "READY");
 });
 
-test("no readable body and no usable title is a counted dead letter, never fabricated text", async () => {
+test("no readable body and no usable title stays pending; nothing is ever fabricated", async () => {
 	const store = storage();
 	const fake = fakes();
 	const built = documentVersionPayload({
@@ -669,23 +692,25 @@ test("no readable body and no usable title is a counted dead letter, never fabri
 		title: "",
 	});
 	await seedVersionRow(store, built);
-	const report = await runBatch(store, fake);
-	assert.equal(report.registered, 1);
-	assert.equal(report.failed, 1);
+	await registerPending(store, built);
+	// There is nothing to embed: the local pipeline pushes nothing and the row
+	// simply waits.  No dead-letter accounting exists on the cloud face any more,
+	// and no invented text is ever embedded.
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "NOTHING_TO_PUSH");
 	const row = await stateRow(store, "doc_unreadable", "ver_unreadable");
-	assert.equal(row.state, "FAILED");
-	assert.equal(row.last_error_code, semantic.SEMANTIC_TEXT_UNAVAILABLE_CODE);
-	assert.equal(row.expected_chunks, 0);
-	assert.equal(row.confirmed_chunks, 0);
+	assert.equal(row.state, "PENDING");
 	assert.equal(fake.ai.calls, 0);
 	assert.equal(fake.index.vectors.size, 0);
 	const coverage = await semantic.readSemanticIndexCoverage(store);
-	assert.deepEqual(coverage.failure_codes, [
-		{ last_error_code: semantic.SEMANTIC_TEXT_UNAVAILABLE_CODE, count: 1 },
-	]);
+	assert.equal(coverage.failure_codes.length, 0);
+	// The row stays queue-visible; the local pipeline inspects the payload and
+	// simply has nothing to embed -- the cloud face never invents text.
+	const pending = await semantic.listPendingSemanticVersions(store, { state: "PENDING" });
+	assert.equal(pending.items.length, 1);
+	assert.equal(pending.items[0].version_id, "ver_unreadable");
 });
 
-test("title_only versions index a marked title chunk (no OCR fabrication)", async () => {
+test("title_only versions get a marked title chunk via the local push (no OCR fabrication)", async () => {
 	const store = storage();
 	const fake = fakes();
 	const built = documentVersionPayload({
@@ -696,7 +721,8 @@ test("title_only versions index a marked title chunk (no OCR fabrication)", asyn
 		body: "unreadable bytes",
 	});
 	await seedVersionRow(store, built);
-	assert.equal((await runBatch(store, fake)).ready, 1);
+	await registerPending(store, built);
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
 	const row = await stateRow(store, "doc_title_only", "ver_title_only");
 	assert.equal(row.title_only, 1);
 	assert.equal(row.content_sha256, null);
@@ -724,7 +750,11 @@ test("a PDF version with a FETCHED text-extraction projection indexes the projec
 		`research-objects/sha256/${built.payload.attachments[0].content_sha256}`,
 		encoder.encode(projection),
 	);
-	assert.equal((await runBatch(store, fake)).ready, 1);
+	await registerPending(store, built);
+	assert.equal(
+		(await pushDocumentVectors(store, fake, built, { bodyText: projection })).status,
+		"READY",
+	);
 	const row = await stateRow(store, "doc_projection", "ver_projection");
 	assert.equal(row.content_sha256, built.payload.attachments[0].content_sha256);
 	assert.equal(row.title_only, 0);
@@ -737,7 +767,7 @@ test("a PDF version with a FETCHED text-extraction projection indexes the projec
 /* Version replacement, withdrawal, retirement                      */
 /* ---------------------------------------------------------------- */
 
-test("version replacement hides the old version immediately and reclaims its vectors", async () => {
+test("version replacement hides the old version immediately; the stale vector is never served", async () => {
 	const store = storage();
 	const fake = fakes();
 	const older = documentVersionPayload({
@@ -747,7 +777,8 @@ test("version replacement hides the old version immediately and reclaims its vec
 		body: "旧版本的正文内容",
 	});
 	await seedVersionRow(store, older);
-	await runBatch(store, fake);
+	await registerPending(store, older);
+	assert.equal((await pushDocumentVectors(store, fake, older)).status, "READY");
 	const oldVectorId = await semantic.semanticVectorId("doc_replace", "ver_replace_1", 0);
 	assert.ok(fake.index.vectors.has(oldVectorId));
 
@@ -772,7 +803,7 @@ test("version replacement hides the old version immediately and reclaims its vec
 	assert.equal(superseded.last_error_code, semantic.SEMANTIC_SUPERSEDED_CODE);
 	assert.ok(
 		fake.index.vectors.has(oldVectorId),
-		"the stale vector is still present before cleanup",
+		"the stale vector may still be present before any reclaim",
 	);
 	const duringWindow = await search(store, fake, "正文内容");
 	assert.equal(
@@ -781,29 +812,18 @@ test("version replacement hides the old version immediately and reclaims its vec
 		"a superseded version is never served, even while its vectors exist",
 	);
 
-	// The new version is still pending here; once indexed it is the only hit.
-	assert.equal(
-		(await indexDocument(store, fake, "doc_replace", "ver_replace_2")).status,
-		"READY",
-	);
+	// The new version is completed by the local pipeline and is the only hit.
+	assert.equal((await pushDocumentVectors(store, fake, newer)).status, "READY");
 	const afterIndex = await search(store, fake, "正文内容");
 	assert.deepEqual(
 		afterIndex.matches.map((match) => match.version_id),
 		["ver_replace_2"],
 	);
-
-	const report = await runBatch(store, fake);
-	assert.ok(report.vectors_deleted > 0);
-	assert.equal(fake.index.vectors.has(oldVectorId), false, "cleanup reclaims retired vectors");
-	assert.ok((await stateRow(store, "doc_replace", "ver_replace_1")).vector_deleted_at);
-	assert.equal((await stateRow(store, "doc_replace", "ver_replace_2")).state, "READY");
 });
 
-test("a READY version that stops being current is retired by the rolling audit", async () => {
+test("a READY row that is no longer the current version is filtered at query time", async () => {
 	const store = storage();
 	const fake = fakes();
-	// Both rows exist in D1 (an out-of-order backfill), so no ingest-time
-	// supersede statement runs: the audit must notice that version 1 is stale.
 	const first = documentVersionPayload({
 		documentId: "doc_audit",
 		versionId: "ver_audit_1",
@@ -817,20 +837,21 @@ test("a READY version that stops being current is retired by the rolling audit",
 		body: "审计用的第二版正文",
 	});
 	await seedVersionRow(store, first);
-	await runBatch(store, fake);
-	assert.equal((await stateRow(store, "doc_audit", "ver_audit_1")).state, "READY");
+	await registerPending(store, first);
+	assert.equal((await pushDocumentVectors(store, fake, first)).status, "READY");
+	// An out-of-order backfill: version 2's row arrives with no ingest-time
+	// supersede visible to version 1's already-READY row (the supersede only
+	// fires for rows registered in the same ingest batch).
 	await seedVersionRow(store, second, { updatedAt: "2026-09-28T01:00:00.000Z" });
-	const report = await runBatch(store, fake);
-	assert.ok(report.superseded >= 1, "the audit retires the non-current READY row");
-	const retired = await stateRow(store, "doc_audit", "ver_audit_1");
-	assert.equal(retired.state, "FAILED");
-	assert.equal(retired.last_error_code, semantic.SEMANTIC_SUPERSEDED_CODE);
-	assert.equal(retired.retired_at, NOW);
-	assert.equal(
-		fake.index.vectors.has(await semantic.semanticVectorId("doc_audit", "ver_audit_1", 0)),
-		false,
+	await registerPending(store, second, "2026-09-28T01:00:00.000Z");
+	const stale = await search(store, fake, "审计用的正文");
+	assert.deepEqual(
+		stale.matches.map((match) => match.version_id),
+		[],
+		"a READY row whose version is no longer current is never served",
 	);
-	assert.equal((await stateRow(store, "doc_audit", "ver_audit_2")).state, "READY");
+	// The current version is completed by the local pipeline and becomes the hit.
+	assert.equal((await pushDocumentVectors(store, fake, second)).status, "READY");
 	const result = await search(store, fake, "审计用的正文");
 	assert.deepEqual(
 		result.matches.map((match) => match.version_id),
@@ -838,7 +859,7 @@ test("a READY version that stops being current is retired by the rolling audit",
 	);
 });
 
-test("falling back to an earlier version revives it and re-indexes its vectors", async () => {
+test("falling back to an earlier version: the local push revives the retired-but-current row", async () => {
 	const store = storage();
 	const fake = fakes();
 	const first = documentVersionPayload({
@@ -854,19 +875,15 @@ test("falling back to an earlier version revives it and re-indexes its vectors",
 		body: "回退后应不可检索的第二版正文",
 	});
 	await seedVersionRow(store, first);
-	await runBatch(store, fake);
+	await registerPending(store, first);
 	await seedVersionRow(store, second, { updatedAt: "2026-09-28T01:00:00.000Z" });
-	await runBatch(store, fake);
-	const firstVectorId = await semantic.semanticVectorId("doc_fallback", "ver_fallback_1", 0);
+	await registerPending(store, second, "2026-09-28T01:00:00.000Z");
+	assert.equal((await pushDocumentVectors(store, fake, second)).status, "READY");
 	assert.ok((await stateRow(store, "doc_fallback", "ver_fallback_1")).retired_at);
-	assert.equal(
-		fake.index.vectors.has(firstVectorId),
-		false,
-		"the superseded version's vectors are gone",
-	);
 
 	// The newest version itself stops being servable (a REVISION of that version
-	// record).  The previous version is servable again and must come back.
+	// record).  The previous version is servable again; its state row is retired,
+	// and the local push is what brings it back.
 	const latest = JSON.parse(
 		(
 			await store.db
@@ -884,13 +901,11 @@ test("falling back to an earlier version revives it and re-indexes its vectors",
 		.bind(JSON.stringify(latest))
 		.run();
 
-	const report = await runBatch(store, fake);
-	assert.ok(report.revived >= 1, "the fallback version is revived");
-	assert.ok(report.superseded >= 1, "the withdrawn version is retired");
-	const revived = await stateRow(store, "doc_fallback", "ver_fallback_1");
-	assert.equal(revived.state, "READY");
-	assert.equal(revived.retired_at, null);
-	assert.equal(revived.vector_deleted_at, null);
+	const revived = await pushDocumentVectors(store, fake, first);
+	assert.equal(revived.status, "READY", "a retired-but-current-again row accepts the local push");
+	const row = await stateRow(store, "doc_fallback", "ver_fallback_1");
+	assert.equal(row.state, "READY");
+	assert.equal(row.retired_at, null);
 	const result = await search(store, fake, "回退后应可检索");
 	assert.deepEqual(
 		result.matches.map((match) => match.version_id),
@@ -898,109 +913,20 @@ test("falling back to an earlier version revives it and re-indexes its vectors",
 	);
 });
 
-test("crash-omission compensation registers a pre-migration PUBLIC version and indexes it", async () => {
-	const store = storage();
-	const fake = fakes();
-	const built = documentVersionPayload({
-		documentId: "doc_pre_migration",
-		versionId: "ver_pre_migration",
-	});
-	await seedVersionRow(store, built);
-	assert.equal((await stateRows(store)).length, 0, "row exists without any index state");
-	const report = await runBatch(store, fake);
-	assert.equal(report.registered, 1);
-	assert.equal(report.ready, 1);
-	assert.equal((await stateRow(store, "doc_pre_migration", "ver_pre_migration")).state, "READY");
-});
-
-test("expired dead letters are revived with a bounded retry, permanent skips are not", async () => {
-	const store = storage();
-	const fake = fakes();
-	const built = documentVersionPayload({ documentId: "doc_dead", versionId: "ver_dead" });
-	await seedVersionRow(store, built);
-	await semantic.registerMissingPublicVersions(store, NOW);
-
-	fake.ai.fail = true;
-	const failing = await runBatch(store, fake);
-	assert.equal(failing.ready, 0);
-	const retryable = await stateRow(store, "doc_dead", "ver_dead");
-	assert.equal(retryable.state, "PENDING");
-	assert.equal(retryable.attempts, 1);
-	assert.equal(retryable.last_error_code, "INDEX_WRITE_RETRY");
-
-	// Exhaust the retry budget: the row becomes a dead letter.
-	await store.db
-		.prepare(
-			"UPDATE research_semantic_index_state SET state='FAILED', attempts=?, last_error_code='INDEX_WRITE_FAILED', updated_at=? WHERE document_id='doc_dead'",
-		)
-		.bind(semantic.SEMANTIC_MAX_ATTEMPTS, NOW)
-		.run();
-	fake.ai.fail = false;
-	const later = new Date(
-		Date.parse(NOW) + semantic.SEMANTIC_DEAD_LETTER_RETRY_MS + 60_000,
-	).toISOString();
-	const revived = await semantic.runSemanticIndexBatch(store, fake.deps, { now: later });
-	assert.equal(revived.revived, 1);
-	assert.equal(revived.ready, 1);
-	assert.equal((await stateRow(store, "doc_dead", "ver_dead")).state, "READY");
-
-	// A by-design permanent skip is never revived.
-	const permanent = documentVersionPayload({
-		documentId: "doc_permanent",
-		versionId: "ver_permanent",
-		mediaType: "application/pdf",
-		title: "",
-	});
-	await seedVersionRow(store, permanent);
-	await semantic.runSemanticIndexBatch(store, fake.deps, { now: later });
-	const skipped = await stateRow(store, "doc_permanent", "ver_permanent");
-	assert.equal(skipped.last_error_code, semantic.SEMANTIC_TEXT_UNAVAILABLE_CODE);
-	const muchLater = new Date(
-		Date.parse(later) + 10 * semantic.SEMANTIC_DEAD_LETTER_RETRY_MS,
-	).toISOString();
-	const noRevive = await semantic.runSemanticIndexBatch(store, fake.deps, { now: muchLater });
-	assert.equal(noRevive.revived, 0);
-	assert.equal((await stateRow(store, "doc_permanent", "ver_permanent")).state, "FAILED");
-});
-
 /* ---------------------------------------------------------------- */
-/* Bounded batches and the 10k+ compensation window                 */
+/* Large-set keyset pagination of the queue                         */
 /* ---------------------------------------------------------------- */
 
-test("batches stay bounded: maxDocs caps per-run work and the rest stays pending", async () => {
-	const store = storage();
-	const fake = fakes();
-	for (let index = 0; index < 5; index += 1) {
-		await seedVersionRow(
-			store,
-			documentVersionPayload({
-				documentId: `doc_bounded_${index}`,
-				versionId: `ver_bounded_${index}`,
-				body: `有界批次正文 ${index}`,
-			}),
-		);
-	}
-	const report = await runBatch(store, fake, { maxDocs: 2 });
-	assert.equal(report.registered, 5);
-	assert.equal(report.ready + report.pending + report.failed + report.superseded, 2);
-	const rows = await stateRows(store);
-	assert.equal(rows.filter((row) => row.state === "READY").length, 2);
-	assert.equal(rows.filter((row) => row.state === "PENDING").length, 3);
-	const drained = await runBatch(store, fake, { maxDocs: 10 });
-	assert.equal(drained.ready, 3);
-	assert.equal((await stateRows(store)).filter((row) => row.state === "PENDING").length, 0);
-});
-
-test("10768+ synthetic set: bounded compensation pages reach the stable-keyset tail entry", async () => {
+test("10768+ synthetic set: keyset pages of the pending queue reach the stable tail entry", async () => {
 	const store = storage();
 	const fake = fakes();
 	const total = 10_768;
 	const tailDocument = "doc_zz_tail_10768";
 	const tailVersion = "ver_zz_tail_10768";
-	const tailBody = "位于集合尾部的合成条目正文，必须仍能被补偿扫描覆盖";
+	const tailBody = "位于集合尾部的合成条目正文，必须仍能被队列分页覆盖";
 	const tailBytes = encoder.encode(tailBody);
 	const tailHash = sha256HexOf(tailBytes);
-	// Bulk rows share one dummy hash: only registration is under test for them.
+	// Bulk rows share one dummy hash: only queue pagination is under test.
 	await store.db
 		.prepare(
 			`INSERT INTO research_records (record_type, record_key, message_id, visibility, schema_version, payload_json, generated_at, updated_at)
@@ -1013,6 +939,20 @@ test("10768+ synthetic set: bounded compensation pages reach the stable-keyset t
 		)
 		.bind("f".repeat(64), total)
 		.run();
+	// Register the bulk rows into the state table (the ingest-time registration
+	// these rows would have received); the tail row is registered through the
+	// real ingest statements below.
+	await store.db
+		.prepare(
+			`INSERT INTO research_semantic_index_state (document_id, version_id, visibility, state, content_sha256, model_id, title_only, truncated, expected_chunks, confirmed_chunks, attempts, last_error_code, retired_at, vector_deleted_at, registered_at, updated_at)
+			 SELECT json_extract(research_records.payload_json, '$.document.document_id'), research_records.record_key, 'PUBLIC', 'PENDING', NULL, ?, 0, 0, 0, 0, 0, NULL, NULL, NULL, ?, ?
+			 FROM research_records
+			 WHERE research_records.record_type='document_version' AND research_records.visibility='PUBLIC'
+			   AND json_extract(research_records.payload_json, '$.document.document_id') IS NOT NULL
+			   AND NOT EXISTS (SELECT 1 FROM research_semantic_index_state existing WHERE existing.document_id=json_extract(research_records.payload_json, '$.document.document_id') AND existing.version_id=research_records.record_key)`,
+		)
+		.bind(semantic.SEMANTIC_MODEL_ID, NOW, NOW)
+		.run();
 	const tail = documentVersionPayload({
 		documentId: tailDocument,
 		versionId: tailVersion,
@@ -1021,24 +961,33 @@ test("10768+ synthetic set: bounded compensation pages reach the stable-keyset t
 	});
 	assert.equal(tail.hash, tailHash);
 	await seedVersionRow(store, tail);
+	await registerPending(store, tail);
 
+	// Walk the whole queue with bounded pages; the stable (state, document,
+	// version) keyset must reach the lexicographically last entry.
 	let pages = 0;
-	let registered = 0;
+	let seen = 0;
+	let tailSeen = false;
+	let cursor = null;
 	for (;;) {
-		const page = await semantic.registerMissingPublicVersions(store, NOW, 500);
+		const page = await semantic.listPendingSemanticVersions(store, {
+			limit: 500,
+			state: "PENDING",
+			after: cursor,
+		});
 		pages += 1;
-		registered += page;
-		if (page === 0) break;
-		assert.ok(pages < 100, "compensation must converge with bounded pages");
+		seen += page.items.length;
+		if (page.items.some((item) => item.version_id === tailVersion)) tailSeen = true;
+		assert.ok(pages < 100, "queue pagination must converge with bounded pages");
+		if (!page.next) break;
+		cursor = page.next;
 	}
-	assert.equal(registered, total + 1);
+	assert.equal(seen, total + 1, "every registered version is reachable through the queue");
 	assert.ok(pages >= 20, "the 10k set really needed many bounded pages");
-	const tailRow = await stateRow(store, tailDocument, tailVersion);
-	assert.ok(tailRow, "the lexicographically last version id must be registered");
-	assert.equal(tailRow.state, "PENDING");
+	assert.ok(tailSeen, "the lexicographically last version id must be listed");
 
-	// The tail entry is fully indexable and retrievable on its own.
-	assert.equal((await indexDocument(store, fake, tailDocument, tailVersion)).status, "READY");
+	// The tail entry is fully completable and retrievable on its own.
+	assert.equal((await pushDocumentVectors(store, fake, tail)).status, "READY");
 	const result = await search(store, fake, tailBody, 3);
 	assert.equal(result.matches.length, 1);
 	assert.equal(result.matches[0].document_id, tailDocument);
@@ -1058,7 +1007,8 @@ async function searchableStore(fake) {
 		body: "这是一段关于合成材料的行业观察正文，包含多个句子。第二句用于检索。",
 	});
 	await seedVersionRow(store, built);
-	await runBatch(store, fake);
+	await registerPending(store, built);
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
 	return store;
 }
 
@@ -1143,7 +1093,8 @@ test("search deduplicates per document and honours the limit", async () => {
 	}
 	const built = documentVersionPayload({ documentId: "doc_multi", versionId: "ver_multi", body });
 	await seedVersionRow(store, built);
-	assert.equal((await runBatch(store, fake)).ready, 1);
+	await registerPending(store, built);
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
 	assert.ok((await stateRow(store, "doc_multi", "ver_multi")).expected_chunks >= 2);
 	const all = await search(store, fake, "行业观察 材料进展", 10);
 	assert.equal(all.matches.length, 1, "chunks of one document collapse into one match");
@@ -1164,9 +1115,9 @@ test("index_status is PARTIAL while work is outstanding and READY once drained",
 
 	const built = documentVersionPayload({ documentId: "doc_status", versionId: "ver_status" });
 	await seedVersionRow(store, built);
-	await semantic.registerMissingPublicVersions(store, NOW);
+	await registerPending(store, built);
 	assert.equal((await search(store, fake, "任意查询")).index_status, "PARTIAL");
-	await runBatch(store, fake);
+	assert.equal((await pushDocumentVectors(store, fake, built)).status, "READY");
 	assert.equal((await search(store, fake, "任意查询")).index_status, "READY");
 });
 
@@ -1224,18 +1175,19 @@ test("index outages surface as STORE_UNAVAILABLE, never as an empty result", asy
 	);
 });
 
-test("a wrong embedding dimension aborts loudly instead of writing mismatched vectors", async () => {
+test("a wrong embedding dimension aborts the query loudly instead of serving mismatches", async () => {
 	const store = storage();
 	const fake = fakes({ dims: 768 });
 	const built = documentVersionPayload({ documentId: "doc_dims", versionId: "ver_dims" });
 	await seedVersionRow(store, built);
+	await registerPending(store, built);
+	// The query embedding must match the index dimensionality exactly: a
+	// mismatched provider answer aborts the search, it never silently serves.
 	await assert.rejects(
-		() => runBatch(store, fake),
+		() => search(store, fake, "合成"),
 		(error) => error?.error_code === "STORE_UNAVAILABLE" && error?.retryable === false,
 	);
 	assert.equal(fake.index.vectors.size, 0, "no vector may be written for a mismatched model");
-	const row = await stateRow(store, "doc_dims", "ver_dims");
-	assert.notEqual(row.state, "READY");
 	const probe = await semantic.probeSemanticIndex(fake.deps);
 	assert.equal(probe.embedding_dimensions, 768);
 	assert.equal(probe.embedding_dimensions_match, false);
@@ -1342,7 +1294,7 @@ test("MCP exposes search_documents_semantic with the frozen schema and PUBLIC-on
 		assert.deepEqual(Object.keys(payload).sort(), ["index_status", "matches"]);
 		assert.equal(payload.index_status, "READY");
 		assert.equal(payload.matches[0].document_id, "doc_search");
-		assert.ok(fake.ai.calls >= 2, "the query embedding uses the same model");
+		assert.ok(fake.ai.calls >= 1, "the query embedding is the only cloud AI spend");
 
 		for (const [label, args, rejects] of [
 			["blank query", { query: "   " }, true],
@@ -1438,6 +1390,7 @@ test("internal run/status/probe endpoints are token-gated operations transport",
 		"counters never list document ids",
 	);
 
+	const aiCallsBefore = fake.ai.calls;
 	const run = await worker.fetch(
 		new Request("https://worker.example/internal/research-semantic-index/run", {
 			method: "POST",
@@ -1448,27 +1401,14 @@ test("internal run/status/probe endpoints are token-gated operations transport",
 		{},
 	);
 	assert.equal(run.status, 200);
-	assert.deepEqual(Object.keys(await run.json()).sort(), [
-		"failed",
-		"pending",
-		"ready",
-		"registered",
-		"revived",
-		"superseded",
-		"vectors_deleted",
-		"vectors_upserted",
-	]);
-
-	const rejectedBody = await worker.fetch(
-		new Request("https://worker.example/internal/research-semantic-index/run", {
-			method: "POST",
-			headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
-			body: JSON.stringify({ document_id: "doc_search" }),
-		}),
-		env,
-		{},
-	);
-	assert.equal(rejectedBody.status, 400, "the ops endpoint never accepts a document selector");
+	const runBody = await run.json();
+	// G2 (quota redesign 2026-10-02): the cloud batch run is physically sealed.
+	assert.equal(runBody.status, "BATCH_DISABLED");
+	assert.match(runBody.reason, /local RTX 5080 GPU pipeline/);
+	assert.match(runBody.push_path, /ingest-vectors/);
+	assert.equal(runBody.workers_ai_calls, 0);
+	assert.equal(fake.ai.calls, aiCallsBefore, "the sealed route never spends a neuron");
+	assert.equal((await stateRows(store)).some((row) => row.state === "READY"), true, "the queue is untouched by the sealed route");
 
 	const probe = await worker.fetch(
 		new Request("https://worker.example/internal/research-semantic-index/probe", {
@@ -1499,13 +1439,13 @@ test("internal run/status/probe endpoints are token-gated operations transport",
 	assert.equal((await probeWithoutBindings.json()).error_code, "STORE_UNAVAILABLE");
 });
 
-test("the ingest route keeps its frozen envelope and schedules indexing in the background", async () => {
+test("the ingest route keeps its frozen envelope; cloud embedding is sealed and the queue waits for the local GPU", async () => {
 	const fake = fakes();
 	const store = storage();
 	const built = documentVersionPayload({
 		documentId: "doc_ingest_hook",
 		versionId: "ver_ingest_hook",
-		body: "回执先返回，索引在后台完成",
+		body: "回执先返回，向量由本地 GPU 管线推送",
 	});
 	await seedObjectR2(store, built);
 	const record = await envelopeFor(built.payload);
@@ -1535,17 +1475,22 @@ test("the ingest route keeps its frozen envelope and schedules indexing in the b
 		"status",
 	]);
 	assert.equal(body.status, "APPLIED");
-	assert.equal(background.length, 1, "the index build is deferred, never inline in the receipt");
+	// G2: no cloud embedding is scheduled any more.  Background work is limited
+	// to the harmless usage-observation log.
 	await Promise.all(background);
+	assert.equal(fake.ai.calls, 0, "no Workers AI call may be made by the ingest route");
 	const row = await stateRow(store, "doc_ingest_hook", "ver_ingest_hook");
-	assert.equal(row.state, "READY", "the background hook indexes without blocking the receipt");
+	assert.equal(row.state, "PENDING", "the row waits for the local GPU pipeline");
 
-	// Without a background context the receipt is still served and the row stays
-	// PENDING for the bounded sweep.
+	// The local pipeline completes the row without any further cloud AI.
+	assert.equal((await pushDocumentVectors({ db: store.db, objects: store.objects }, fake, built)).status, "READY");
+	assert.equal((await stateRow(store, "doc_ingest_hook", "ver_ingest_hook")).state, "READY");
+
+	// Without a background context the receipt is still served identically.
 	const second = documentVersionPayload({
 		documentId: "doc_ingest_plain",
 		versionId: "ver_ingest_plain",
-		body: "没有后台上下文时保持待办",
+		body: "没有后台上下文时回执不变",
 	});
 	await seedObjectR2(store, second);
 	const plain = await worker.fetch(
@@ -1565,7 +1510,6 @@ test("the ingest route keeps its frozen envelope and schedules indexing in the b
 	);
 	assert.equal(plain.status, 200);
 	assert.equal((await stateRow(store, "doc_ingest_plain", "ver_ingest_plain")).state, "PENDING");
-	assert.equal((await runBatch(store, fake)).ready >= 1, true);
 });
 
 test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency probe", async () => {
@@ -1627,7 +1571,7 @@ test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency
 
 	const firstVectorId = await semantic.semanticVectorId("doc_search", "ver_search", 0);
 	const storedFirstVector = fake.index.vectors.get(firstVectorId);
-	assert.ok(storedFirstVector, "fixture must already contain cloud vector chunk 0");
+	assert.ok(storedFirstVector, "fixture must already contain the local vector chunk 0");
 	const consistency = await worker.fetch(
 		new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
 			method: "POST",
@@ -1692,83 +1636,3 @@ test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency
 	assert.equal((await drifted.json()).status, "REJECTED", "stale content must not attach");
 });
 
-test("vector ingest settles its reservation on every post-admission path", async () => {
-	const { createResearchWorkflowDb } = await import("./helpers/d1-sqlite-shim.mjs");
-	const {
-		QUOTA_DIMENSIONS,
-		QUOTA_ACCOUNT_TAG,
-		syncDimensionCatalog,
-		recordAccountPeriod,
-		recordBaseline,
-	} = await import("../src/quota-breaker.ts");
-	const fake = fakes();
-	const store = await searchableStore(fake);
-	const db = store.db;
-	await syncDimensionCatalog(db, QUOTA_DIMENSIONS);
-	const now = new Date();
-	const PK = `cycle:${now.toISOString().slice(0, 10)}T00:00:00.000Z..2099-01-01T00:00:00.000Z`;
-	await recordAccountPeriod(db, {
-		account_id: QUOTA_ACCOUNT_TAG,
-		period_start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z`,
-		period_end: "2099-01-01T00:00:00.000Z",
-		anchor_kind: "subscription_renewal",
-		source: "test",
-		source_version: "test@1",
-		verified_at: `${now.toISOString().slice(0, 10)}T00:00:00.000Z`,
-	});
-	for (const key of ["d1.rows_read", "d1.rows_written"]) {
-		await recordBaseline(db, {
-			dimension_key: key,
-			period_key: PK,
-			state: "VERIFIED",
-			used: 0,
-			unobserved_upper_bound: 0,
-			source: "test",
-			source_version: "test@1",
-			as_of: now.toISOString(),
-			coverage_end: now.toISOString(),
-		});
-	}
-	const env = {
-		RESEARCH_REPLICA: db,
-		RESEARCH_OBJECTS: store.objects,
-		RESEARCH_REPLICA_INGEST_TOKEN: "internal-token",
-		AI: fake.ai,
-		RESEARCH_PUBLIC_INDEX: fake.index,
-		QUOTA_ADMISSION_MODE: "enforce",
-	};
-	const post = (body) =>
-		indexModule.handleSemanticVectorIngest(
-			new Request("https://worker.example/internal/research-semantic-index/ingest-vectors", {
-				method: "POST",
-				headers: { Authorization: "Bearer internal-token", "Content-Type": "application/json" },
-				body,
-			}),
-			env,
-		);
-	// 1) rejected business path (stale content hash)
-	await post(JSON.stringify({
-		document_id: "doc_search",
-		version_id: "ver_search",
-		content_sha256: "f".repeat(64),
-		vectors: [{ ordinal: 0, values: Array.from({ length: 1024 }, (_, i) => i / 1000) }],
-	}));
-	let live = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
-	assert.equal(Number(live.n), 0, "a REJECTED ingest must not keep its reservation live");
-	// 2) malformed JSON after admission
-	await post("{not json");
-	live = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
-	assert.equal(Number(live.n), 0, "a 400 body must not keep its reservation live");
-	// 3) success path settles too
-	await post(JSON.stringify({
-		document_id: "doc_search",
-		version_id: "ver_search",
-		content_sha256: null,
-		vectors: [{ ordinal: 0, values: Array.from({ length: 1024 }, (_, i) => i / 1000) }],
-	}));
-	live = await db.prepare("SELECT COUNT(*) AS n FROM quota_reservation_units").first();
-	assert.equal(Number(live.n), 0, "a READY ingest settles");
-	const journal = await db.prepare("SELECT outcome, COUNT(*) AS n FROM quota_reservation_journal GROUP BY outcome").all();
-	assert.ok((journal.results ?? []).some((row) => row.outcome === "SETTLED" && Number(row.n) >= 3),
-		JSON.stringify(journal.results));
-});

@@ -57,8 +57,13 @@ test("LIVE control plane keeps its keyspace and contracts but is served from an 
 	assert.match(portfolioDelta, /PORTFOLIO_UNIVERSE_DELTA_KV_KEY = "live-portfolio\/private\//);
 });
 
-test("enforced quota mode disables unbounded OAuth diagnostic D1 writes and reads", async () => {
-	const diagnostics = await source("../src/oauth-diagnostics-entry.ts");
+test("OAuth diagnostics are unconditionally available: the quota gate is removed (2026-10-02)", async () => {
+	const text = await source("../src/oauth-diagnostics-entry.ts");
+	// The former enforce-mode suppressions (skip diagnostic writes / 503 the
+	// read) are abolished; the admission switch must not appear in code
+	// (comments may name what was abolished).
+	const diagnostics = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^[ \t]*\/\/.*$/gm, "");
+	assert.doesNotMatch(diagnostics, /QUOTA_ADMISSION_MODE/);
 	const writer = diagnostics.slice(
 		diagnostics.indexOf("async function writeDiagnostic"),
 		diagnostics.indexOf("function tokenAuthMethod"),
@@ -67,11 +72,10 @@ test("enforced quota mode disables unbounded OAuth diagnostic D1 writes and read
 		diagnostics.indexOf("async function readLatest"),
 		diagnostics.indexOf("export default"),
 	);
-	assert.match(writer, /if \(env\.QUOTA_ADMISSION_MODE === "enforce"\)\s*\n?\s*return;/);
-	assert.match(
-		reader,
-		/if \(env\.QUOTA_ADMISSION_MODE === "enforce"\)\s*\n?\s*return Response\.json\(\{ available: false \}, \{ status: 503 \}\);/,
-	);
+	// The writer proceeds to the binding (only the missing-binding guard after
+	// the removed gate), and the reader serves rows whenever the binding exists.
+	assert.match(writer, /const db = env\.RESEARCH_REPLICA;/);
+	assert.match(reader, /available: true/);
 });
 
 test("temporary production storage diagnostic is removed after identifying the KV daily quota root cause", async () => {

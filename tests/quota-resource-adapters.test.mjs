@@ -1,130 +1,166 @@
 /**
- * Guarded resource adapter tests (SDD CQ spec P0-B test matrix).
+ * Pure resource observer tests (quota redesign 2026-10-02, spec section 1.1).
  *
- * The wrappers must make an unguarded paid call impossible: no handle, no call;
- * dimension not reserved, no call; amplification past the reserved bound, no
- * call; unknown provider usage metadata keeps the reservation instead of
- * pretending the operation succeeded.
+ * The observers are the OPPOSITE of the old guarded adapters: a call is never
+ * refused, never re-ordered and never re-judged.  Every test pins the same
+ * two-sided contract -- (1) the underlying call passes through untouched, and
+ * (2) the platform-reported practical usage lands in the observation -- with
+ * special attention to the 2026-09-30 C5 failure mode: missing usage metadata
+ * must never throw and never change the business result.
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-	NEURON_BOUND,
-	QuotaGuardError,
-	ReservationBudget,
-	admissionHandle,
-	createGuardedAi,
-	createGuardedD1,
-	createGuardedR2,
-	createGuardedVectorize,
-	neuronUpperBound,
+	UsageObserver,
+	createObservedD1,
+	createObservedR2,
 } from "../src/quota-breaker.ts";
 
-function handle(reserved) {
-	return {
-		reservation_id: "res-1",
-		operation_id: "op-1",
-		route: "http:/internal/research-replica/v2/ingest",
-		reserved,
-	};
-}
-
 function fakeD1(meta = { rows_read: 3, rows_written: 1 }) {
+	const calls = [];
 	return {
+		calls,
 		prepare(sql) {
 			const statement = {
 				sql,
-				bind() {
+				bind(...values) {
+					calls.push(["bind", sql, values]);
 					return this;
 				},
 				async run() {
+					calls.push(["run", sql]);
 					return { meta };
 				},
 				async all() {
-					return { results: [], meta };
+					calls.push(["all", sql]);
+					return { results: [{ id: 1 }], meta };
 				},
-				async first() {
-					return null;
+				async raw() {
+					calls.push(["raw", sql]);
+					return [[1]];
+				},
+				async first(...args) {
+					calls.push(["first", sql, args]);
+					return { id: 1 };
 				},
 			};
 			return statement;
 		},
 		async batch(statements) {
+			calls.push(["batch", statements.length]);
 			return statements.map(() => ({ meta }));
 		},
 	};
 }
 
-test("a guarded D1 binding refuses to be constructed without an ADMITTED handle", () => {
-	const budget = new ReservationBudget(handle([{ dimension_key: "d1.rows_read", units: 10 }]));
-	assert.throws(
-		() => createGuardedD1(fakeD1(), null, budget),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
-	);
+function totals(observer) {
+	return new Map(observer.totals().map((entry) => [entry.dimension_key, entry.units]));
+}
+
+test("D1 statements pass through unmodified and their measured usage is observed", async () => {
+	const observer = new UsageObserver();
+	const fake = fakeD1({ rows_read: 40, rows_written: 4 });
+	const observed = createObservedD1(fake, observer);
+	const bound = observed.prepare("SELECT * FROM t WHERE id = ?").bind(7);
+	const result = await bound.all();
+	assert.deepEqual(result.results, [{ id: 1 }], "the business result is untouched");
+	assert.deepEqual(fake.calls[0], ["bind", "SELECT * FROM t WHERE id = ?", [7]]);
+	assert.deepEqual(fake.calls[1], ["all", "SELECT * FROM t WHERE id = ?"]);
+	const seen = totals(observer);
+	assert.equal(seen.get("d1.rows_read"), 40);
+	assert.equal(seen.get("d1.rows_written"), 4);
 });
 
-test("a guarded statement is refused when its dimension is not reserved", async () => {
-	const budget = new ReservationBudget(handle([{ dimension_key: "d1.rows_read", units: 10 }]));
-	const guarded = createGuardedD1(
-		fakeD1(),
-		handle([{ dimension_key: "d1.rows_read", units: 10 }]),
-		budget,
-	);
-	await assert.rejects(
-		guarded.prepare("INSERT INTO t VALUES (1)").run(),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
-	);
+test("run/raw/batch/first all execute once; first() is observed via the bounded all() projection", async () => {
+	const observer = new UsageObserver();
+	const fake = fakeD1({ rows_read: 5, rows_written: 2 });
+	const observed = createObservedD1(fake, observer);
+	const row = await observed.prepare("SELECT 1").first("id");
+	assert.equal(row, 1, "the column-name variant of first() is preserved");
+	const full = await observed.prepare("SELECT 2").first();
+	assert.deepEqual(full, { id: 1 }, "the plain variant of first() is preserved");
+	await observed.prepare("INSERT INTO t VALUES (1)").run();
+	await observed.batch([observed.prepare("SELECT 1"), observed.prepare("SELECT 2")]);
+	const kinds = fake.calls.map((entry) => entry[0]);
+	// first() executes via all() exactly once (the C5 fix); the native first is
+	// never reached on the happy path.
+	assert.deepEqual(kinds, ["all", "all", "run", "batch"]);
+	const seen = totals(observer);
+	// first(5) + first(5) + run(5) + batch(2 x 5); raw() not called in this test.
+	assert.equal(seen.get("d1.rows_read"), 25);
+	assert.equal(seen.get("d1.rows_written"), 2 * 5);
 });
 
-test("amplification past the reserved bound is refused after the spend is accounted", async () => {
-	const budget = new ReservationBudget(handle([{ dimension_key: "d1.rows_read", units: 3 }]));
-	const guarded = createGuardedD1(
-		fakeD1({ rows_read: 2, rows_written: 0 }),
-		handle([{ dimension_key: "d1.rows_read", units: 3 }]),
-		budget,
-	);
-	const first = await guarded.prepare("SELECT 1").all();
-	assert.equal(first.results.length, 0);
-	assert.equal(budget.spent("d1.rows_read"), 2);
-	await assert.rejects(
-		guarded.prepare("SELECT 2").all(),
-		(error) => error instanceof QuotaGuardError && error.error_code === "QUOTA_CIRCUIT_OPEN",
-	);
+test("first() falls back to the native call when the projection fails, never changing the outcome", async () => {
+	const observer = new UsageObserver();
+	let allCalls = 0;
+	let firstCalls = 0;
+	const failing = {
+		prepare() {
+			return {
+				bind() {
+					return this;
+				},
+				async all() {
+					allCalls += 1;
+					throw new Error("driver rejected all()");
+				},
+				async first() {
+					firstCalls += 1;
+					return { id: 42 };
+				},
+			};
+		},
+		async batch(statements) {
+			return statements.map(() => ({ meta: {} }));
+		},
+	};
+	const observed = createObservedD1(failing, observer);
+	const row = await observed.prepare("SELECT 1").first();
+	assert.deepEqual(row, { id: 42 }, "the native first() answer wins");
+	assert.equal(allCalls, 1);
+	assert.equal(firstCalls, 1);
+	assert.deepEqual(observer.totals(), [], "the failed projection records nothing");
 });
 
-test("observed usage is metered into the settlement snapshot", async () => {
-	const reserved = [
-		{ dimension_key: "d1.rows_read", units: 100 },
-		{ dimension_key: "d1.rows_written", units: 10 },
-	];
-	const budget = new ReservationBudget(handle(reserved));
-	const guarded = createGuardedD1(
-		fakeD1({ rows_read: 40, rows_written: 4 }),
-		handle(reserved),
-		budget,
-	);
-	await guarded.prepare("SELECT 1").all();
-	const snapshot = new Map(budget.snapshot().map((entry) => [entry.dimension_key, entry.units]));
-	assert.equal(snapshot.get("d1.rows_read"), 40);
-	assert.equal(snapshot.get("d1.rows_written"), 4);
+test("missing usage metadata never throws and never fabricates a measurement", async () => {
+	const observer = new UsageObserver();
+	const observed = createObservedD1(fakeD1({}), observer);
+	const result = await observed.prepare("SELECT 1").all();
+	assert.deepEqual(result.results, [{ id: 1 }], "the call succeeds with no meta at all");
+	assert.deepEqual(observer.totals(), [], "unknown usage is recorded as nothing, never a guess");
 });
 
-test("missing D1 usage metadata keeps the reservation and refuses the call", async () => {
-	const reserved = [{ dimension_key: "d1.rows_read", units: 100 }];
-	const budget = new ReservationBudget(handle(reserved));
-	const guarded = createGuardedD1(fakeD1({}), handle(reserved), budget);
-	await assert.rejects(
-		guarded.prepare("SELECT 1").all(),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
-	);
-	assert.equal(budget.spent("d1.rows_read"), 0, "unknown usage never becomes a settlement claim");
+test("a throwing statement propagates the business error unchanged", async () => {
+	const observer = new UsageObserver();
+	const failing = {
+		prepare() {
+			return {
+				bind() {
+					return this;
+				},
+				async all() {
+					throw new Error("syntax error near FROM");
+				},
+			};
+		},
+		async batch(statements) {
+			return statements.map(() => ({ meta: {} }));
+		},
+	};
+	const observed = createObservedD1(failing, observer);
+	await assert.rejects(observed.prepare("SELECT nope").all(), /syntax error near FROM/);
+	assert.deepEqual(observer.totals(), []);
 });
 
-test("R2 operations bill the official classes and delete stays free but guarded", async () => {
+test("an observer without an explicit UsageObserver still passes everything through", async () => {
+	const observed = createObservedD1(fakeD1({ rows_read: 9, rows_written: 0 }));
+	const result = await observed.prepare("SELECT 1").all();
+	assert.deepEqual(result.results, [{ id: 1 }]);
+});
+
+test("R2 operations pass through and bill the official classes; delete stays free", async () => {
 	const calls = [];
 	const bucket = {
 		async put(key) {
@@ -148,155 +184,60 @@ test("R2 operations bill the official classes and delete stays free but guarded"
 			return { objects: [] };
 		},
 	};
-	const reserved = [
-		{ dimension_key: "r2.class_a", units: 2 },
-		{ dimension_key: "r2.class_b", units: 1 },
-	];
-	const budget = new ReservationBudget(handle(reserved));
-	const guarded = createGuardedR2(bucket, handle(reserved), budget);
-	await guarded.put("a", "body");
-	await guarded.get("a");
-	await guarded.delete("a", {});
+	const observer = new UsageObserver();
+	const observed = createObservedR2(bucket, observer);
+	await observed.put("a", "body");
+	await observed.get("a");
+	await observed.delete("a", {});
+	await observed.list();
 	assert.deepEqual(calls, [
 		["put", "a"],
 		["get", "a"],
 		["delete", "a"],
+		["list"],
 	]);
-	const snapshot = new Map(budget.snapshot().map((entry) => [entry.dimension_key, entry.units]));
-	assert.equal(snapshot.get("r2.class_a"), 1);
-	assert.equal(snapshot.get("r2.class_b"), 1);
-
-	// A second put is allowed (2 reserved) but the third is refused: the wrapper
-	// enforces the declared per-operation bound instead of a guess.
-	await guarded.put("b", "body");
-	await assert.rejects(
-		guarded.put("c", "body"),
-		(error) => error instanceof QuotaGuardError && error.error_code === "QUOTA_CIRCUIT_OPEN",
-	);
+	const seen = totals(observer);
+	assert.equal(seen.get("r2.class_a"), 2, "put + list are Class A");
+	assert.equal(seen.get("r2.class_b"), 1, "get is Class B");
 });
 
-test("R2 Class B operations are refused when only Class A is reserved", async () => {
-	const bucket = {
-		async get() {
-			return null;
+test("a throwing sink can never break or re-judge the business call", async () => {
+	const observer = new UsageObserver();
+	const observed = createObservedD1(fakeD1({ rows_read: 11, rows_written: 0 }), observer);
+	await observed.prepare("SELECT 1").all();
+	let sinkCalls = 0;
+	await observer.report({
+		observe() {
+			sinkCalls += 1;
+			throw new Error("accounting backend down");
 		},
-		async put() {
-			return {};
-		},
-		async head() {
-			return null;
-		},
-		async delete() {},
-		async list() {
-			return { objects: [] };
-		},
-	};
-	const reserved = [{ dimension_key: "r2.class_a", units: 1 }];
-	const budget = new ReservationBudget(handle(reserved));
-	const guarded = createGuardedR2(bucket, handle(reserved), budget);
-	await assert.rejects(
-		guarded.get("a"),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
-	);
+	});
+	assert.equal(sinkCalls, 1);
+	await assert.doesNotReject(observed.prepare("SELECT 2").all());
+	const seen = totals(observer);
+	assert.equal(seen.get("d1.rows_read"), 22);
 });
 
-test("Workers AI spends against the calibrated neuron bound and refuses over-budget calls", async () => {
-	// The owner-approved daily budget (2026-09-30) proves the document cap:
-	// 32 chunks x 1,350 chars at 1 char = 1 token => ceil(43_200 * 1_075 / 1e6).
-	assert.equal(NEURON_BOUND.model, "@cf/baai/bge-m3");
-	assert.equal(neuronUpperBound(), 47);
-	assert.equal(
-		neuronUpperBound({ model: "x", neurons_per_million_tokens: 0, max_input_tokens: 10 }),
-		null,
-	);
-	assert.equal(
-		neuronUpperBound({ model: "x", neurons_per_million_tokens: 1075, max_input_tokens: 1000 }),
-		2,
-	);
-	const calls = [];
-	const ai = {
-		async run(model, input) {
-			calls.push(model);
-			return { embeddings: [] };
-		},
-	};
-	const reserved = [{ dimension_key: "ai.neurons", units: 70 }];
-	const budget = new ReservationBudget(handle(reserved));
-	const guarded = createGuardedAi(ai, handle(reserved), budget);
-	const result = await guarded.run("@cf/baai/bge-m3", {});
-	assert.deepEqual(result, { embeddings: [] });
-	assert.deepEqual(calls, ["@cf/baai/bge-m3"]);
-	assert.equal(budget.spent("ai.neurons"), 47);
-	// A second document call would cross the 70-unit reservation and is refused
-	// before the provider call is made.
-	await assert.rejects(
-		guarded.run("@cf/baai/bge-m3", {}),
-		(error) => error instanceof QuotaGuardError && error.error_code === "QUOTA_CIRCUIT_OPEN",
-	);
-	assert.deepEqual(calls, ["@cf/baai/bge-m3"], "the refused call never reached the provider");
+test("report() delivers the observed totals to the sink once per request", async () => {
+	const observer = new UsageObserver();
+	const observed = createObservedD1(fakeD1({ rows_read: 3, rows_written: 7 }), observer);
+	await observed.prepare("SELECT 1").all();
+	await observed.prepare("INSERT INTO t VALUES (1)").run();
+	const delivered = [];
+	await observer.report({ observe: (snapshot) => delivered.push(snapshot) });
+	assert.deepEqual(delivered, [
+		[
+			{ dimension_key: "d1.rows_read", units: 6 },
+			{ dimension_key: "d1.rows_written", units: 14 },
+		],
+	]);
 });
 
-test("Vectorize writes and queries stay CLOSED without verified stock semantics", async () => {
-	const index = {
-		async query() {
-			throw new Error("must not be called");
-		},
-		async upsert() {
-			throw new Error("must not be called");
-		},
-		async deleteByIds() {
-			throw new Error("must not be called");
-		},
-	};
-	const reserved = [{ dimension_key: "vectorize.queried_dims", units: 10 }];
-	const budget = new ReservationBudget(handle(reserved));
-	const guarded = createGuardedVectorize(index, handle(reserved), budget);
-	await assert.rejects(guarded.query([]), (error) => error instanceof QuotaGuardError);
-	await assert.rejects(guarded.upsert([]), (error) => error instanceof QuotaGuardError);
-	await assert.rejects(guarded.deleteByIds(["a"]), (error) => error instanceof QuotaGuardError);
-});
-
-test("ReservationBudget refuses dimensions without a provable bound", () => {
-	const budget = new ReservationBudget(handle([{ dimension_key: "d1.rows_read", units: 5 }]));
-	assert.throws(
-		() => budget.require("ai.neurons", 1, "embedding"),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
-	);
-	assert.throws(
-		() => budget.require("kv.reads", 1, "kv get"),
-		(error) =>
-			error instanceof QuotaGuardError && error.error_code === "QUOTA_GUARD_UNAVAILABLE",
-	);
-});
-
-test("admissionHandle only exists for ADMITTED results and merges the ledger self-cost", () => {
-	assert.equal(
-		admissionHandle(
-			{ status: "DENIED", reason: "limit", dimension_key: null, detail: "", request_id: "x" },
-			{ operation_id: "op", route: "r" },
-		),
-		null,
-	);
-	assert.equal(
-		admissionHandle(
-			{ status: "REPLAY", reservation_id: "r", outcome: "SETTLED", recorded_at: "t" },
-			{ operation_id: "op", route: "r" },
-		),
-		null,
-	);
-	const admitted = {
-		status: "ADMITTED",
-		reservation_id: "res-9",
-		admitted_at: "2026-09-20T00:00:00.000Z",
-		expires_at: null,
-		reserved: [{ dimension_key: "d1.rows_written", units: 12 }],
-		self_cost: [{ dimension_key: "d1.rows_read", units: 4 }],
-	};
-	const handle2 = admissionHandle(admitted, { operation_id: "op", route: "r" });
-	assert.equal(handle2.reservation_id, "res-9");
-	const totals = new Map(handle2.reserved.map((entry) => [entry.dimension_key, entry.units]));
-	assert.equal(totals.get("d1.rows_written"), 12);
-	assert.equal(totals.get("d1.rows_read"), 4);
+test("non-finite and non-positive readings are ignored, never booked", () => {
+	const observer = new UsageObserver();
+	observer.record("d1.rows_read", Number.NaN);
+	observer.record("d1.rows_read", 0);
+	observer.record("d1.rows_read", -5);
+	observer.record("d1.rows_written", 2.9);
+	assert.deepEqual(totals(observer), new Map([["d1.rows_written", 2]]));
 });

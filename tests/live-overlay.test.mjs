@@ -551,16 +551,19 @@ test("Issue #8 wiring: external MCP market:read and internal universe auth are s
 	const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
 
 	// 1. MCP 工厂只走外部 client credential + market:read gate。
-	assert.match(source, /createMcpHandler\(\(ctx\) =>/);
+	// (quota redesign 2026-10-02 Phase 2: the factory callback parameter was
+	// renamed to mcpCtx and createServer now receives metering.env -- the same
+	// env wrapped with usage observers; the gate structure is unchanged.)
+	assert.match(source, /createMcpHandler\(\(mcpCtx\) =>/);
 	assert.match(
 		source,
-		/const liveOverlayStatus = requestMcpMarketReadStatus\(ctx\.requestInfo, env\);/,
+		/const liveOverlayStatus = requestMcpMarketReadStatus\(mcpCtx\.requestInfo, env\);/,
 	);
 	// #5 §A4：第三参 researchScopes 由 resolveResearchScopes 解析（凭据逐字节
 	// 匹配 + 转发头 ∩ 配置上限），只扩研究写面，不触碰 market:read 门。
 	assert.match(
 		source,
-		/\);\s*[\s\S]*?return createServer\(\s*env,\s*liveOverlayStatus,\s*researchScopes[\s\S]*?\);/,
+		/\);\s*[\s\S]*?return createServer\(\s*metering\.env,\s*liveOverlayStatus,\s*researchScopes[\s\S]*?\);/,
 	);
 	assert.match(source, /request\?\.headers\.get\("Authorization"\)/);
 	assert.match(source, /env\.COLLECTOR_MCP_CLIENT_TOKEN/);

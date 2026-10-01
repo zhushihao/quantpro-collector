@@ -1,0 +1,50 @@
+# Self-test excerpt: cf_quota_meter_reconcile.py --dry-run (real run, 2026-10-02)
+# Command: python scripts/cf_quota_meter_reconcile.py --dry-run
+# Python: Python 3.14.7 | repo: work/quantpro-collector | nothing written to D1 or reports/
+
+## [1] successful dry-run (exit 0)
+$ python scripts/cf_quota_meter_reconcile.py --dry-run
+DRY-RUN: official meters pulled; NO D1 write, NO report file
+as_of: 2026-10-01T18:59:57Z
+billing period: Workers Paid 2026-09-13T15:01:34Z .. 2026-10-13T00:00:00Z
+  ai.neurons         usage=          0.3224 threshold_95=           9,500 pct=   0.003% state=CLOSED
+  d1.rows_read       usage=   68,382,441.00 threshold_95=  23,750,000,000 pct=   0.288% state=CLOSED
+  d1.rows_written    usage=    1,505,737.00 threshold_95=      47,500,000 pct=   3.170% state=CLOSED
+  vectorize.queries  usage=       UNMETERED threshold_95=      28,500,000 pct=        - state=CLOSED
+client allocation: unavailable (skipped in --dry-run (no D1 access at all))
+dry-run complete; nothing was written
+(exit=0)
+
+## [2] machine JSON spot-check (same run, --json flag)
+$ python scripts/cf_quota_meter_reconcile.py --dry-run --json  (excerpt)
+(exit=0)
+JSON_VALID; circuit rows: 4
+   ai.neurons | state: CLOSED | meter: official | usage: 0.3223763606247042
+   d1.rows_read | state: CLOSED | meter: official | usage: 68382694.0
+   d1.rows_written | state: CLOSED | meter: official | usage: 1505824.0
+   vectorize.queries | state: CLOSED | meter: none | usage: None
+billing: Workers Paid 2026-09-13T15:01:34Z -> 2026-10-13T00:00:00Z
+official d1 days: 19 | ai hour buckets: 6
+vectorize: {'index': 'research-public-bge-m3-v1', 'dimensions': 1024, 'vector_count': 51824, 'processed_up_to_datetime': '2026-09-30T21:20:55.134Z'}
+d1_write: skipped (--dry-run) | report files: []
+
+## [3] official-API-failure downgrade path (bogus token, exit 3, nothing written)
+$ CLOUDFLARE_API_TOKEN=bogus-token-for-failure-path-test python scripts/cf_quota_meter_reconcile.py --dry-run
+WARNING: official Cloudflare API failure; reconcile aborted, quota_circuit_state untouched, nothing zero-filled
+  - subscriptions: HTTP 400 from https://api.cloudflare.com/client/v4/accounts/4b0901ceeeef89ac3b8414d56c50c946/subscriptions: {"success":false,"errors":[{"code":9106,"message":"Authentication failed (status: 400)"}],"messages":[],"result":null}
+
+  - aiInferenceAdaptiveGroups: HTTP 400 from https://api.cloudflare.com/client/v4/graphql: {"success":false,"errors":[{"code":9106,"message":"Authentication failed (status: 400)"}],"messages":[],"result":null}
+
+  - vectorize info: HTTP 400 from https://api.cloudflare.com/client/v4/accounts/4b0901ceeeef89ac3b8414d56c50c946/vectorize/v2/indexes/research-public-bge-m3-v1/info: {"success":false,"errors":[{"code":9106,"message":"Authentication failed (status: 400)"}],"messages":[],"result":null}
+
+(exit=3)
+
+## [4] installer checks
+$ powershell Parser::ParseFile(scripts/install_quota_reconcile_task.ps1)  ->  PS_PARSE_OK
+$ powershell -File scripts/install_quota_reconcile_task.ps1 -Remove (task absent, no-op)
+Task 'QuantPro_QuotaReconcile' not present; nothing to remove.
+(exit=0)
+
+## [5] post-run assertion: dry-run created no files
+README.md
+dryrun-selftest-20261002.txt
