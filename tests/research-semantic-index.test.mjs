@@ -1636,3 +1636,54 @@ test("precomputed vector ingest: gated, hash-checked, dense-ordinal, consistency
 	assert.equal((await drifted.json()).status, "REJECTED", "stale content must not attach");
 });
 
+
+
+test("retention-expired PENDING rows are excluded from the work queue AND from coverage/status", async () => {
+	// Production 2026-10-02: 264 retention-expired PENDING rows kept the index
+	// stuck at PARTIAL and made the queue look permanently stuck (the queue
+	// correctly skipped them, but the counters still counted them as active).
+	const store = storage();
+	const live = documentVersionPayload({
+		documentId: "doc_live_pending",
+		versionId: "ver_live_pending",
+	});
+	await seedVersionRow(store, live);
+	await registerPending(store, live);
+
+	const expired = documentVersionPayload({
+		documentId: "doc_expired_pending",
+		versionId: "ver_expired_pending",
+	});
+	await seedVersionRow(store, expired);
+	await registerPending(store, expired);
+	await store.db
+		.prepare(
+			[
+				"INSERT INTO research_document_retention",
+				"(document_id, visibility, reason, version_ids_json,",
+				" journal_message_ids_json, content_sha256s_json, status, marked_at)",
+				"VALUES (?, 'PUBLIC', 'AGE_90D', ?, ?, ?, 'EXPIRED', ?)",
+			].join(" "),
+		)
+		.bind(
+			"doc_expired_pending",
+			JSON.stringify([expired.payload.version.version_id]),
+			JSON.stringify([]),
+			JSON.stringify([]),
+			NOW,
+		)
+		.run();
+
+	// The work queue serves only the live row.
+	const page = await semantic.listPendingSemanticVersions(store, { state: "PENDING" });
+	assert.equal(page.items.length, 1);
+	assert.equal(page.items[0].document_id, "doc_live_pending");
+
+	// Coverage counts only the live row as active; the expired one stays in
+	// `total` (history) but never inflates `active`.
+	const coverage = await semantic.readSemanticIndexCoverage(store);
+	const pendingState = coverage.states.find((s) => s.state === "PENDING");
+	assert.ok(pendingState, "PENDING state present");
+	assert.equal(pendingState.active, 1, "only the non-expired PENDING row is active");
+	assert.equal(pendingState.total, 2, "both rows counted in total");
+});

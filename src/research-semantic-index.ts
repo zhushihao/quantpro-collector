@@ -681,9 +681,15 @@ export async function deleteSemanticVersionVectors(
 /* ------------------------------------------------------------------ */
 
 async function semanticIndexStatus(storage: SemanticIndexStorage): Promise<"READY" | "PARTIAL"> {
+	// Coverage/status must use the SAME filter as the work-queue page: a row
+	// expired by retention can never be embedded (the queue excludes it), so
+	// counting it as a live PENDING kept the whole index stuck at PARTIAL
+	// forever (production 2026-10-02: 264 retention-expired PENDING rows).
 	const result = await storage.db
 		.prepare(
-			"SELECT state, retired_at, COUNT(*) AS n FROM research_semantic_index_state WHERE visibility='PUBLIC' GROUP BY state, retired_at",
+			`SELECT state, retired_at, COUNT(*) AS n FROM research_semantic_index_state
+			 WHERE visibility='PUBLIC' AND ${NOT_EXPIRED_BY_RETENTION}
+			 GROUP BY state, retired_at`,
 		)
 		.all<{ state: string; retired_at: string | null; n: number }>();
 	let pendingActive = 0;
@@ -882,9 +888,26 @@ export async function readSemanticIndexCoverage(
 ): Promise<SemanticIndexCoverage> {
 	const states = await storage.db
 		.prepare(
-			"SELECT state, retired_at, COUNT(*) AS n, SUM(confirmed_chunks) AS chunks FROM research_semantic_index_state WHERE visibility='PUBLIC' GROUP BY state, retired_at",
+			// One grouped row per (state, retired): `n`/`chunks` are every row
+			// ever; `active_n`/`active_chunks` count only rows the work queue
+			// would serve (not retired AND not retention-expired), so coverage
+			// matches the page instead of parking forever on rows that can never
+			// be embedded (production 2026-10-02: 264 expired PENDING rows kept
+			// the index at PARTIAL and the queue looking permanently stuck).
+			`SELECT state, retired_at, COUNT(*) AS n, SUM(confirmed_chunks) AS chunks,
+			        SUM(CASE WHEN ${NOT_EXPIRED_BY_RETENTION} THEN 1 ELSE 0 END) AS active_n,
+			        SUM(CASE WHEN ${NOT_EXPIRED_BY_RETENTION} THEN confirmed_chunks ELSE 0 END) AS active_chunks
+			 FROM research_semantic_index_state WHERE visibility='PUBLIC'
+			 GROUP BY state, retired_at`,
 		)
-		.all<{ state: string; retired_at: string | null; n: number; chunks: number | null }>();
+		.all<{
+			state: string;
+			retired_at: string | null;
+			n: number;
+			chunks: number | null;
+			active_n: number | null;
+			active_chunks: number | null;
+		}>();
 	const grouped = new Map<string, { active: number; total: number }>();
 	let indexedChunks = 0;
 	for (const row of states.results ?? []) {
@@ -892,8 +915,12 @@ export async function readSemanticIndexCoverage(
 		const bucket = grouped.get(row.state) ?? { active: 0, total: 0 };
 		bucket.total += count;
 		if (row.retired_at === null) {
-			bucket.active += count;
-			if (row.state === "READY") indexedChunks += Number(row.chunks ?? 0);
+			// Active counts only rows the queue would serve: non-retired minus the
+			// retention-expired rows in the same bucket.
+			bucket.active += Number(row.active_n ?? 0);
+			if (row.state === "READY") {
+				indexedChunks += Number(row.active_chunks ?? 0);
+			}
 		}
 		grouped.set(row.state, bucket);
 	}
