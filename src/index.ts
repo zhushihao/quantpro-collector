@@ -128,6 +128,8 @@ import {
 	UsageObserver,
 	createObservedD1,
 	createObservedR2,
+	createObservedAI,
+	createObservedVectorize,
 	legacyBreakerFlag,
 	quotaStatus,
 } from "./quota-breaker.ts";
@@ -797,6 +799,18 @@ function createMcpRequestMetering(
 				RESEARCH_OBJECTS: env.RESEARCH_OBJECTS
 					? createObservedR2(env.RESEARCH_OBJECTS, observer)
 					: env.RESEARCH_OBJECTS,
+				// P1-3 (2026-10-02 ledger): the two paid resources behind
+				// search_documents_semantic that the D1/R2 observers cannot see.
+				AI: env.AI
+					? (createObservedAI(env.AI, observer) as unknown as Env["AI"])
+					: env.AI,
+				RESEARCH_PUBLIC_INDEX: env.RESEARCH_PUBLIC_INDEX
+					? (createObservedVectorize(
+							env.RESEARCH_PUBLIC_INDEX,
+							1024,
+							observer,
+						) as unknown as Env["RESEARCH_PUBLIC_INDEX"])
+					: env.RESEARCH_PUBLIC_INDEX,
 			}
 		: env;
 	return {

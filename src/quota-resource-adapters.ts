@@ -48,9 +48,12 @@ export class UsageObserver {
 	record(dimensionKey: DimensionKey, units: number): void {
 		try {
 			if (!Number.isFinite(units) || units <= 0) return;
+			// Raw float accumulation: ai.neurons arrives as fractional estimates
+			// (<1 neuron per search query) and must not be floored to zero.
+			// Integer dimensions (D1 rows, Vectorize dims) are integers anyway.
 			this.totalsByDimension.set(
 				dimensionKey,
-				(this.totalsByDimension.get(dimensionKey) ?? 0) + Math.floor(units),
+				(this.totalsByDimension.get(dimensionKey) ?? 0) + units,
 			);
 		} catch {
 			// Observation must never break the business call.
@@ -220,4 +223,96 @@ export function createObservedR2(bucket: R2Like, observer?: UsageObserver): R2Bu
 		delete: wrap("delete"),
 		list: wrap("list"),
 	} as unknown as R2Bucket;
+}
+
+// ---------------------------------------------------------------------------
+// Workers AI + Vectorize (P1-3, 2026-10-02 ledger): client-level accounting for
+// the only two paid resources behind mcp:search_documents_semantic that the
+// D1/R2 observers cannot see.  Estimates are labelled as such in reports; the
+// official 12h meter stays the circuit-breaker authority.
+// ---------------------------------------------------------------------------
+
+/** Minimal Workers AI surface used by the semantic search path. */
+interface ObservedAiLike {
+	run(model: string, input: unknown, options?: unknown): Promise<unknown>;
+}
+
+/** Minimal Vectorize surface; only `query` consumes queried-dimension units. */
+interface ObservedVectorizeLike {
+	query(...args: unknown[]): Promise<unknown>;
+}
+
+const NEURONS_PER_MILLION_TOKENS = 1075; // bge-m3 pricing row
+const CHARS_PER_TOKEN_CONSERVATIVE = 2; // over-estimates latin, ~matches CJK
+
+function estimateEmbeddingNeurons(texts: readonly unknown[]): number {
+	const chars = texts.reduce<number>(
+		(total, text) => total + (typeof text === "string" ? text.length : 0),
+		0,
+	);
+	const tokens = Math.max(1, Math.ceil(chars / CHARS_PER_TOKEN_CONSERVATIVE));
+	return (tokens * NEURONS_PER_MILLION_TOKENS) / 1_000_000;
+}
+
+/**
+ * Wraps the Workers AI binding so embedding calls record estimated
+ * `ai.neurons` per request.  Preference order: the response's own usage
+ * counter when the platform provides one, otherwise a conservative
+ * text-volume estimate (never zero, never invented detail).  NEVER throws.
+ */
+export function createObservedAI(ai: ObservedAiLike, observer?: UsageObserver): ObservedAiLike {
+	return new Proxy(ai, {
+		get(target, property, receiver) {
+			const value = Reflect.get(target, property, receiver);
+			if (typeof value !== "function") return value;
+			return async (...args: unknown[]) => {
+				const result = await value.apply(target, args);
+				try {
+					const model = String(args[0] ?? "");
+					if (model.includes("bge")) {
+						const input = (args[1] as { text?: unknown } | undefined)?.text;
+						const texts = Array.isArray(input) ? input : [input];
+						const usage = (result as { usage?: { tokens?: unknown } } | undefined)?.usage;
+						const reported = Number(usage?.tokens);
+						const neurons = Number.isFinite(reported)
+							? (reported * NEURONS_PER_MILLION_TOKENS) / 1_000_000
+							: estimateEmbeddingNeurons(texts);
+						if (neurons > 0) observer?.record("ai.neurons", neurons);
+					}
+				} catch {
+					// Observation must never break the business call.
+				}
+				return result;
+			};
+		},
+	}) as ObservedAiLike;
+}
+
+/**
+ * Wraps the Vectorize index so each `query` records one queried-dimensions
+ * unit (the index dimensionality x exactly one query per call).  Deletes and
+ * inserts are storage-side operations, not queried dimensions.
+ */
+export function createObservedVectorize(
+	index: ObservedVectorizeLike,
+	dimensions: number,
+	observer?: UsageObserver,
+): ObservedVectorizeLike {
+	return new Proxy(index, {
+		get(target, property, receiver) {
+			const value = Reflect.get(target, property, receiver);
+			if (property === "query" && typeof value === "function") {
+				return async (...args: unknown[]) => {
+					const result = await value.apply(target, args);
+					try {
+						if (dimensions > 0) observer?.record("vectorize.queried_dims", dimensions);
+					} catch {
+						// Observation must never break the business call.
+					}
+					return result;
+				};
+			}
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	}) as ObservedVectorizeLike;
 }

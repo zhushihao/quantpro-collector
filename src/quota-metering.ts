@@ -73,13 +73,14 @@ function sumDimension(observed: readonly ObservedDimension[], key: string): numb
 
 const UPSERT_USAGE_SQL = `
 INSERT INTO quota_client_usage_hourly
-	(period_hour, client_id, route, call_count, d1_rows_read, d1_rows_written, ai_neurons, created_at, updated_at)
-VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+	(period_hour, client_id, route, call_count, d1_rows_read, d1_rows_written, ai_neurons, vectorize_queries, created_at, updated_at)
+VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(period_hour, client_id, route) DO UPDATE SET
 	call_count = call_count + 1,
 	d1_rows_read = d1_rows_read + excluded.d1_rows_read,
 	d1_rows_written = d1_rows_written + excluded.d1_rows_written,
 	ai_neurons = ai_neurons + excluded.ai_neurons,
+	vectorize_queries = vectorize_queries + excluded.vectorize_queries,
 	updated_at = excluded.updated_at
 `;
 
@@ -112,7 +113,12 @@ export async function recordClientUsage(
 			input.route,
 			sumDimension(input.observed, "d1.rows_read"),
 			sumDimension(input.observed, "d1.rows_written"),
+			// Estimated in-process (platform usage counter when present, else
+			// conservative text-volume pricing); the 12h official meter stays
+			// the circuit-breaker authority.
 			sumDimension(input.observed, "ai.neurons"),
+			// queried dimensions / 1024 = one query unit per search call.
+			sumDimension(input.observed, "vectorize.queried_dims") / 1024,
 			nowIso,
 			nowIso,
 		)

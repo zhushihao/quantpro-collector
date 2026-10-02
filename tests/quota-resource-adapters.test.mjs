@@ -239,5 +239,7 @@ test("non-finite and non-positive readings are ignored, never booked", () => {
 	observer.record("d1.rows_read", 0);
 	observer.record("d1.rows_read", -5);
 	observer.record("d1.rows_written", 2.9);
-	assert.deepEqual(totals(observer), new Map([["d1.rows_written", 2]]));
+	// Fractional units accumulate raw since 2026-10-02 (P1-3): ai.neuron
+	// estimates are sub-1.0 and must not floor to zero.  D1 metas stay int.
+	assert.deepEqual(totals(observer), new Map([["d1.rows_written", 2.9]]));
 });

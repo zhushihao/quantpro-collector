@@ -93,7 +93,7 @@ DIMENSIONS = {
     },
     # Spec contract key.  src/quota-dimensions.ts names it vectorize.queried_dims
     # with a 50M allowance; the reconcile follows the spec's 30M/month figure.
-    "vectorize.queries": {
+    "vectorize.queried_dims": {
         "included": 30_000_000,        # queried vector dimensions / billing cycle
         "threshold_95": 28_500_000,
         "window": "billing_cycle",
@@ -105,7 +105,7 @@ METERED = {
     "ai.neurons": True,
     "d1.rows_read": True,
     "d1.rows_written": True,
-    "vectorize.queries": False,
+    "vectorize.queried_dims": False,
 }
 UNMETERED_SENTINEL = -1.0
 

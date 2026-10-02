@@ -92,8 +92,10 @@ export {
 
 export {
 	UsageObserver,
+	createObservedAI,
 	createObservedD1,
 	createObservedR2,
+	createObservedVectorize,
 	type ObservedDimension,
 	type QuotaObservationSink,
 } from "./quota-resource-adapters.ts";

@@ -50,6 +50,7 @@ const MIGRATION_PREFIXES = [
 	"0019",
 	"0020",
 	"0021",
+	"0022",
 ];
 
 /** The frozen migration chain, concatenated in order. */

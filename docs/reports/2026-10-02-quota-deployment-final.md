@@ -1,3 +1,6 @@
+> **[历史快照 2026-10-02]** 本报告记录的是并行实现线（软老化方案）的交付状态，该方案已被 #54 终稿重构取代（全拆前置闸 + 分端记账 + cf_quota_meter_reconcile.py 对账）。
+> 当前权威状态：任务 `QuantPro_QuotaReconcile`（本文件的 QuantPro_QuotaAutoReconcile 已删除）、部署 SHA 见 DEPLOYED_GIT_SHA 绑定。本文件仅作历史审计证据保留。
+
 # 配额熔断解耦 · 自动对账 · 生产部署 最终交付文档
 
 **Issue**：[`zhushihao/quantpro-collector#54`](https://github.com/zhushihao/quantpro-collector/issues/54)

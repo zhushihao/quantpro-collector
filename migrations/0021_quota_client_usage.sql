@@ -52,7 +52,11 @@ CREATE INDEX IF NOT EXISTS idx_quota_usage_hour ON quota_client_usage_hourly (pe
 CREATE TABLE IF NOT EXISTS quota_circuit_state (
 	dimension_key TEXT PRIMARY KEY, -- ai.neurons | vectorize.queried_dims | d1.rows_read | ...
 	state TEXT NOT NULL CHECK (state IN ('CLOSED', 'OPEN')),
-	current_usage REAL NOT NULL CHECK (current_usage >= 0), -- official meter truth
+	-- Official meter truth; -1 sentinel = the dimension has NO official meter
+	-- (e.g. Vectorize query counts): reconcile writes the sentinel, keeps the
+	-- row CLOSED and never trips the gate on it.  Not a non-negative CHECK on
+	-- purpose -- the sentinel must be storable (P1-2 contract, 2026-10-02).
+	current_usage REAL NOT NULL,
 	threshold_95 REAL NOT NULL CHECK (threshold_95 >= 0), -- the 95% line that tripped
 	as_of TEXT NOT NULL, -- reconcile timestamp the values were read at
 	updated_at TEXT NOT NULL

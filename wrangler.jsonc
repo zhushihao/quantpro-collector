@@ -53,7 +53,7 @@
 		// "30 20 * * *" is the daily PUBLIC document retention sweep
 		// (src/research-retention.ts, owner ruling 2026-09-29: 90 days, E02 all expired).
 		// Workers Free caps cron triggers at 5/account (code 10072): the two hour-7
-		// entries are packed into one expression so all six schedules fit in 5 triggers.
+		// six schedules on the Workers Paid plan (the 5-trigger cap is Free-tier only).
 		"crons": [
 			"55 0 * * mon-fri",
 			"39,44,49 1,2,3,5,6 * * mon-fri",
