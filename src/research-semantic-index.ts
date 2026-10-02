@@ -58,11 +58,12 @@ export const SEMANTIC_QUERY_OVERFETCH_FACTOR = 4;
  */
 export const SEMANTIC_QUERY_OVERFETCH_MAX = 50;
 /**
- * `indexed` retrieval is the free level and returns exactly the short PUBLIC
- * identifiers this module attaches at upsert time; `all` would pay extra reads
- * for un-indexed metadata the semantic face never stores.
+ * `all` retrieval returns the metadata attached at upsert time.  `indexed`
+ * requires configured metadataIndexes on the Vectorize index; without them
+ * Vectorize returns `metadata: null` and every hit was silently dropped.
+ * (Discovered via live probe 2026-10-02).
  */
-export const SEMANTIC_METADATA_RETRIEVAL = "indexed";
+export const SEMANTIC_METADATA_RETRIEVAL = "all";
 export const SEMANTIC_SNIPPET_CHARS = 240;
 export const SEMANTIC_TITLE_CHARS = 200;
 export const SEMANTIC_VECTOR_ID_PREFIX = "rsv1_";
