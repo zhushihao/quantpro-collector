@@ -1697,7 +1697,7 @@ export function createServer(
 		"submit_run_envelope",
 		{
 			description:
-				"定时任务单次交件：一次调用同时完成本轮登记与内容落账。提交 task_name + 人话 summary + 可选 channel_payload；无新增时省略 channel_payload（空包=心跳）。业务门禁在写入前拦下本轮时改交 blocked_by（窄枚举，服务端记 BLOCKED/PRE_WRITE:*）；只读任务用 observations.fresh_count 申报观察新增（服务端计入通知门）。两者均不得与 channel_payload 同交。Collector 服务端在一个调用内完成：幂等、通道校验、账本写入、运行终态派生、fresh 计数与通知门判定，并全部回执给模型。禁止携带 write_key/producer/schema_version/event_id 等服务器字段。",
+				"定时任务单次交件，写入目的地由 Collector 固定映射，调用方不能指定 repo、issue、URL、credential 或其他外部目标。提交 task_name + 人话 summary + 可选 channel_payload：不带 channel_payload 的空心跳只记录本轮运行审计/终态，不追加 INDUSTRY/COMPANY/CLOSE/MARKET 业务账本；带 channel_payload 时才按 task/channel 固定映射追加对应业务账本，并同时记录本轮运行审计。业务门禁在写入前拦下本轮时可交 blocked_by（窄枚举，服务端记 BLOCKED/PRE_WRITE:*）；只读任务可用 observations.fresh_count 申报观察新增（服务端计入通知门），两者均不得与 channel_payload 同交。该工具不修改、暂停、停用或删除 Automation，也不执行删除/覆盖式业务写入。Collector 服务端在一个调用内完成幂等、通道校验、追加式账本写入、运行终态派生、fresh 计数与通知门判定，并全部回执给模型。禁止携带 write_key/producer/schema_version/event_id 等服务器字段。",
 			inputSchema: SUBMIT_RUN_ENVELOPE_INPUT_SCHEMA,
 			annotations: {
 				readOnlyHint: false,
