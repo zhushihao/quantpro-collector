@@ -375,6 +375,22 @@ test("State Gateway MCP exposes narrow tools without caller-controlled external 
 		assert.equal(tools.submit_run_envelope.annotations.destructiveHint, false);
 		assert.equal(tools.submit_run_envelope.annotations.idempotentHint, true);
 		assert.equal(tools.submit_run_envelope.annotations.openWorldHint, false);
+		const envelopeDescription = tools.submit_run_envelope.description;
+		for (const fragment of [
+			"写入目的地由 Collector 固定映射",
+			"空心跳只记录本轮运行审计/终态",
+			"不追加 INDUSTRY/COMPANY/CLOSE/MARKET 业务账本",
+			"带 channel_payload 时才",
+			"固定映射追加对应业务账本",
+			"不能指定 repo、issue、URL、credential 或其他外部目标",
+			"不修改、暂停、停用或删除 Automation",
+			"追加式账本写入",
+		]) {
+			assert.ok(
+				envelopeDescription.includes(fragment),
+				`submit_run_envelope description must disclose: ${fragment}`,
+			);
+		}
 		const envelopeSchema = tools.submit_run_envelope.inputSchema;
 		assert.equal(
 			envelopeSchema.additionalProperties,
